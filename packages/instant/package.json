@@ -1,5 +1,5 @@
 {
-  "name": "@svelte-essentials/ui",
+  "name": "@svelte-essentials/instant",
   "version": "0.1.0",
   "type": "module",
   "publishConfig": {
@@ -18,12 +18,16 @@
     }
   },
   "peerDependencies": {
+    "@instantdb/svelte": "^0.22.165",
     "svelte": "^5.0.0"
+  },
+  "devDependencies": {
+    "@instantdb/svelte": "^0.22.165"
   },
   "scripts": {
     "build": "svelte-package --input ./src --output ./dist",
-    "check": "svelte-check --tsconfig ./tsconfig.json",
-    "lint": "publint --strict --pack npm",
+    "check": "tsc --project tsconfig.json --noEmit",
+    "lint": "bun run build && publint --strict --pack npm",
     "clean": "rm -rf dist"
   }
 }

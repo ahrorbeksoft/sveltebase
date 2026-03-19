@@ -9,8 +9,8 @@
   ],
   "scripts": {
     "build": "bun run ./scripts/run-workspace-script.mjs build",
-    "check": "bun run ./scripts/run-workspace-script.mjs check",
-    "lint": "bun run ./scripts/run-workspace-script.mjs lint",
+    "check": "bun run build && bun run ./scripts/run-workspace-script.mjs check",
+    "lint": "bun run build && bun run ./scripts/run-workspace-script.mjs lint",
     "clean": "bun run ./scripts/run-workspace-script.mjs clean",
     "release:version": "bun run ./scripts/version.mjs",
     "release:publish": "bun run ./scripts/publish.mjs"

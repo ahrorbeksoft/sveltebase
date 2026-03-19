@@ -1,14 +1,14 @@
-# Svelte Essentials Monorepo
+# Svelte Essentials
 
-A Bun-based monorepo for private Svelte packages with one shared version across every workspace package.
+A Bun workspace for Svelte packages.
 
 ## What this gives you
 
-- `packages/ui`: a Svelte component package
-- `packages/utils`: a plain TypeScript utility package
-- `packages/all`: an umbrella package that re-exports everything
-- one release version for every package
-- Bun for install, workspace scripts, and version management
+- `packages/utils`: a Svelte utility package with helpers for cookies, async flows, keyed async state helpers, and direct `svelte-sonner` toast notifications
+- `packages/state`: a Svelte rune-based state package
+- `packages/i18n`: locale state, translation, and formatting helpers
+- `packages/instant`: generic InstantDB query helpers for Svelte
+- Bun for installation, workspace scripts, and release management
 
 ## Install
 
@@ -24,9 +24,9 @@ bun run check
 bun run lint
 ```
 
-## Release every package with the same version
+## Release packages
 
-Bump every workspace package together:
+Update package versions:
 
 ```bash
 bun run release:version patch
@@ -52,20 +52,35 @@ You can forward `npm publish` flags:
 bun run release:publish -- --dry-run
 ```
 
-## Install patterns
+## Install
 
-Install everything:
-
-```bash
-bun add @svelte-essentials/all
-```
-
-Install packages one by one:
+Add the packages you need:
 
 ```bash
-bun add @svelte-essentials/ui
+bun add @svelte-essentials/instant
+bun add @svelte-essentials/i18n
+bun add @svelte-essentials/state
 bun add @svelte-essentials/utils
 ```
+
+## InstantDB helper pattern
+
+The `@svelte-essentials/instant` package exposes `createInstantHelpers(db)` so an app can bind the helpers to its own InstantDB client and re-export them:
+
+```ts
+import { init } from "@instantdb/svelte";
+import { createInstantHelpers } from "@svelte-essentials/instant";
+import schema from "./instant.schema";
+
+export const db = init({
+  appId: process.env.PUBLIC_INSTANT_APP_ID!,
+  schema,
+});
+
+export const { queryOnce, useQuery, prefetchQuery } = createInstantHelpers(db);
+```
+
+That keeps the package generic while giving each app a simple local API surface.
 
 ## Registry setup
 
@@ -74,5 +89,6 @@ Copy `.npmrc.example` to `.npmrc` and replace the scope or registry if you use s
 ## Notes
 
 - All package names use the `@svelte-essentials/*` scope as a starting point. Rename that scope everywhere if you want your own namespace.
-- The root package version is the source of truth. `release:version` syncs every workspace package and internal dependency to that same value.
+- `@svelte-essentials/utils` depends directly on `svelte-sonner` and uses its `toast` API for notifications.
+- `release:version` updates workspace package versions and internal dependency ranges together.
 - Bun `1.1.26` does not expose `bun publish`, so the publish script uses `npm publish` under the hood.

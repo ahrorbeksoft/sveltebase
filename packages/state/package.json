@@ -1,5 +1,5 @@
 {
-  "name": "@svelte-essentials/utils",
+  "name": "@svelte-essentials/state",
   "version": "0.1.0",
   "type": "module",
   "publishConfig": {
@@ -17,15 +17,12 @@
       "default": "./dist/index.js"
     }
   },
-  "peerDependencies": {
-    "svelte": "^5.0.0",
-    "svelte-sonner": "^1.0.5"
-  },
   "dependencies": {
-    "esm-env": "^1.2.2"
+    "@svelte-essentials/utils": "0.1.0",
+    "zod": "^4.1.11"
   },
-  "devDependencies": {
-    "svelte-sonner": "^1.0.5"
+  "peerDependencies": {
+    "svelte": "^5.0.0"
   },
   "scripts": {
     "build": "svelte-package --input ./src --output ./dist",
