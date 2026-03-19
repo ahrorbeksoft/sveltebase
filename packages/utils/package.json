@@ -1,0 +1,26 @@
+{
+  "name": "@svelte-essentials/utils",
+  "version": "0.1.0",
+  "type": "module",
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "check": "tsc --project tsconfig.json --noEmit",
+    "lint": "publint --strict --pack npm",
+    "clean": "rm -rf dist"
+  }
+}
