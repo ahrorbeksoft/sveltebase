@@ -1,10 +1,20 @@
-export { createI18n, defineLanguages } from "./create-i18n.js";
 export {
-  createFormatForLocale,
-  createLocaleFormatter,
-  createLocaleTranslator,
-  getLanguage
-} from "./utils.js";
+  createI18n,
+  getTranslations,
+  getFormat
+} from "./create-i18n.js";
+
+export type {
+  CreateI18nReturn,
+  CurrentLanguage,
+  Format,
+  I18nInstance,
+  LocaleCode,
+  MessageKey,
+  RegisteredMessages,
+  Translate,
+  TranslationValues
+} from "./create-i18n.js";
 
 export type {
   FormatOptions,

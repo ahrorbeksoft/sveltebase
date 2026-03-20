@@ -1,54 +1,66 @@
+import type { InstaQLParams, InstaQLResult, ValidQuery } from "@instantdb/svelte";
+import { createInstantAuth } from "./auth.svelte.js";
 import type {
-  InstantQuery,
-  InstantQueryResult,
-  InstantSvelteDatabase,
-} from "@instantdb/svelte";
-
-export type SubscribeQueryResponse<
-  TDatabase extends InstantSvelteDatabase<any, any>,
-  TQuery extends InstantQuery<TDatabase>
-> = {
-  data?: InstantQueryResult<TDatabase, TQuery>;
-  error?: unknown;
-};
-
-export type InstantQueryClient = InstantSvelteDatabase<any, any>;
-
-export type QueryState<
-  TDatabase extends InstantSvelteDatabase<any, any>,
-  TQuery extends InstantQuery<TDatabase>
-> = {
-  isLoading: boolean;
-  data: InstantQueryResult<TDatabase, TQuery> | null;
-};
+  BoundInstantAuth,
+  InferDatabaseSchema,
+  InstantAuthOptions,
+  InstantQueryClient,
+  MaybeGetter,
+  QueryState,
+  SubscribeQueryResponse
+} from "./types.js";
 
 export interface BoundInstantHelpers<TDatabase extends InstantQueryClient> {
-  queryOnce<TQuery extends InstantQuery<TDatabase>>(
+  auth: BoundInstantAuth<TDatabase>;
+  queryOnce<TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>>(
     query: TQuery,
     timeoutMs?: number
-  ): Promise<InstantQueryResult<TDatabase, TQuery>>;
-  useQuery<TQuery extends InstantQuery<TDatabase>>(
+  ): Promise<InstaQLResult<InferDatabaseSchema<TDatabase>, TQuery>>;
+  useQuery<TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>>(
     queryInput: MaybeGetter<TQuery | null>,
-    initialData?: MaybeGetter<InstantQueryResult<TDatabase, TQuery> | null>
-  ): QueryState<TDatabase, TQuery>;
-  prefetchQuery<TQuery extends InstantQuery<TDatabase>>(
+    initialData?: MaybeGetter<InstaQLResult<InferDatabaseSchema<TDatabase>, TQuery> | null>
+  ): QueryState<InferDatabaseSchema<TDatabase>, TQuery>;
+  prefetchQuery<TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>>(
     query: TQuery,
     fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
     endpoint?: string
-  ): Promise<InstantQueryResult<TDatabase, TQuery> | null>;
+  ): Promise<InstaQLResult<InferDatabaseSchema<TDatabase>, TQuery> | null>;
 }
 
-type MaybeGetter<T> = T | (() => T);
+export interface CreateInstantHelpersOptions {
+  auth?: InstantAuthOptions;
+}
+
+function subscribeQuery<
+  TDatabase extends InstantQueryClient,
+  TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>
+>(
+  db: TDatabase,
+  query: TQuery,
+  onResponse: (
+    response: SubscribeQueryResponse<InferDatabaseSchema<TDatabase>, TQuery>
+  ) => void
+): () => void {
+  const validQuery =
+    query as unknown as Parameters<TDatabase["core"]["subscribeQuery"]>[0] &
+      ValidQuery<TQuery, InferDatabaseSchema<TDatabase>>;
+
+  const callback = ((response: unknown) => {
+    onResponse(response as SubscribeQueryResponse<InferDatabaseSchema<TDatabase>, TQuery>);
+  }) as Parameters<TDatabase["core"]["subscribeQuery"]>[1];
+
+  return db.core.subscribeQuery(validQuery, callback);
+}
 
 export async function queryOnce<
   TDatabase extends InstantQueryClient,
-  TQuery extends InstantQuery<TDatabase>
+  TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>
 >(
   db: TDatabase,
   query: TQuery,
   timeoutMs = 5000
-): Promise<InstantQueryResult<TDatabase, TQuery>> {
-  return new Promise((resolve, reject) => {
+): Promise<InstaQLResult<InferDatabaseSchema<TDatabase>, TQuery>> {
+  const result = await new Promise<unknown>((resolve, reject) => {
     let unsubscribe: (() => void) | undefined;
     let settled = false;
 
@@ -67,14 +79,14 @@ export async function queryOnce<
       finish(() => reject(new Error("InstantDB query timed out")));
     }, timeoutMs);
 
-    unsubscribe = db.core.subscribeQuery(query, (response) => {
+    unsubscribe = subscribeQuery(db, query, (response) => {
       if (response.error) {
         finish(() => reject(normalizeError(response.error)));
         return;
       }
 
       if (response.data !== undefined) {
-        finish(() => resolve(response.data as InstantQueryResult<TDatabase, TQuery>));
+        finish(() => resolve(response.data));
       }
     });
 
@@ -82,18 +94,21 @@ export async function queryOnce<
       unsubscribe?.();
     }
   });
+
+  return result as InstaQLResult<InferDatabaseSchema<TDatabase>, TQuery>;
 }
 
 export function useQuery<
   TDatabase extends InstantQueryClient,
-  TQuery extends InstantQuery<TDatabase>
+  TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>
 >(
   db: TDatabase,
   queryInput: MaybeGetter<TQuery | null>,
-  initialData?: MaybeGetter<InstantQueryResult<TDatabase, TQuery> | null>
-) {
+  initialData?: MaybeGetter<InstaQLResult<InferDatabaseSchema<TDatabase>, TQuery> | null>
+): QueryState<InferDatabaseSchema<TDatabase>, TQuery> {
   const initial = unwrap(initialData) ?? null;
-  const state = $state<QueryState<TDatabase, TQuery>>({
+
+  const state = $state<QueryState<InferDatabaseSchema<TDatabase>, TQuery>>({
     isLoading: initial == null,
     data: initial
   });
@@ -102,17 +117,22 @@ export function useQuery<
     const query = unwrap(queryInput);
 
     if (!query) {
+      state.isLoading = false;
+      state.data = initial;
       return;
     }
 
-    return db.core.subscribeQuery(query, (response) => {
+    state.isLoading = state.data == null;
+
+    return subscribeQuery(db, query, (response) => {
       if (response.error) {
         throw normalizeError(response.error);
       }
 
       if (response.data !== undefined) {
         state.isLoading = false;
-        state.data = response.data as InstantQueryResult<TDatabase, TQuery>;
+        state.data =
+          response.data as unknown as InstaQLResult<InferDatabaseSchema<TDatabase>, TQuery>;
       }
     });
   });
@@ -122,36 +142,53 @@ export function useQuery<
 
 export async function prefetchQuery<
   TDatabase extends InstantQueryClient,
-  TQuery extends InstantQuery<TDatabase>
+  TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>
 >(
   db: TDatabase,
   query: TQuery,
   fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
-  endpoint = "/api/query"
-): Promise<InstantQueryResult<TDatabase, TQuery> | null> {
+  endpoint = "/api/instant/query"
+): Promise<InstaQLResult<InferDatabaseSchema<TDatabase>, TQuery> | null> {
   if (typeof window !== "undefined") {
-    return queryOnce(db, query);
+    return (await queryOnce(db, query)) as unknown as InstaQLResult<
+      InferDatabaseSchema<TDatabase>,
+      TQuery
+    >;
   }
 
   const response = await fetcher(endpoint, {
     method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify({ query })
   });
 
-  return response.ok ? ((await response.json()) as InstantQueryResult<TDatabase, TQuery>) : null;
+  if (!response.ok) {
+    return null;
+  }
+
+  return (await response.json()) as unknown as InstaQLResult<
+    InferDatabaseSchema<TDatabase>,
+    TQuery
+  >;
 }
 
 export function createInstantHelpers<TDatabase extends InstantQueryClient>(
-  db: TDatabase
+  db: TDatabase,
+  options: CreateInstantHelpersOptions = {}
 ): BoundInstantHelpers<TDatabase> {
   return {
-    queryOnce: <TQuery extends InstantQuery<TDatabase>>(query: TQuery, timeoutMs?: number) =>
-      queryOnce(db, query, timeoutMs),
-    useQuery: <TQuery extends InstantQuery<TDatabase>>(
+    auth: createInstantAuth(db, options.auth),
+    queryOnce: <TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>>(
+      query: TQuery,
+      timeoutMs?: number
+    ) => queryOnce(db, query, timeoutMs),
+    useQuery: <TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>>(
       queryInput: MaybeGetter<TQuery | null>,
-      initialData?: MaybeGetter<InstantQueryResult<TDatabase, TQuery> | null>
+      initialData?: MaybeGetter<InstaQLResult<InferDatabaseSchema<TDatabase>, TQuery> | null>
     ) => useQuery(db, queryInput, initialData),
-    prefetchQuery: <TQuery extends InstantQuery<TDatabase>>(
+    prefetchQuery: <TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>>(
       query: TQuery,
       fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
       endpoint?: string
@@ -163,6 +200,6 @@ function unwrap<T>(value: MaybeGetter<T> | undefined): T | undefined {
   return typeof value === "function" ? (value as () => T)() : value;
 }
 
-function normalizeError(error: unknown) {
+function normalizeError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }

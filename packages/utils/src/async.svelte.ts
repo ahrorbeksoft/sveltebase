@@ -1,5 +1,4 @@
-import { DEV } from "esm-env";
-import { toast } from "svelte-sonner";
+import { BROWSER, DEV } from "esm-env";
 import { SvelteMap } from "svelte/reactivity";
 
 export type TryCatchReturn =
@@ -9,6 +8,39 @@ export type TryCatchReturn =
   | void;
 
 const GLOBAL_KEY = "__global__";
+
+type ToastModule = typeof import("svelte-sonner");
+let toastModulePromise: Promise<ToastModule | null> | null = null;
+
+async function getToastModule(): Promise<ToastModule | null> {
+  if (!BROWSER) {
+    return null;
+  }
+
+  if (!toastModulePromise) {
+    toastModulePromise = import("svelte-sonner")
+      .then((module) => module)
+      .catch((error) => {
+        if (DEV) {
+          console.error("[createAsync] Failed to load svelte-sonner:", error);
+        }
+
+        return null;
+      });
+  }
+
+  return toastModulePromise;
+}
+
+async function toastSuccess(message: string) {
+  const toastModule = await getToastModule();
+  toastModule?.toast.success(message);
+}
+
+async function toastError(message: string, description?: string) {
+  const toastModule = await getToastModule();
+  toastModule?.toast.error(message, description ? { description } : undefined);
+}
 
 export function createAsync<T extends (...args: any[]) => Promise<TryCatchReturn> | Promise<void>>(
   asyncFn: T
@@ -24,9 +56,9 @@ export function createAsync<T extends (...args: any[]) => Promise<TryCatchReturn
       const response = await asyncFn(...args);
 
       if (response?.success) {
-        toast.success(response.success);
+        await toastSuccess(response.success);
       } else if (response?.error) {
-        toast.error(response.error);
+        await toastError(response.error);
       }
 
       return response;
@@ -35,10 +67,10 @@ export function createAsync<T extends (...args: any[]) => Promise<TryCatchReturn
       error = e;
 
       if (DEV) {
-        toast.error(e.name, { description: e.message });
+        await toastError(e.name, e.message);
         console.error("[Dev Error]:", e);
       } else {
-        toast.error("Something went wrong");
+        await toastError("Something went wrong");
       }
 
       throw e;

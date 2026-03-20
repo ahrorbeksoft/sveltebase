@@ -1,9 +1,9 @@
 {
-  "name": "@svelte-essentials/state",
-  "version": "0.1.0",
+  "name": "@sveltebase/state",
+  "version": "0.2.0",
   "type": "module",
   "publishConfig": {
-    "access": "restricted"
+    "access": "public"
   },
   "files": [
     "dist"
@@ -18,7 +18,7 @@
     }
   },
   "dependencies": {
-    "@svelte-essentials/utils": "0.1.0",
+    "@sveltebase/utils": "0.2.0",
     "zod": "^4.1.11"
   },
   "peerDependencies": {

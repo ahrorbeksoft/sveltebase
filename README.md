@@ -57,19 +57,19 @@ bun run release:publish -- --dry-run
 Add the packages you need:
 
 ```bash
-bun add @svelte-essentials/instant
-bun add @svelte-essentials/i18n
-bun add @svelte-essentials/state
-bun add @svelte-essentials/utils
+bun add @sveltebase/instant
+bun add @sveltebase/i18n
+bun add @sveltebase/state
+bun add @sveltebase/utils
 ```
 
 ## InstantDB helper pattern
 
-The `@svelte-essentials/instant` package exposes `createInstantHelpers(db)` so an app can bind the helpers to its own InstantDB client and re-export them:
+The `@sveltebase/instant` package exposes `createInstantHelpers(db)` so an app can bind the helpers to its own InstantDB client and re-export them:
 
 ```ts
 import { init } from "@instantdb/svelte";
-import { createInstantHelpers } from "@svelte-essentials/instant";
+import { createInstantHelpers } from "@sveltebase/instant";
 import schema from "./instant.schema";
 
 export const db = init({
@@ -88,7 +88,7 @@ Copy `.npmrc.example` to `.npmrc` and replace the scope or registry if you use s
 
 ## Notes
 
-- All package names use the `@svelte-essentials/*` scope as a starting point. Rename that scope everywhere if you want your own namespace.
-- `@svelte-essentials/utils` depends directly on `svelte-sonner` and uses its `toast` API for notifications.
+- All package names use the `@sveltebase/*` scope.
+- `@sveltebase/utils` depends directly on `svelte-sonner` and uses its `toast` API for notifications.
 - `release:version` updates workspace package versions and internal dependency ranges together.
 - Bun `1.1.26` does not expose `bun publish`, so the publish script uses `npm publish` under the hood.

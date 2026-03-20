@@ -1,9 +1,9 @@
 {
-  "name": "@svelte-essentials/utils",
-  "version": "0.1.0",
+  "name": "@sveltebase/utils",
+  "version": "0.2.0",
   "type": "module",
   "publishConfig": {
-    "access": "restricted"
+    "access": "public"
   },
   "files": [
     "dist"

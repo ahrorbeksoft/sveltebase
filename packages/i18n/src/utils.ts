@@ -1,4 +1,6 @@
-import { createFormatter, createTranslator } from "use-intl/core";
+import { createFormatter, createTranslator, type AppConfig } from "use-intl/core";
+
+
 import { SvelteDate } from "svelte/reactivity";
 import {
   differenceInMinutes,

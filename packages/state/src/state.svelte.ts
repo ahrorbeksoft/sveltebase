@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Cookies } from "@svelte-essentials/utils";
+import { Cookies } from "@sveltebase/utils";
 
 export class PersistentState<TSchema extends z.ZodTypeAny> {
   #value = $state<z.output<TSchema>>();

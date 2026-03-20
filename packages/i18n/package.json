@@ -1,9 +1,9 @@
 {
-  "name": "@svelte-essentials/i18n",
-  "version": "0.1.0",
+  "name": "@sveltebase/i18n",
+  "version": "0.2.0",
   "type": "module",
   "publishConfig": {
-    "access": "restricted"
+    "access": "public"
   },
   "files": [
     "dist"
@@ -18,7 +18,7 @@
     }
   },
   "dependencies": {
-    "@svelte-essentials/state": "0.1.0",
+    "@sveltebase/state": "0.2.0",
     "date-fns": "^4.1.0",
     "use-intl": "^4.4.0",
     "zod": "^4.1.11"
