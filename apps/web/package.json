@@ -1,6 +1,6 @@
 {
   "name": "@sveltebase/web",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,10 +13,10 @@
   "dependencies": {
     "@instantdb/admin": "^0.22.165",
     "@instantdb/svelte": "^0.22.165",
-    "@sveltebase/i18n": "0.2.0",
-    "@sveltebase/instant": "0.2.0",
-    "@sveltebase/state": "0.2.0",
-    "@sveltebase/utils": "0.2.0",
+    "@sveltebase/i18n": "0.2.1",
+    "@sveltebase/instant": "0.2.1",
+    "@sveltebase/state": "0.2.1",
+    "@sveltebase/utils": "0.2.1",
     "svelte": "^5.54.0"
   },
   "devDependencies": {

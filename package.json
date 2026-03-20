@@ -1,6 +1,6 @@
 {
-  "name": "svelte-essentials-workspace",
-  "version": "0.2.0",
+  "name": "sveltebase-workspace",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.1.26",
@@ -118,13 +118,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ahrorbeksoft/svelte-essentials.git"
+    "url": "git+https://github.com/ahrorbeksoft/sveltebase.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/ahrorbeksoft/svelte-essentials/issues"
+    "url": "https://github.com/ahrorbeksoft/sveltebase/issues"
   },
-  "homepage": "https://github.com/ahrorbeksoft/svelte-essentials#readme"
+  "homepage": "https://github.com/ahrorbeksoft/sveltebase#readme"
 }
