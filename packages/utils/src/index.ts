@@ -1,5 +1,5 @@
 import { DEV } from "esm-env";
-import { SvelteMap } from "svelte/reactivity";
+
 
 export interface CookieOptions {
   expires?: number;
@@ -118,11 +118,8 @@ export function timestamps<T extends boolean>(
   return (updateOnly ? { updatedAt: date } : { createdAt: date, updatedAt: date }) as any;
 }
 
-export type TryCatchReturn =
-  | { success: string; error?: never }
-  | { error: string; success?: never }
-  | null
-  | void;
+import type { TryCatchReturn } from "./async.svelte.js";
+export type { TryCatchReturn } from "./async.svelte.js";
 
 export async function tryCatch(task: () => Promise<TryCatchReturn> | TryCatchReturn) {
   try {
@@ -146,61 +143,4 @@ export async function tryCatch(task: () => Promise<TryCatchReturn> | TryCatchRet
 
 export const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const GLOBAL_KEY = "__global__";
-
-export function createAsync<T extends (...args: any[]) => Promise<TryCatchReturn> | Promise<void>>(
-  asyncFn: T
-) {
-  const loadingStates = $state(new SvelteMap<string, boolean>());
-  let error = $state<Error | null>(null);
-
-  async function execute(id: string, args: Parameters<T>) {
-    try {
-      loadingStates.set(id, true);
-      error = null;
-
-      const response = await asyncFn(...args);
-
-      if (response?.success) {
-        await toastSuccess(response.success);
-      } else if (response?.error) {
-        await toastError(response.error);
-      }
-
-      return response;
-    } catch (err) {
-      const e = err instanceof Error ? err : new Error(String(err));
-      error = e;
-
-      if (DEV) {
-        await toastError(e.name, { description: e.message });
-        console.error("[Dev Error]:", e);
-      } else {
-        await toastError("Something went wrong");
-      }
-
-      throw e;
-    } finally {
-      loadingStates.set(id, false);
-    }
-  }
-
-  async function run(...args: Parameters<T>) {
-    return execute(GLOBAL_KEY, args);
-  }
-
-  async function runWithKey(key: string, ...args: Parameters<T>) {
-    return execute(key || GLOBAL_KEY, args);
-  }
-
-  return {
-    isLoading(key?: string) {
-      return loadingStates.get(key ?? GLOBAL_KEY) ?? false;
-    },
-    get error() {
-      return error;
-    },
-    run,
-    runWithKey
-  };
-}
+export { createAsync } from "./async.svelte.js";

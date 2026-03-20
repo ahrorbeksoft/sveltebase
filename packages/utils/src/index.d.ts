@@ -17,19 +17,9 @@ export declare function timestamps<T extends boolean>(updateOnly: T): T extends 
     createdAt: number;
     updatedAt: number;
 };
-export type TryCatchReturn = {
-    success: string;
-    error?: never;
-} | {
-    error: string;
-    success?: never;
-} | null | void;
+import type { TryCatchReturn } from "./async.svelte.js";
+export type { TryCatchReturn } from "./async.svelte.js";
 export declare function tryCatch(task: () => Promise<TryCatchReturn> | TryCatchReturn): Promise<void>;
 export declare const wait: (ms: number) => Promise<unknown>;
-export declare function createAsync<T extends (...args: any[]) => Promise<TryCatchReturn> | Promise<void>>(asyncFn: T): {
-    isLoading(key?: string): boolean;
-    readonly error: Error | null;
-    run: (...args: Parameters<T>) => Promise<TryCatchReturn>;
-    runWithKey: (key: string, ...args: Parameters<T>) => Promise<TryCatchReturn>;
-};
+export { createAsync } from "./async.svelte.js";
 //# sourceMappingURL=index.d.ts.map
