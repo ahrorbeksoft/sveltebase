@@ -2,6 +2,7 @@ import type { InstaQLParams, InstaQLResult, ValidQuery } from "@instantdb/svelte
 import { createInstantAuth } from "./auth.svelte.js";
 import type {
   BoundInstantAuth,
+  BoundInstantHelpers,
   InferDatabaseSchema,
   InstantAuthOptions,
   InstantQueryClient,
@@ -9,23 +10,6 @@ import type {
   QueryState,
   SubscribeQueryResponse
 } from "./types.js";
-
-export interface BoundInstantHelpers<TDatabase extends InstantQueryClient> {
-  auth: BoundInstantAuth<TDatabase>;
-  queryOnce<TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>>(
-    query: TQuery,
-    timeoutMs?: number
-  ): Promise<InstaQLResult<InferDatabaseSchema<TDatabase>, TQuery>>;
-  useQuery<TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>>(
-    queryInput: MaybeGetter<TQuery | null>,
-    initialData?: MaybeGetter<InstaQLResult<InferDatabaseSchema<TDatabase>, TQuery> | null>
-  ): QueryState<InferDatabaseSchema<TDatabase>, TQuery>;
-  prefetchQuery<TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>>(
-    query: TQuery,
-    fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
-    endpoint?: string
-  ): Promise<InstaQLResult<InferDatabaseSchema<TDatabase>, TQuery> | null>;
-}
 
 export interface CreateInstantHelpersOptions {
   auth?: InstantAuthOptions;
@@ -174,12 +158,15 @@ export async function prefetchQuery<
   >;
 }
 
-export function createInstantHelpers<TDatabase extends InstantQueryClient>(
+export function createInstantHelpers<
+  TUser extends Record<string, unknown> = Record<string, never>,
+  TDatabase extends InstantQueryClient = InstantQueryClient
+>(
   db: TDatabase,
   options: CreateInstantHelpersOptions = {}
-): BoundInstantHelpers<TDatabase> {
+): BoundInstantHelpers<TDatabase, TUser> {
   return {
-    auth: createInstantAuth(db, options.auth),
+    auth: createInstantAuth<TDatabase, TUser>(db, options.auth),
     queryOnce: <TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>>(
       query: TQuery,
       timeoutMs?: number

@@ -15,6 +15,7 @@ export type {
   InstantBoundUser,
   InstantQueryClient,
   MaybeGetter,
+  InstantAuthUser,
   QueryState,
   SubscribeQueryResponse
 } from "./types.js";

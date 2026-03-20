@@ -33,12 +33,24 @@ export type QueryState<
   data: InstaQLResult<TSchema, TQuery> | null;
 };
 
-export type InstantBoundUser<TDatabase extends InstantQueryClient> = InstantUser &
-  Record<string, unknown>;
+export type MergeInstantAuthUser<
+  TUser extends Record<string, unknown> = Record<string, never>
+> = InstantUser & TUser;
 
-export interface BoundInstantAuth<TDatabase extends InstantQueryClient> {
-  init(user: InstantBoundUser<TDatabase> | undefined): void;
-  readonly user: InstantBoundUser<TDatabase> | undefined;
+export type InstantAuthUser<TUser extends Record<string, unknown> = Record<string, never>> =
+  MergeInstantAuthUser<TUser>;
+
+export type InstantBoundUser<
+  TDatabase extends InstantQueryClient,
+  TUser extends Record<string, unknown> = Record<string, never>
+> = MergeInstantAuthUser<TUser>;
+
+export interface BoundInstantAuth<
+  TDatabase extends InstantQueryClient,
+  TUser extends Record<string, unknown> = Record<string, never>
+> {
+  init(user: InstantBoundUser<TDatabase, TUser> | undefined): void;
+  readonly user: InstantBoundUser<TDatabase, TUser> | undefined;
   readonly initialized: boolean;
   destroy(): void;
 }
@@ -48,8 +60,11 @@ export interface InstantAuthOptions {
   fetcher?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }
 
-export interface BoundInstantHelpers<TDatabase extends InstantQueryClient> {
-  auth: BoundInstantAuth<TDatabase>;
+export interface BoundInstantHelpers<
+  TDatabase extends InstantQueryClient,
+  TUser extends Record<string, unknown> = Record<string, never>
+> {
+  auth: BoundInstantAuth<TDatabase, TUser>;
   queryOnce<TQuery extends InstaQLParams<InferDatabaseSchema<TDatabase>>>(
     query: TQuery,
     timeoutMs?: number
@@ -65,8 +80,6 @@ export interface BoundInstantHelpers<TDatabase extends InstantQueryClient> {
   ): Promise<InstaQLResult<InferDatabaseSchema<TDatabase>, TQuery> | null>;
 }
 
-export type InstantAuthUser = InstantUser & Record<string, unknown>;
-
 export interface InstantUserDatabase<TQuery = unknown, TResult = unknown> {
   query(query: TQuery): Promise<TResult>;
 }
@@ -75,8 +88,10 @@ export interface InstantAdminDatabase<TQuery = unknown, TResult = unknown> {
   asUser(input: { token: string }): InstantUserDatabase<TQuery, TResult>;
 }
 
-export type InstantAuthRequestBody<TUser extends InstantAuthUser = InstantAuthUser> = {
-  user?: TUser | null;
+export type InstantAuthRequestBody<
+  TUser extends Record<string, unknown> = Record<string, never>
+> = {
+  user?: MergeInstantAuthUser<TUser> | null;
 };
 
 export type InstantQueryRequestBody<TQuery = unknown> = {

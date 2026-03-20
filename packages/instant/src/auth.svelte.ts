@@ -5,9 +5,12 @@ import type {
   InstantQueryClient
 } from "./types.js";
 
-class Auth<TDatabase extends InstantQueryClient> implements BoundInstantAuth<TDatabase> {
-  #initUser = $state<InstantBoundUser<TDatabase> | undefined>(undefined);
-  #user = $state<InstantBoundUser<TDatabase> | undefined>(undefined);
+class Auth<
+  TDatabase extends InstantQueryClient,
+  TUser extends Record<string, unknown> = Record<string, unknown>
+> implements BoundInstantAuth<TDatabase, TUser> {
+  #initUser = $state<InstantBoundUser<TDatabase, TUser> | undefined>(undefined);
+  #user = $state<InstantBoundUser<TDatabase, TUser> | undefined>(undefined);
   #initialized = $state(false);
   #unsubscribe: (() => void) | undefined;
   #endpoint: string;
@@ -18,7 +21,7 @@ class Auth<TDatabase extends InstantQueryClient> implements BoundInstantAuth<TDa
     this.#fetcher = options.fetcher ?? fetch;
 
     this.#unsubscribe = db.core.subscribeAuth((response) => {
-      this.#user = response.user as InstantBoundUser<TDatabase> | undefined;
+      this.#user = response.user as InstantBoundUser<TDatabase, TUser> | undefined;
     });
 
     $effect.root(() => {
@@ -37,7 +40,7 @@ class Auth<TDatabase extends InstantQueryClient> implements BoundInstantAuth<TDa
     });
   }
 
-  init(user: InstantBoundUser<TDatabase> | undefined): void {
+  init(user: InstantBoundUser<TDatabase, TUser> | undefined): void {
     this.#initUser = user;
 
     if (!this.#user) {
@@ -47,7 +50,7 @@ class Auth<TDatabase extends InstantQueryClient> implements BoundInstantAuth<TDa
     this.#initialized = true;
   }
 
-  get user(): InstantBoundUser<TDatabase> | undefined {
+  get user(): InstantBoundUser<TDatabase, TUser> | undefined {
     return this.#user;
   }
 
@@ -60,7 +63,9 @@ class Auth<TDatabase extends InstantQueryClient> implements BoundInstantAuth<TDa
     this.#unsubscribe = undefined;
   }
 
-  private async performSync(userData: InstantBoundUser<TDatabase> | undefined): Promise<void> {
+  private async performSync(
+    userData: InstantBoundUser<TDatabase, TUser> | undefined
+  ): Promise<void> {
     try {
       await this.#fetcher(this.#endpoint, {
         method: "POST",
@@ -77,9 +82,12 @@ class Auth<TDatabase extends InstantQueryClient> implements BoundInstantAuth<TDa
   }
 }
 
-export function createInstantAuth<TDatabase extends InstantQueryClient>(
+export function createInstantAuth<
+  TDatabase extends InstantQueryClient,
+  TUser extends Record<string, unknown> = Record<string, unknown>
+>(
   db: TDatabase,
   options: InstantAuthOptions = {}
-): BoundInstantAuth<TDatabase> {
-  return new Auth(db, options);
+): BoundInstantAuth<TDatabase, TUser> {
+  return new Auth<TDatabase, TUser>(db, options);
 }
