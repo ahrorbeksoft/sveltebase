@@ -4,11 +4,18 @@ A Bun workspace for Svelte packages.
 
 ## What this gives you
 
-- `packages/utils`: a Svelte utility package with helpers for cookies, async flows, keyed async state helpers, and direct `svelte-sonner` toast notifications
-- `packages/state`: a Svelte rune-based state package
-- `packages/i18n`: locale state, translation, and formatting helpers
-- `packages/instant`: generic InstantDB query helpers for Svelte
+- [`@sveltebase/utils`](./packages/utils/README.md): a Svelte utility package with helpers for cookies, async flows, keyed async state helpers, and direct `svelte-sonner` toast notifications
+- [`@sveltebase/state`](./packages/state/README.md): a Svelte rune-based state package
+- [`@sveltebase/i18n`](./packages/i18n/README.md): locale state, translation, and formatting helpers
+- [`@sveltebase/instant`](./packages/instant/README.md): generic InstantDB query helpers for Svelte
 - Bun for installation, workspace scripts, and release management
+
+## Package READMEs
+
+- [`packages/utils/README.md`](./packages/utils/README.md)
+- [`packages/state/README.md`](./packages/state/README.md)
+- [`packages/i18n/README.md`](./packages/i18n/README.md)
+- [`packages/instant/README.md`](./packages/instant/README.md)
 
 ## Install
 

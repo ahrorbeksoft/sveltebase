@@ -5,7 +5,7 @@ export {
   useQuery
 } from "./query.svelte.js";
 
-export { createAuthHandler, createQueryHandler } from "./handlers.js";
+export { createAuthHandler, createInstantHandler, createQueryHandler, parseUser } from "./handlers.js";
 
 export type {
   BoundInstantAuth,
