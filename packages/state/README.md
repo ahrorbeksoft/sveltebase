@@ -1,80 +1,56 @@
 # `@sveltebase/state`
 
-Small rune-friendly state helpers for Svelte 5.
+Small state helpers for Svelte 5.
 
-This package provides two classes:
+This package exports two classes:
 
-- `State<T>` for simple in-memory reactive state
-- `PersistentState<TSchema>` for validated state that is persisted in cookies using `zod`
+- `State<T>`: simple reactive in-memory state
+- `PersistentState<TSchema>`: reactive state backed by cookies and validated with `zod`
 
 ## Install
 
-```bash
-bun add @sveltebase/state zod
-```
+~~~bash
+bun add @sveltebase/state zod svelte
+~~~
 
-You also need `svelte` as a peer dependency:
-
-```bash
-bun add svelte
-```
-
-## What it exports
+## Exports
 
 - `State`
 - `PersistentState`
 
 ## `State`
 
-Use `State` when you want a tiny reactive wrapper around a value.
+A tiny wrapper around a value.
 
-### Example
-
-```ts
+~~~ts
 import { State } from "@sveltebase/state";
 
-const counter = new State(0);
+const count = new State(0);
 
-counter.current = 1;
-counter.set((value) => value + 1);
+count.current = 1;
+count.set((value) => value + 1);
 
-console.log(counter.current); // 2
-```
+console.log(count.current); // 2
+~~~
 
 ### API
 
-#### `new State(initialValue)`
-
-Creates a new reactive state container.
-
-#### `state.current`
-
-Gets or sets the current value.
-
-#### `state.set(updater)`
-
-Updates the current value using a callback.
+- `new State(initialValue)`
+- `state.current`
+- `state.set(updater)`
 
 ## `PersistentState`
 
-Use `PersistentState` when you want state that:
+Cookie-backed state with schema validation.
 
-- is validated with `zod`
-- hydrates from cookies in the browser
-- can be initialized from request cookies during SSR
-- writes changes back to cookies automatically
+It:
 
-## Install requirements
+- reads from cookies
+- validates with `zod`
+- writes updates back to cookies
+- can load the initial value during SSR
 
-`PersistentState` depends on `zod`, so make sure it is installed:
-
-```bash
-bun add zod
-```
-
-## Example
-
-```ts
+~~~ts
 import { z } from "zod";
 import { PersistentState } from "@sveltebase/state";
 
@@ -82,107 +58,95 @@ const themeSchema = z.enum(["light", "dark"]).default("light");
 
 export const theme = new PersistentState("theme", themeSchema);
 
-// read
-console.log(theme.current);
-
-// write
 theme.current = "dark";
-
-// update
 theme.set((value) => (value === "dark" ? "light" : "dark"));
-```
+~~~
 
-## SSR usage
+## SSR setup
 
-When rendering on the server, you can initialize the state from cookies before using it.
+For SSR, return all cookies from `+layout.server.ts`, then initialize the state with `state.init(() => data.cookies)` so it loads the server value first.
 
-```ts
+### `src/routes/+layout.server.ts`
+
+~~~ts
+export async function load({ cookies }) {
+  return {
+    cookies: cookies.getAll()
+  };
+}
+~~~
+
+### `src/routes/+layout.svelte`
+
+~~~svelte
+<script lang="ts">
+  import type { LayoutData } from "./$types";
+  import { locale } from "$lib/state";
+
+  let { data }: { data: LayoutData } = $props();
+
+  locale.init(() => data.cookies);
+</script>
+
+<slot />
+~~~
+
+### `src/lib/state.ts`
+
+~~~ts
 import { z } from "zod";
 import { PersistentState } from "@sveltebase/state";
 
-const localeSchema = z.enum(["en", "uz"]).default("en");
+export const locale = new PersistentState(
+  "locale",
+  z.enum(["en", "uz"]).default("en")
+);
+~~~
 
-export const locale = new PersistentState("locale", localeSchema);
+With this setup:
 
-// for example, from a server load or request context:
-locale.init([
-  { name: "locale", value: "\"uz\"" }
-]);
-
-console.log(locale.current); // "uz"
-```
-
-## How persistence works
-
-`PersistentState` stores the current value in a cookie using the key you pass to the constructor.
-
-- On the client, it reads the cookie during hydration
-- On updates, it writes the new value back to the cookie
-- On the server, you can call `init(cookies)` to sync the initial value from request cookies
-
-The stored cookie value is JSON-encoded and validated with your `zod` schema.
+- on the server, `init` reads from `data.cookies`
+- the initial SSR render uses that cookie value
+- in the browser, updates keep syncing back to cookies
 
 ## API
 
 ### `new PersistentState(key, schema)`
 
-Creates a persistent reactive state value.
+Creates a persistent state value.
 
 - `key`: cookie name
-- `schema`: `zod` schema used to validate and parse the value
+- `schema`: `zod` schema for parsing and validation
 
 ### `persistentState.current`
 
-Gets or sets the parsed current value.
+Gets or sets the current value.
 
 ### `persistentState.set(updater)`
 
-Updates the current value using a callback.
+Updates the current value.
 
 ### `persistentState.init(cookies)`
 
-Initializes the state from server-side cookies.
+Loads the value from server cookies.
 
-Expected shape:
+It accepts either:
 
-```ts
+- a cookie array
+- a getter function like `() => data.cookies`
+
+Expected cookie shape:
+
+~~~ts
 type Cookie = {
   name: string;
   value: string;
 };
-```
-
-## Example with Svelte
-
-```svelte
-<script lang="ts">
-  import { z } from "zod";
-  import { State, PersistentState } from "@sveltebase/state";
-
-  const count = new State(0);
-  const locale = new PersistentState("locale", z.enum(["en", "uz"]).default("en"));
-
-  function increment() {
-    count.set((value) => value + 1);
-  }
-
-  function toggleLocale() {
-    locale.current = locale.current === "en" ? "uz" : "en";
-  }
-</script>
-
-<button onclick={increment}>
-  Count: {count.current}
-</button>
-
-<button onclick={toggleLocale}>
-  Locale: {locale.current}
-</button>
-```
+~~~
 
 ## Notes
 
-- `PersistentState` uses cookies for persistence
-- values are validated with `zod` before being accepted
-- if cookie data is invalid, the schema fallback/default is used
+- `PersistentState` stores JSON in cookies
+- invalid cookie data falls back to the schema result
+- `init(...)` is for server-side initialization
 - this package is designed for Svelte 5

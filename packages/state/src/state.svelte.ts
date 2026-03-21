@@ -1,8 +1,11 @@
 import { z } from "zod";
 import { Cookies } from "@sveltebase/utils";
 
+export type MaybeGetter<T> = T | (() => T);
+
 export class PersistentState<TSchema extends z.ZodTypeAny> {
   #value = $state<z.output<TSchema>>();
+  #initialized = false;
 
   private storageKey: string;
   private schema: TSchema;
@@ -34,12 +37,15 @@ export class PersistentState<TSchema extends z.ZodTypeAny> {
     this.#value = this.schema.parse(newValue);
   }
 
-  public init(cookies: { name: string; value: string }[]) {
-    if (hasWindow()) {
+  public init(cookies: MaybeGetter<{ name: string; value: string }[]>) {
+    if (this.#initialized || hasWindow()) {
       return;
     }
 
-    const rawCookie = cookies.find((cookie) => cookie.name === this.storageKey);
+    this.#initialized = true;
+
+    const resolvedCookies = unwrap(cookies);
+    const rawCookie = resolvedCookies.find((cookie) => cookie.name === this.storageKey);
 
     if (!rawCookie) {
       return;
@@ -97,6 +103,10 @@ export class State<T> {
   set(fn: (value: T) => T) {
     this.#internalState = fn(this.#internalState);
   }
+}
+
+function unwrap<T>(value: MaybeGetter<T>): T {
+  return typeof value === "function" ? (value as () => T)() : value;
 }
 
 function hasWindow() {

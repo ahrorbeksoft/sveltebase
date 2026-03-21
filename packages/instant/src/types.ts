@@ -49,7 +49,7 @@ export interface BoundInstantAuth<
   TDatabase extends InstantQueryClient,
   TUser extends Record<string, unknown> = Record<string, never>
 > {
-  init(user: InstantBoundUser<TDatabase, TUser> | undefined): void;
+  init(user: MaybeGetter<InstantBoundUser<TDatabase, TUser> | undefined>): void;
   readonly user: InstantBoundUser<TDatabase, TUser> | undefined;
   readonly initialized: boolean;
   destroy(): void;

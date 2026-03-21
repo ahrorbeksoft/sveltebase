@@ -2,7 +2,8 @@ import type {
   BoundInstantAuth,
   InstantAuthOptions,
   InstantBoundUser,
-  InstantQueryClient
+  InstantQueryClient,
+  MaybeGetter
 } from "./types.js";
 
 class Auth<
@@ -40,11 +41,17 @@ class Auth<
     });
   }
 
-  init(user: InstantBoundUser<TDatabase, TUser> | undefined): void {
-    this.#initUser = user;
+  init(user: MaybeGetter<InstantBoundUser<TDatabase, TUser> | undefined>): void {
+    if (this.#initialized) {
+      return;
+    }
+
+    const initialUser = unwrap(user);
+
+    this.#initUser = initialUser;
 
     if (!this.#user) {
-      this.#user = user;
+      this.#user = initialUser;
     }
 
     this.#initialized = true;
@@ -80,6 +87,10 @@ class Auth<
       console.error("Failed to sync Instant auth state to the server:", error);
     }
   }
+}
+
+function unwrap<T>(value: MaybeGetter<T>): T {
+  return typeof value === "function" ? (value as () => T)() : value;
 }
 
 export function createInstantAuth<

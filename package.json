@@ -1,6 +1,6 @@
 {
   "name": "sveltebase-workspace",
-  "version": "0.3.0",
+  "version": "0.3.4",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.1.26",
@@ -17,7 +17,7 @@
     "build:web": "bun run --filter @sveltebase/web build",
     "check:web": "bun run --filter @sveltebase/web check",
     "release:version": "bun run ./scripts/version.mjs",
-    "release:publish": "bun run ./scripts/publish.mjs"
+    "release:publish": "bun run build && bun run ./scripts/publish.mjs"
   },
   "devDependencies": {
     "@sveltejs/package": "^2.5.7",

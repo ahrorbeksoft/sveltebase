@@ -13,6 +13,7 @@ import {
 const DEFAULT_LOCALE_STORAGE_KEY = "locale";
 
 type Cookie = { name: string; value: string };
+type MaybeGetter<T> = T | (() => T);
 type LocaleSchema<TLocale extends string> = z.ZodType<TLocale>;
 type LocaleState<TLocale extends string> = PersistentState<LocaleSchema<TLocale>>;
 
@@ -64,7 +65,7 @@ export interface I18nInstance<TLanguages extends readonly LanguageDefinition[]> 
   readonly languages: TLanguages;
   locale: LocaleCode<TLanguages>;
   readonly currentLanguage: CurrentLanguage<TLanguages>;
-  init(cookies?: Cookie[]): void;
+  init(cookies?: MaybeGetter<Cookie[] | undefined>): void;
 }
 
 type I18nInternal = {
@@ -198,6 +199,8 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
     localeSchema
   ) as LocaleState<LocaleCode<TLanguages>>;
 
+  let initialized = false;
+
   const i18n: I18nInstance<TLanguages> = {
     get languages() {
       return languages;
@@ -219,13 +222,23 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
       ) as CurrentLanguage<TLanguages>;
     },
 
-    init(cookies?: Cookie[]) {
-      if (cookies) {
-        localeState.init(cookies);
+    init(cookies?: MaybeGetter<Cookie[] | undefined>) {
+      if (initialized) {
+        return;
+      }
+
+      const resolvedCookies =
+        typeof cookies === "function"
+          ? (cookies as () => Cookie[] | undefined)()
+          : cookies;
+
+      if (resolvedCookies) {
+        localeState.init(resolvedCookies);
       }
 
       const { set } = ensureContext();
       set(i18n as I18nInstance<readonly LanguageDefinition[]>);
+      initialized = true;
     }
   };
 

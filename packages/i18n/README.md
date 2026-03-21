@@ -64,12 +64,28 @@ export const i18n = createI18n(languages, "locale");
 
 Then initialize it before using translations or formatters.
 
-If you already have the request cookies available during the initial render, pass them to `init(cookies)` immediately. That lets the package restore the saved locale before your UI reads translations, so the correct language loads right away instead of first rendering with the fallback locale and switching later.
+In SvelteKit, the recommended quick start is to load all cookies in `+layout.server.ts`, pass them to `+layout.svelte`, and initialize i18n there. That lets the package restore the saved locale before your UI reads translations, so the correct language loads right away instead of first rendering with the fallback locale and switching later.
+
+In `+layout.server.ts`:
 
 ```ts
-import { i18n } from "./i18n";
+export function load({ cookies }) {
+  return {
+    cookies: cookies.getAll()
+  };
+}
+```
 
-i18n.init(cookies);
+Then in `+layout.svelte`:
+
+```svelte
+<script lang="ts">
+  import { i18n } from "./i18n";
+
+  let { data } = $props();
+
+  i18n.init(() => data.cookies);
+</script>
 ```
 
 ## Basic usage in a Svelte component
@@ -146,7 +162,7 @@ i18n.init();
 
 ### With cookies in SvelteKit for faster first render
 
-In SvelteKit, the recommended approach is to load all cookies in `+layout.server.ts`, return them from `load`, and then pass that data to `i18n.init(...)` in `+layout.svelte`.
+In SvelteKit, the recommended approach is to load all cookies in `+layout.server.ts`, return them from `load`, and then pass that data to `i18n.init(() => data.cookies)` in `+layout.svelte`.
 
 This lets `@sveltebase/i18n` restore the saved locale before your UI reads translations, so the correct language is available immediately and you avoid rendering the fallback language first.
 
@@ -168,13 +184,13 @@ Then in `+layout.svelte`:
 
   let { data } = $props();
 
-  i18n.init(data.cookies);
+  i18n.init(() => data.cookies);
 </script>
 
 <slot />
 ```
 
-The value passed to `i18n.init(...)` should be an array of cookie objects in this shape:
+The function passed to `i18n.init(...)` should return an array of cookie objects in this shape:
 
 ```ts
 type Cookie = {

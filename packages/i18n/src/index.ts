@@ -16,6 +16,8 @@ export type {
   TranslationValues
 } from "./create-i18n.js";
 
+export type { MaybeGetter } from "@sveltebase/state";
+
 export type {
   FormatOptions,
   LanguageDefinition,
