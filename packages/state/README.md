@@ -5,12 +5,18 @@ Small state helpers for Svelte 5.
 This package exports two classes:
 
 - `State<T>`: simple reactive in-memory state
-- `PersistentState<TSchema>`: reactive state backed by cookies and validated with `zod`
+- `PersistentState<TSchema>`: reactive state backed by cookies and validated with a Standard Schema-compatible validator
 
 ## Install
 
 ~~~bash
-bun add @sveltebase/state zod svelte
+bun add @sveltebase/state svelte
+~~~
+
+If you want to use `zod` as your schema library:
+
+~~~bash
+bun add zod
 ~~~
 
 ## Exports
@@ -46,7 +52,7 @@ Cookie-backed state with schema validation.
 It:
 
 - reads from cookies
-- validates with `zod`
+- validates with a Standard Schema-compatible validator
 - writes updates back to cookies
 - can load the initial value during SSR
 
@@ -97,10 +103,9 @@ export async function load({ cookies }) {
 import { z } from "zod";
 import { PersistentState } from "@sveltebase/state";
 
-export const locale = new PersistentState(
-  "locale",
-  z.enum(["en", "uz"]).default("en")
-);
+const localeSchema = z.enum(["en", "uz"]).default("en");
+
+export const locale = new PersistentState("locale", localeSchema);
 ~~~
 
 With this setup:
@@ -116,7 +121,7 @@ With this setup:
 Creates a persistent state value.
 
 - `key`: cookie name
-- `schema`: `zod` schema for parsing and validation
+- `schema`: Standard Schema-compatible validator used for parsing and validation, such as a `zod` schema
 
 ### `persistentState.current`
 
@@ -149,4 +154,5 @@ type Cookie = {
 - `PersistentState` stores JSON in cookies
 - invalid cookie data falls back to the schema result
 - `init(...)` is for server-side initialization
+- any Standard Schema-compatible library can be used here, including `zod`
 - this package is designed for Svelte 5

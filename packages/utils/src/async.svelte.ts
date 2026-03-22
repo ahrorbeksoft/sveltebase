@@ -19,7 +19,7 @@ async function getToastModule(): Promise<ToastModule | null> {
 
   if (!toastModulePromise) {
     toastModulePromise = import("svelte-sonner")
-      .then((module) => module)
+      .then((module) => ({ toast: module.toast }) as ToastModule)
       .catch((error) => {
         if (DEV) {
           console.error("[createAsync] Failed to load svelte-sonner:", error);

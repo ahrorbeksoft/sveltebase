@@ -1,6 +1,5 @@
 import { createContext } from "svelte";
-import { PersistentState } from "@sveltebase/state";
-import { z } from "zod";
+import { PersistentState, type StandardSchemaV1 } from "@sveltebase/state";
 import type { AppConfig } from "use-intl/core";
 import {
   createFormatForLocale,
@@ -14,7 +13,7 @@ const DEFAULT_LOCALE_STORAGE_KEY = "locale";
 
 type Cookie = { name: string; value: string };
 type MaybeGetter<T> = T | (() => T);
-type LocaleSchema<TLocale extends string> = z.ZodType<TLocale>;
+type LocaleSchema<TLocale extends string> = StandardSchemaV1<unknown, TLocale>;
 type LocaleState<TLocale extends string> = PersistentState<LocaleSchema<TLocale>>;
 
 export type LocaleCode<TLanguages extends readonly LanguageDefinition[]> =
@@ -138,10 +137,10 @@ function getI18nFromContext<const TLanguages extends readonly LanguageDefinition
 }
 
 export function getTranslations(): Translate {
-  return ((key: MessageKey, values?: TranslationValues) => {
-    const i18n = getI18nFromContext<readonly LanguageDefinition[]>();
-    const { languages, fallbackLocale } = getI18nInternal(i18n);
+  const i18n = getI18nFromContext<readonly LanguageDefinition[]>();
+  const { languages, fallbackLocale } = getI18nInternal(i18n);
 
+  return ((key: MessageKey, values?: TranslationValues) => {
     const translate = createLocaleTranslator(
       languages,
       i18n.locale,
@@ -153,10 +152,10 @@ export function getTranslations(): Translate {
 }
 
 export function getFormat(): Format {
-  return (value, options) => {
-    const i18n = getI18nFromContext<readonly LanguageDefinition[]>();
-    const { languages, fallbackLocale } = getI18nInternal(i18n);
+  const i18n = getI18nFromContext<readonly LanguageDefinition[]>();
+  const { languages, fallbackLocale } = getI18nInternal(i18n);
 
+  return (value, options) => {
     const format = createFormatForLocale(
       languages,
       i18n.locale,
@@ -176,23 +175,28 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
   const localeCodes = getLocaleCodes(languages);
   const fallbackLocale = getDefaultLocale(languages);
 
-  const localeSchema: LocaleSchema<LocaleCode<TLanguages>> = z
-    .string()
-    .optional()
-    .transform((value, context) => {
-      const nextLocale = (value ?? fallbackLocale) as LocaleCode<TLanguages>;
+  const localeSchema: LocaleSchema<LocaleCode<TLanguages>> = {
+    "~standard": {
+      version: 1,
+      vendor: "@sveltebase/i18n",
+      validate(value) {
+        const nextLocale =
+          value == null
+            ? fallbackLocale
+            : typeof value === "string"
+              ? (value as LocaleCode<TLanguages>)
+              : null;
 
-      if (localeCodes.includes(nextLocale)) {
-        return nextLocale;
+        if (nextLocale && localeCodes.includes(nextLocale)) {
+          return { value: nextLocale };
+        }
+
+        return {
+          issues: [{ message: `Invalid locale "${String(value)}"` }]
+        };
       }
-
-      context.addIssue({
-        code: "custom",
-        message: `Invalid locale "${String(value)}"`
-      });
-
-      return z.NEVER;
-    }) as LocaleSchema<LocaleCode<TLanguages>>;
+    }
+  };
 
   const localeState = new PersistentState(
     localeStorageKey,
@@ -211,7 +215,7 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
     },
 
     set locale(nextLocale: LocaleCode<TLanguages>) {
-      localeState.current = localeSchema.parse(nextLocale);
+      localeState.current = nextLocale;
     },
 
     get currentLanguage() {

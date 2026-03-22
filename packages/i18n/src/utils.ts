@@ -2,14 +2,60 @@ import { createFormatter, createTranslator, type AppConfig } from "use-intl/core
 
 
 import { SvelteDate } from "svelte/reactivity";
-import {
-  differenceInMinutes,
-  format as formatTimeWithDateFns,
-  isThisWeek,
-  isThisYear,
-  isToday,
-  isYesterday
-} from "date-fns";
+function startOfDay(value: Date): Date {
+  return new SvelteDate(value.getFullYear(), value.getMonth(), value.getDate());
+}
+
+function differenceInMinutes(later: Date, earlier: Date): number {
+  return Math.floor((later.getTime() - earlier.getTime()) / 60_000);
+}
+
+function isSameDay(left: Date, right: Date): boolean {
+  return (
+    left.getFullYear() === right.getFullYear() &&
+    left.getMonth() === right.getMonth() &&
+    left.getDate() === right.getDate()
+  );
+}
+
+function isToday(value: Date): boolean {
+  return isSameDay(value, new SvelteDate());
+}
+
+function isYesterday(value: Date): boolean {
+  const yesterday = startOfDay(new SvelteDate());
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  return isSameDay(value, yesterday);
+}
+
+function isThisYear(value: Date): boolean {
+  return value.getFullYear() === new SvelteDate().getFullYear();
+}
+
+function isThisWeek(value: Date, options?: { weekStartsOn?: number }): boolean {
+  const weekStartsOn = options?.weekStartsOn ?? 0;
+  const now = new SvelteDate();
+  const currentDay = now.getDay();
+  const diffToWeekStart = (currentDay - weekStartsOn + 7) % 7;
+  const weekStart = startOfDay(now);
+  weekStart.setDate(now.getDate() - diffToWeekStart);
+  const weekEnd = startOfDay(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 7);
+
+  return value >= weekStart && value < weekEnd;
+}
+
+function formatTimeWithDateFns(value: Date, format: string): string {
+  if (format !== "HH:mm") {
+    throw new Error(`Unsupported format: ${format}`);
+  }
+
+  const hours = String(value.getHours()).padStart(2, "0");
+  const minutes = String(value.getMinutes()).padStart(2, "0");
+
+  return `${hours}:${minutes}`;
+}
 
 export type MessageValue = string | { [key: string]: MessageValue };
 
