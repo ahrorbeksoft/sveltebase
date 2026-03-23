@@ -227,22 +227,21 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
     },
 
     init(cookies?: MaybeGetter<Cookie[] | undefined>) {
-      if (initialized) {
-        return;
-      }
+      if (!initialized) {
+        const resolvedCookies =
+          typeof cookies === "function"
+            ? (cookies as () => Cookie[] | undefined)()
+            : cookies;
 
-      const resolvedCookies =
-        typeof cookies === "function"
-          ? (cookies as () => Cookie[] | undefined)()
-          : cookies;
+        if (resolvedCookies) {
+          localeState.init(resolvedCookies);
+        }
 
-      if (resolvedCookies) {
-        localeState.init(resolvedCookies);
+        initialized = true;
       }
 
       const { set } = ensureContext();
       set(i18n as I18nInstance<readonly LanguageDefinition[]>);
-      initialized = true;
     }
   };
 
