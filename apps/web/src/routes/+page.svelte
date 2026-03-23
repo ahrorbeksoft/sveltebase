@@ -31,7 +31,7 @@
 
   <p>
     <strong>{t("async-demo")}:</strong>
-    {format(Date.now() - 1000 * 60 * 5, { preset: "custom" })}
+    {format(Date.now() - 1000 * 60 * 5, { preset: "relative" })}
   </p>
 
   <div style="display: flex; gap: 12px;">

@@ -39,8 +39,23 @@ export const languages = [
     messages: {
       "app-title": "My app",
       "welcome": "Welcome, {name}",
+
       "just-now": "Just now",
+
       "minutes-ago": "{minutes} minutes ago",
+      "hours-ago": "{hours} hours ago",
+      "days-ago": "{days} days ago",
+      "weeks-ago": "{weeks} weeks ago",
+      "months-ago": "{months} months ago",
+      "years-ago": "{years} years ago",
+
+      "in-minutes": "in {minutes} minutes",
+      "in-hours": "in {hours} hours",
+      "in-days": "in {days} days",
+      "in-weeks": "in {weeks} weeks",
+      "in-months": "in {months} months",
+      "in-years": "in {years} years",
+
       "today-at": "Today at {time}",
       "yesterday-at": "Yesterday at {time}"
     }
@@ -51,8 +66,23 @@ export const languages = [
     messages: {
       "app-title": "Mening ilovam",
       "welcome": "Xush kelibsiz, {name}",
+
       "just-now": "Hozirgina",
+
       "minutes-ago": "{minutes} daqiqa oldin",
+      "hours-ago": "{hours} soat oldin",
+      "days-ago": "{days} kun oldin",
+      "weeks-ago": "{weeks} hafta oldin",
+      "months-ago": "{months} oy oldin",
+      "years-ago": "{years} yil oldin",
+
+      "in-minutes": "{minutes} daqiqadan keyin",
+      "in-hours": "{hours} soatdan keyin",
+      "in-days": "{days} kundan keyin",
+      "in-weeks": "{weeks} haftadan keyin",
+      "in-months": "{months} oydan keyin",
+      "in-years": "{years} yildan keyin",
+
       "today-at": "Bugun {time} da",
       "yesterday-at": "Kecha {time} da"
     }
@@ -272,6 +302,7 @@ const format = getFormat();
 
 format(new Date(), { preset: "full" });
 format(new Date(), { preset: "custom", withTime: true });
+format(Date.now() - 1000 * 60 * 5, { preset: "relative" });
 format("13:45:00", { preset: "timestring" });
 ```
 
@@ -295,10 +326,18 @@ console.log(i18n.currentLanguage.label);
 
 - `default`
 - `custom`
+- `relative`
 - `birthday`
 - `month`
 - `timestring`
 - `full`
+
+### Preset notes
+
+- `relative` always returns relative text for both past and future values. It does not fall back to an absolute date.
+- `custom` can still mix relative labels such as `just-now` or `today-at` with locale-aware absolute dates for older values.
+- `full` returns a full locale-aware date and optionally time.
+- `timestring` is for time-only string values such as `"08:30:00"`.
 
 ### Example
 
@@ -308,7 +347,71 @@ const format = getFormat();
 format(new Date(), { preset: "month" });
 format(new Date(), { preset: "birthday" });
 format(new Date(), { preset: "full", withTime: true });
+format(Date.now() - 1000 * 60 * 5, { preset: "relative" });
 format("08:30:00", { preset: "timestring" });
+```
+
+## Required locale strings for relative formatting
+
+If you use `preset: "relative"`, make sure every locale provides these message keys:
+
+- `just-now`
+- `minutes-ago`
+- `hours-ago`
+- `days-ago`
+- `weeks-ago`
+- `months-ago`
+- `years-ago`
+- `in-minutes`
+- `in-hours`
+- `in-days`
+- `in-weeks`
+- `in-months`
+- `in-years`
+
+Example:
+
+```ts
+const languages = [
+  {
+    code: "en",
+    label: "English",
+    messages: {
+      "just-now": "Just now",
+      "minutes-ago": "{minutes} minutes ago",
+      "hours-ago": "{hours} hours ago",
+      "days-ago": "{days} days ago",
+      "weeks-ago": "{weeks} weeks ago",
+      "months-ago": "{months} months ago",
+      "years-ago": "{years} years ago",
+      "in-minutes": "in {minutes} minutes",
+      "in-hours": "in {hours} hours",
+      "in-days": "in {days} days",
+      "in-weeks": "in {weeks} weeks",
+      "in-months": "in {months} months",
+      "in-years": "in {years} years"
+    }
+  },
+  {
+    code: "uz",
+    label: "O‘zbekcha",
+    messages: {
+      "just-now": "Hozirgina",
+      "minutes-ago": "{minutes} daqiqa oldin",
+      "hours-ago": "{hours} soat oldin",
+      "days-ago": "{days} kun oldin",
+      "weeks-ago": "{weeks} hafta oldin",
+      "months-ago": "{months} oy oldin",
+      "years-ago": "{years} yil oldin",
+      "in-minutes": "{minutes} daqiqadan keyin",
+      "in-hours": "{hours} soatdan keyin",
+      "in-days": "{days} kundan keyin",
+      "in-weeks": "{weeks} haftadan keyin",
+      "in-months": "{months} oydan keyin",
+      "in-years": "{years} yildan keyin"
+    }
+  }
+] as const;
 ```
 
 ## Type safety

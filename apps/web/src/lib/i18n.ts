@@ -27,13 +27,13 @@ export const languages = [
       "reset": "Tiklash",
 
       "format-demo": "Formatlangan sana",
-      "async-demo": "Nisbiy sana",
+      "async-demo": "Nisbiy vaqt",
 
       "run-action": "Amalni bajarish",
       "running": "Bajarilmoqda...",
       "async-idle": "Hali async ishga tushmagan.",
 
-      "timestamps-title": "Timestamps helper",
+      "timestamps-title": "Vaqt belgilari helperi",
       "createdAt": "Yaratilgan vaqt",
       "updatedAt": "Yangilangan vaqt",
 
@@ -44,6 +44,17 @@ export const languages = [
 
       "just-now": "Hozirgina",
       "minutes-ago": "{minutes} daqiqa oldin",
+      "hours-ago": "{hours} soat oldin",
+      "days-ago": "{days} kun oldin",
+      "weeks-ago": "{weeks} hafta oldin",
+      "months-ago": "{months} oy oldin",
+      "years-ago": "{years} yil oldin",
+      "in-minutes": "{minutes} daqiqadan keyin",
+      "in-hours": "{hours} soatdan keyin",
+      "in-days": "{days} kundan keyin",
+      "in-weeks": "{weeks} haftadan keyin",
+      "in-months": "{months} oydan keyin",
+      "in-years": "{years} yildan keyin",
       "today-at": "Bugun {time} da",
       "yesterday-at": "Kecha {time} da"
     },
@@ -74,7 +85,7 @@ export const languages = [
       "reset": "Reset",
 
       "format-demo": "Formatted date",
-      "async-demo": "Relative date",
+      "async-demo": "Relative time",
 
       "run-action": "Run action",
       "running": "Running...",
@@ -91,6 +102,17 @@ export const languages = [
 
       "just-now": "Just now",
       "minutes-ago": "{minutes} minutes ago",
+      "hours-ago": "{hours} hours ago",
+      "days-ago": "{days} days ago",
+      "weeks-ago": "{weeks} weeks ago",
+      "months-ago": "{months} months ago",
+      "years-ago": "{years} years ago",
+      "in-minutes": "in {minutes} minutes",
+      "in-hours": "in {hours} hours",
+      "in-days": "in {days} days",
+      "in-weeks": "in {weeks} weeks",
+      "in-months": "in {months} months",
+      "in-years": "in {years} years",
       "today-at": "Today at {time}",
       "yesterday-at": "Yesterday at {time}"
     },

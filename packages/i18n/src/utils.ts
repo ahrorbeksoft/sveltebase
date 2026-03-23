@@ -63,6 +63,65 @@ export type Messages = {
   [key: string]: MessageValue;
 };
 
+function formatRelativeDate(
+  value: Date,
+  t: (key: string, values?: Record<string, string | number | Date>) => string
+): string {
+  const now = new SvelteDate();
+  const diffMinutes = Math.floor((value.getTime() - now.getTime()) / 60_000);
+  const absMinutes = Math.abs(diffMinutes);
+
+  if (absMinutes < 1) {
+    return t("just-now");
+  }
+
+  const isFuture = diffMinutes > 0;
+
+  if (absMinutes < 60) {
+    return isFuture
+      ? t("in-minutes", { minutes: absMinutes })
+      : t("minutes-ago", { minutes: absMinutes });
+  }
+
+  const absHours = Math.floor(absMinutes / 60);
+
+  if (absHours < 24) {
+    return isFuture
+      ? t("in-hours", { hours: absHours })
+      : t("hours-ago", { hours: absHours });
+  }
+
+  const absDays = Math.floor(absHours / 24);
+
+  if (absDays < 7) {
+    return isFuture
+      ? t("in-days", { days: absDays })
+      : t("days-ago", { days: absDays });
+  }
+
+  const absWeeks = Math.floor(absDays / 7);
+
+  if (absDays < 30) {
+    return isFuture
+      ? t("in-weeks", { weeks: absWeeks })
+      : t("weeks-ago", { weeks: absWeeks });
+  }
+
+  const absMonths = Math.floor(absDays / 30);
+
+  if (absDays < 365) {
+    return isFuture
+      ? t("in-months", { months: absMonths })
+      : t("months-ago", { months: absMonths });
+  }
+
+  const absYears = Math.floor(absDays / 365);
+
+  return isFuture
+    ? t("in-years", { years: absYears })
+    : t("years-ago", { years: absYears });
+}
+
 export type LanguageDefinition<
   TLocale extends string = string,
   TMessages extends Messages = Messages
@@ -73,7 +132,14 @@ export type LanguageDefinition<
 };
 
 export type FormatOptions = {
-  preset?: "default" | "custom" | "birthday" | "month" | "timestring" | "full";
+  preset?:
+    | "default"
+    | "custom"
+    | "birthday"
+    | "month"
+    | "timestring"
+    | "full"
+    | "relative";
   withTime?: boolean;
 };
 
@@ -204,6 +270,10 @@ export function createFormatForLocale<const TLanguages extends readonly Language
     }
 
     const date = toDate(value);
+
+    if (preset === "relative") {
+      return formatRelativeDate(date, t);
+    }
 
     if (preset === "full") {
       return locale === "uz"
