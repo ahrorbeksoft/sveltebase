@@ -17,6 +17,15 @@
       "default": "./dist/index.js"
     }
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahrorbeksoft/sveltebase.git",
+    "directory": "packages/instant"
+  },
+  "bugs": {
+    "url": "https://github.com/ahrorbeksoft/sveltebase/issues"
+  },
+  "homepage": "https://github.com/ahrorbeksoft/sveltebase/tree/main/packages/instant#readme",
   "peerDependencies": {
     "@instantdb/svelte": "^0.22.165",
     "@sveltejs/kit": "^2.17.1",

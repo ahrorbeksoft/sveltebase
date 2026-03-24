@@ -24,6 +24,15 @@
   "peerDependencies": {
     "svelte": "^5.0.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahrorbeksoft/sveltebase.git",
+    "directory": "packages/i18n"
+  },
+  "bugs": {
+    "url": "https://github.com/ahrorbeksoft/sveltebase/issues"
+  },
+  "homepage": "https://github.com/ahrorbeksoft/sveltebase/tree/main/packages/i18n",
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
     "check": "tsc --project tsconfig.json --noEmit",

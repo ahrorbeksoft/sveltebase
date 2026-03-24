@@ -21,5 +21,14 @@
     "svelte-check": "^4.4.5",
     "typescript": "^5.9.3",
     "vite": "^8.0.1"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahrorbeksoft/sveltebase.git",
+    "directory": "apps/web"
+  },
+  "bugs": {
+    "url": "https://github.com/ahrorbeksoft/sveltebase/issues"
+  },
+  "homepage": "https://github.com/ahrorbeksoft/sveltebase/tree/main/apps/web"
 }

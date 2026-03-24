@@ -17,6 +17,15 @@
       "default": "./dist/index.js"
     }
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahrorbeksoft/sveltebase.git",
+    "directory": "packages/utils"
+  },
+  "bugs": {
+    "url": "https://github.com/ahrorbeksoft/sveltebase/issues"
+  },
+  "homepage": "https://github.com/ahrorbeksoft/sveltebase/tree/main/packages/utils#readme",
   "peerDependencies": {
     "svelte": "^5.0.0",
     "svelte-sonner": "^1.0.5"

@@ -23,6 +23,15 @@
   "peerDependencies": {
     "svelte": "^5.0.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahrorbeksoft/sveltebase.git",
+    "directory": "packages/state"
+  },
+  "bugs": {
+    "url": "https://github.com/ahrorbeksoft/sveltebase/issues"
+  },
+  "homepage": "https://github.com/ahrorbeksoft/sveltebase/tree/main/packages/state#readme",
   "scripts": {
     "build": "svelte-package --input ./src --output ./dist",
     "check": "tsc --project tsconfig.json --noEmit",
