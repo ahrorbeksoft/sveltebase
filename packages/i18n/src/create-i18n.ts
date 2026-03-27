@@ -227,7 +227,6 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
     },
 
     init(cookies?: MaybeGetter<Cookie[] | undefined>) {
-      if (!initialized) {
         const resolvedCookies =
           typeof cookies === "function"
             ? (cookies as () => Cookie[] | undefined)()
@@ -237,8 +236,6 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
           localeState.init(resolvedCookies);
         }
 
-        initialized = true;
-      }
 
       const { set } = ensureContext();
       set(i18n as I18nInstance<readonly LanguageDefinition[]>);

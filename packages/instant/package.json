@@ -29,7 +29,7 @@
   "peerDependencies": {
     "@instantdb/svelte": "^0.22.165",
     "@sveltejs/kit": "^2.17.1",
-    "svelte": "^5.0.0"
+    "svelte": "^5.55.0"
   },
   "peerDependenciesMeta": {
     "@sveltejs/kit": {
@@ -37,7 +37,7 @@
     }
   },
   "devDependencies": {
-    "@instantdb/svelte": "^0.22.165"
+    "@instantdb/svelte": "^0.22.171"
   },
   "scripts": {
     "build": "svelte-package --input ./src --output ./dist",

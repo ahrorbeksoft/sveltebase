@@ -30,7 +30,6 @@ export type InferOutput<TSchema extends StandardSchemaV1> =
 
 export class PersistentState<TSchema extends StandardSchemaV1> {
   #value = $state<InferOutput<TSchema>>();
-  #initialized = false;
 
   private storageKey: string;
   private schema: TSchema;
@@ -63,21 +62,17 @@ export class PersistentState<TSchema extends StandardSchemaV1> {
   }
 
   public init(cookies: MaybeGetter<{ name: string; value: string }[]>) {
-    if (this.#initialized || hasWindow()) {
+    if (hasWindow()) {
       return;
     }
-
-    this.#initialized = true;
 
     const resolvedCookies = unwrap(cookies);
     const rawCookie = resolvedCookies.find((cookie) => cookie.name === this.storageKey);
 
-    if (!rawCookie) {
-      return;
-    }
-
     try {
-      const parsed = parseSchema(this.schema, JSON.parse(rawCookie.value));
+      const parsed = rawCookie
+        ? parseSchema(this.schema, parseStoredCookieValue(rawCookie.value))
+        : parseSchema(this.schema, undefined);
 
       if (JSON.stringify(parsed) !== JSON.stringify(this.#value)) {
         this.#value = parsed;
@@ -103,7 +98,7 @@ export class PersistentState<TSchema extends StandardSchemaV1> {
 
     if (rawCookie) {
       try {
-        return parseSchema(schema, JSON.parse(rawCookie));
+        return parseSchema(schema, parseStoredCookieValue(rawCookie));
       } catch {
         console.warn(`[PersistentState] Invalid data for "${key}". Resetting.`);
       }
@@ -135,6 +130,14 @@ export class State<T> {
 
 function unwrap<T>(value: MaybeGetter<T>): T {
   return typeof value === "function" ? (value as () => T)() : value;
+}
+
+function parseStoredCookieValue(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return JSON.parse(decodeURIComponent(value));
+  }
 }
 
 function parseSchema<TSchema extends StandardSchemaV1>(

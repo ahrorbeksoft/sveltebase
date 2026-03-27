@@ -11,8 +11,7 @@
   }>();
 
 
-  // svelte-ignore state_referenced_locally
-    i18n.init(data.cookies);
+    i18n.init(() =>data.cookies);
 
 
 </script>
