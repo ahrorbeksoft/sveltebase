@@ -27,14 +27,23 @@ export interface InstantAdminDatabase<TQuery = unknown, TResult = unknown> {
 export function parseUser<TUser extends InstantAuthUser = InstantAuthUser>(
   cookies: { name: string; value: string }[]
 ): TUser | undefined {
-  let user: TUser | undefined;
   const rawUser = cookies.find((cookie) => cookie.name === AUTH_COOKIE_NAME)?.value;
 
-  if (rawUser) {
-    user = JSON.parse(rawUser) as TUser;
+  if (!rawUser) {
+    return undefined;
   }
 
-  return user;
+  return parseStoredAuthUser(rawUser) as TUser;
+}
+
+function parseStoredAuthUser<TUser extends InstantAuthUser = InstantAuthUser>(
+  rawUser: string
+): TUser {
+  try {
+    return JSON.parse(rawUser) as TUser;
+  } catch {
+    return JSON.parse(decodeURIComponent(rawUser)) as TUser;
+  }
 }
 
 function isAuthenticatedUser(
@@ -91,7 +100,7 @@ async function handleQueryRequest<
 
   if (rawUser) {
     try {
-      user = JSON.parse(rawUser) as InstantAuthUser;
+      user = parseStoredAuthUser(rawUser);
     } catch {
       cookies.delete(AUTH_COOKIE_NAME, { path: AUTH_COOKIE_PATH });
       return json({ data: null, error: "Invalid auth cookie" }, { status: 401 });

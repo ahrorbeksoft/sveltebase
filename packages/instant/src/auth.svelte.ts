@@ -42,18 +42,10 @@ class Auth<
   }
 
   init(user: MaybeGetter<InstantBoundUser<TDatabase, TUser> | undefined>): void {
-    if (this.#initialized) {
-      return;
-    }
-
     const initialUser = unwrap(user);
 
     this.#initUser = initialUser;
-
-    if (!this.#user) {
-      this.#user = initialUser;
-    }
-
+    this.#user = initialUser;
     this.#initialized = true;
   }
 
