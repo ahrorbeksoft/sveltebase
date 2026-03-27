@@ -1,6 +1,6 @@
 {
   "name": "@sveltebase/web",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
   },
   "dependencies": {
-    "@sveltebase/i18n": "0.4.5",
+    "@sveltebase/i18n": "0.4.6",
     "svelte": "^5.54.0"
   },
   "devDependencies": {
