@@ -23,11 +23,11 @@
     "@sveltejs/package": "^2.5.7",
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "publint": "^0.3.18",
-    "svelte": "^5.55.0",
-    "svelte-check": "^4.4.5",
+    "svelte": "^5.55.3",
+    "svelte-check": "^4.4.6",
     "tsup": "^8.5.1",
-    "typescript": "^5.9.3",
-    "vite": "^8.0.3"
+    "typescript": "^6.0.2",
+    "vite": "^8.0.8"
   },
   "description": "A Bun workspace for Svelte packages.",
   "main": "index.js",

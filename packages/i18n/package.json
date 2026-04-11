@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@sveltebase/state": "0.4.6",
-    "use-intl": "^4.4.0"
+    "use-intl": "^4.9.1"
   },
   "peerDependencies": {
     "svelte": "^5.0.0"

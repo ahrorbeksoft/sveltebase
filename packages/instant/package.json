@@ -27,7 +27,7 @@
   },
   "homepage": "https://github.com/ahrorbeksoft/sveltebase/tree/main/packages/instant#readme",
   "peerDependencies": {
-    "@instantdb/svelte": "^0.22.165",
+    "@instantdb/svelte": "^1.0.1",
     "@sveltejs/kit": "^2.17.1",
     "svelte": "^5.55.0"
   },
@@ -37,7 +37,7 @@
     }
   },
   "devDependencies": {
-    "@instantdb/svelte": "^0.22.171"
+    "@instantdb/svelte": "^1.0.1"
   },
   "scripts": {
     "build": "svelte-package --input ./src --output ./dist",

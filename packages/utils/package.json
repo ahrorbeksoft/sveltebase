@@ -28,13 +28,13 @@
   "homepage": "https://github.com/ahrorbeksoft/sveltebase/tree/main/packages/utils#readme",
   "peerDependencies": {
     "svelte": "^5.0.0",
-    "svelte-sonner": "^1.0.5"
+    "svelte-sonner": "^1.1.0"
   },
   "dependencies": {
     "esm-env": "^1.2.2"
   },
   "devDependencies": {
-    "svelte-sonner": "^1.0.5"
+    "svelte-sonner": "^1.1.0"
   },
   "scripts": {
     "build": "svelte-package --input ./src --output ./dist",
