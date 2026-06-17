@@ -144,3 +144,22 @@ export async function tryCatch(task: () => Promise<TryCatchReturn> | TryCatchRet
 export const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export { createAsync } from "./async.svelte.js";
+
+export function createId(): string {
+	if (typeof globalThis !== "undefined" && globalThis.crypto?.randomUUID) {
+		return globalThis.crypto.randomUUID();
+	}
+	if (typeof globalThis !== "undefined" && globalThis.crypto?.getRandomValues) {
+		// Fallback using crypto.getRandomValues (RFC 4122 version 4 UUID compliant)
+		return ("" + 1e7 + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, (c: any) =>
+			(c ^ (globalThis.crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16)
+		);
+	}
+	// Fallback using Math.random (works absolutely anywhere)
+	return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+		const r = (Math.random() * 16) | 0;
+		const v = c === "x" ? r : (r & 0x3) | 0x8;
+		return v.toString(16);
+	});
+}
+

@@ -1,6 +1,6 @@
 {
   "name": "@sveltebase/instant",
-  "version": "0.5.0",
+  "version": "1.0.1",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -27,9 +27,9 @@
   },
   "homepage": "https://github.com/ahrorbeksoft/sveltebase/tree/main/packages/instant#readme",
   "peerDependencies": {
-    "@instantdb/svelte": "^1.0.17",
-    "@sveltejs/kit": "^2.58.0",
-    "svelte": "^5.55.5"
+    "@instantdb/svelte": "^1.0.38",
+    "@sveltejs/kit": "^2.60.1",
+    "svelte": "^5.55.9"
   },
   "peerDependenciesMeta": {
     "@sveltejs/kit": {
@@ -37,7 +37,7 @@
     }
   },
   "devDependencies": {
-    "@instantdb/svelte": "^1.0.17"
+    "@instantdb/svelte": "^1.0.38"
   },
   "scripts": {
     "build": "svelte-package --input ./src --output ./dist",

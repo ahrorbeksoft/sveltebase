@@ -25,6 +25,7 @@ bun add svelte-sonner
 - `tryCatch` — run a task with built-in toast/error handling
 - `timestamps` — generate `createdAt` / `updatedAt` values
 - `wait` — simple promise-based delay helper
+- `createId` — generate random UUIDs with fallback support
 - `TryCatchReturn` — shared return type for async helpers
 
 ## Exports
@@ -33,6 +34,7 @@ bun add svelte-sonner
 import {
   Cookies,
   createAsync,
+  createId,
   timestamps,
   tryCatch,
   wait,
@@ -258,6 +260,26 @@ Useful for:
 - delaying UI transitions
 - retry flows
 - testing async behavior
+
+---
+
+## `createId`
+
+Generates a version 4 UUID compliant string. It uses `globalThis.crypto.randomUUID()` when available in modern environments, falls back to `globalThis.crypto.getRandomValues()` if available (e.g. in most serverless/edge environments), and has a pure JS `Math.random` fallback for absolute compatibility.
+
+### Example
+
+```ts
+import { createId } from "@sveltebase/utils";
+
+const id = createId(); // "e3b0c442-98fc-1c14-9afb-f4c8996fb924"
+```
+
+Useful for:
+
+- generating unique client-side element IDs
+- local database key creation (e.g. Dexie/IndexedDB)
+- generating temp keys for list items
 
 ---
 

@@ -22,4 +22,5 @@ export type { TryCatchReturn } from "./async.svelte.js";
 export declare function tryCatch(task: () => Promise<TryCatchReturn> | TryCatchReturn): Promise<void>;
 export declare const wait: (ms: number) => Promise<unknown>;
 export { createAsync } from "./async.svelte.js";
+export declare function createId(): string;
 //# sourceMappingURL=index.d.ts.map

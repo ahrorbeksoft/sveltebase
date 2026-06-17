@@ -1,0 +1,480 @@
+# @sveltebase/sync
+
+Reactive, local-first database synchronization library built for **Svelte 5** and **Cloudflare Workers / Durable Objects**.
+
+## Features
+
+- **Local Persistence**: Powered by [Dexie.js](https://dexie.org/) (IndexedDB). Zero-WASM, instant load times, persistent across page refreshes.
+- **Optimistic Updates**: Client mutations update the local database instantly (~1ms), sync with the server in the background, and roll back automatically on failures.
+- **Real-Time Sync**: Single multiplexed WebSocket connection fanning out updates to all active subscribers.
+- **Last-Write-Wins (LWW)**: Timestamps prevent out-of-order write conflicts.
+- **Delta Syncing (Incremental Load)**: Automatically pulls only modified records since the last sync time to conserve network bandwidth.
+- **Hibernate Friendly**: Client-initiated heartbeats allow Cloudflare Durable Objects to sleep when idle, cutting active execution costs down to near zero.
+- **Vite Integration**: Custom dev plugin simulating Durable Objects and bindings proxy locally without full worker compilation loops.
+
+---
+
+## Architecture & Forked Adapter
+
+To bind custom Cloudflare Workers features (like **Durable Objects**, **Queues**, and **Email Handlers**) directly within a SvelteKit application, you **must use** the forked adapter:
+
+👉 **`@joshthomas/sveltekit-adapter-cloudflare`**
+
+### Why this adapter?
+The official `@sveltejs/adapter-cloudflare` owns the final worker entrypoint (`_worker.js`) and does not natively allow you to declare custom class exports (like Durable Objects) in the same worker. 
+
+The **Josh Thomas fork** introduces a platform entrypoint (`src/platform.cloudflare.ts`) which SvelteKit bundles into the worker wrapper, allowing you to export Durable Objects while SvelteKit continues to manage Svelte routing and page rendering.
+
+---
+
+## 1. Cloudflare Configuration (`wrangler.jsonc`)
+
+Define D1 database and Durable Object namespace configurations in your `wrangler.jsonc` (or `wrangler.toml`):
+
+```json
+{
+  "compatibility_date": "2026-06-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": ".svelte-kit/cloudflare/_worker.js",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sveltebase-sync",
+      "database_id": "YOUR_DATABASE_ID",
+      "migrations_dir": "drizzle/migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SYNC_ENGINE",
+        "class_name": "SyncEngine"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SyncEngine"]
+    }
+  ]
+}
+```
+
+---
+
+## 2. Setup Guide
+
+### Step 1: Client Schema & Client Creation
+
+Configure your client-side IndexedDB database using `SyncClient`.
+
+```typescript
+// src/lib/sync-client.ts
+import { SyncClient } from "@sveltebase/sync/client";
+import type { Todo } from "$lib/server/db/schema";
+
+// Map table name to row type
+type AppDatabaseSchema = {
+  todos: Todo;
+};
+
+export const sync = new SyncClient<AppDatabaseSchema>({
+  name: "sveltebase-sync", // Local IndexedDB name
+  url: "/api/sync",         // WebSocket endpoint
+  tables: {
+    todos: {
+      indexes: "id, completed, createdAt", // IndexedDB indexes
+      channel: "todos",                     // Sync channel
+    },
+  },
+});
+
+// Export typed table wrapper
+export const todosTable = sync.table("todos");
+```
+
+Use it in your Svelte 5 components:
+```svelte
+<script lang="ts">
+  import { todosTable } from "$lib/sync-client";
+  import { Check, Trash } from "lucide-svelte";
+
+  // Reactive liveQuery updates instantly on local mutations & remote syncs
+  const todos = todosTable.liveQuery((t) => t.orderBy("createdAt").reverse().toArray());
+
+  let title = "";
+
+  async function addTodo() {
+    if (!title.trim()) return;
+    await todosTable.add({
+      id: crypto.randomUUID(),
+      title,
+      completed: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    title = "";
+  }
+</script>
+
+<input bind:value={title} onkeydown={(e) => e.key === 'Enter' && addTodo()} />
+
+{#if todos.isLoading}
+  <div>Loading todos...</div>
+{:else if todos.status === "error"}
+  <div>Error loading database: {todos.error?.message || todos.error}</div>
+{:else}
+  {#each todos.data as todo (todo.id)}
+    <div>
+      <button onclick={() => todosTable.put(todo.id, { completed: !todo.completed })}>
+        <Check class={todo.completed ? "text-emerald-500" : ""} />
+      </button>
+      <span>{todo.title}</span>
+      <button onclick={() => todosTable.delete(todo.id)}><Trash /></button>
+    </div>
+  {/each}
+{/if}
+```
+
+---
+
+### Step 2: Define Sync Handlers (Server)
+
+Define the handlers that translate IndexedDB operations (fetch, create, update, delete) to D1 database queries:
+
+```typescript
+// src/lib/server/sync-todos.ts
+import { defineSync } from "@sveltebase/sync";
+import { getDB } from "$lib/server/db/index.js";
+import { todos } from "$lib/server/db/schema";
+import { desc, eq, gt } from "drizzle-orm";
+import type { Todo } from "$lib/server/db/schema";
+
+export const todoSync = defineSync<Todo>({
+  channel: "todos",
+
+  fetch: async (ctx, since) => {
+    const db = getDB(ctx.platform);
+    if (since) {
+      return await db
+        .select()
+        .from(todos)
+        .where(gt(todos.updatedAt, since))
+        .orderBy(desc(todos.createdAt));
+    }
+    return await db.select().from(todos).orderBy(desc(todos.createdAt));
+  },
+
+  create: async (ctx, data) => {
+    const db = getDB(ctx.platform);
+    const [created] = await db
+      .insert(todos)
+      .values(data)
+      .onConflictDoUpdate({
+        target: todos.id,
+        set: {
+          title: data.title,
+          completed: data.completed,
+          updatedAt: new Date().toISOString(),
+        },
+      })
+      .returning();
+    return created;
+  },
+
+  update: async (ctx, key, changes) => {
+    const db = getDB(ctx.platform);
+    const [updated] = await db
+      .update(todos)
+      .set({ ...changes, updatedAt: new Date().toISOString() })
+      .where(eq(todos.id, key))
+      .returning();
+    return updated;
+  },
+
+  delete: async (ctx, key) => {
+    const db = getDB(ctx.platform);
+    await db.delete(todos).where(eq(todos.id, key));
+  },
+});
+```
+
+Export handlers from a single list:
+```typescript
+// src/lib/server/sync-handlers.ts
+import { todoSync } from "./sync-todos.js";
+
+export const handlers = [todoSync];
+```
+
+---
+
+### Step 3: SvelteKit WebSocket Server Route
+
+Set up the upgrade endpoint to forward SvelteKit HTTP upgrades to Durable Objects.
+
+```typescript
+// src/routes/api/sync/+server.ts
+import { handleUpgrade } from "@sveltebase/sync";
+import type { RequestEvent, RequestHandler } from "@sveltejs/kit";
+
+export const GET: RequestHandler = (event: RequestEvent) => {
+  return handleUpgrade(event.request, event.platform);
+};
+```
+
+---
+
+### Step 4: Svelte Config & Cloudflare Platform Entrypoint
+
+Configure `@joshthomas/sveltekit-adapter-cloudflare` in your `svelte.config.js`:
+
+```javascript
+// svelte.config.js
+import adapter from "@joshthomas/sveltekit-adapter-cloudflare";
+
+export default {
+  kit: {
+    adapter: adapter({
+      platform: "src/platform.cloudflare.ts" // Platform config file
+    })
+  }
+};
+```
+
+Create `src/platform.cloudflare.ts` to export your Durable Object `SyncEngine` class:
+
+```typescript
+// src/platform.cloudflare.ts
+import { SyncEngineBase } from "@sveltebase/sync/server";
+import { handlers } from "./lib/server/sync-handlers.js";
+
+// Export the Durable Object class compiled into the worker
+export class SyncEngine extends SyncEngineBase {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env, handlers);
+  }
+}
+```
+
+---
+
+### Step 5: Vite Dev Plugin Setup
+
+In Vite development mode, Durable Objects are not natively available. We provide a Vite plugin (`syncDevPlugin`) that intercepts upgrades and emulates the DO synchronization broker locally in Node.js.
+
+Configure `vite.config.ts`:
+
+```typescript
+// vite.config.ts
+import { sveltekit } from "@sveltejs/kit/vite";
+import { defineConfig } from "vite";
+import { syncDevPlugin } from "@sveltebase/sync/vite";
+
+export default defineConfig({
+  plugins: [
+    syncDevPlugin({
+      // Path to your sync handlers. Uses ssrLoadModule so SvelteKit 
+      // path aliases (like $lib) resolve perfectly at runtime.
+      handlersPath: "$lib/server/sync-handlers" 
+    }),
+    sveltekit()
+  ]
+});
+```
+
+---
+
+## 3. Local Development Features
+
+### Automatic Bindings Proxy
+During development (`vite dev`), the dev engine uses Wrangler's programmatic Node API `getPlatformProxy()` under the hood. It caches the proxy on `globalThis` to survive Vite HMR reloads. 
+
+Both SvelteKit and the dev WebSocket server share the **exact same emulated D1 database instance** automatically.
+
+### Message Buffering
+Vite's module loading is asynchronous. When upgrading WebSocket connections, the plugin buffers incoming WebSocket frames during the module import phase. Once modules have fully loaded and handlers are registered, it replays the buffered messages to avoid connection race conditions.
+
+---
+
+## 4. Security, Authorization & Scoping
+
+### Handshake HTTP Context (Cookies & Headers)
+When the WebSocket connection is established, the HTTP upgrade request's headers, cookies, and query parameters are captured. 
+
+This context is preserved and passed to every sync handler execution (`fetch`, `create`, `update`, `delete`, `authorize`, `scope`) via the **`ctx.request`** object. Developers can parse session cookies or credentials inside mutations and queries:
+
+```typescript
+// Helper to extract session profile from handshake request
+async function getSession(ctx: SyncContext) {
+  const cookie = ctx.request.headers.get("Cookie");
+  const db = getDB(ctx.platform);
+  // Perform session verification/DB lookup...
+  return { userId: "usr_123", role: "admin" };
+}
+```
+
+---
+
+### The `authorize` Hook
+The `authorize` hook acts as a guard. It runs synchronously on the server when a client attempts to **subscribe** to a channel or submit a **mutation** (create, update, delete). If it throws an error, the operation is rejected and rolled back.
+
+```typescript
+authorize: async (ctx) => {
+  const user = await getSession(ctx);
+  if (!user) {
+    throw new Error("Unauthorized access to channel");
+  }
+}
+```
+
+---
+
+### Throwing & Filtering in Handlers (CRUD Operations)
+
+Beyond the global `authorize` hook, you can enforce security directly inside your query (`fetch`) and mutation (`create`, `update`, `delete`) handlers:
+
+#### 1. Filtering on Read (`fetch`)
+Use the handshake HTTP request (`ctx.request`) to dynamically filter the records fetched from the database, preventing users from pulling unauthorized rows.
+
+```typescript
+fetch: async (ctx, since) => {
+  const db = getDB(ctx.platform);
+  const user = await getSession(ctx);
+
+  let query = db.select().from(todos);
+  const conditions = [];
+
+  // Enforce read boundaries
+  if (user.role !== "admin") {
+    conditions.push(eq(todos.published, true)); // Non-admins only read published todos
+  }
+  if (since) {
+    conditions.push(gt(todos.updatedAt, since)); // Apply delta sync timestamp
+  }
+
+  if (conditions.length > 0) {
+    query = query.where(and(...conditions));
+  }
+  return await query;
+}
+```
+
+#### 2. Write & Delete Handlers (Optional)
+The `create`, `update`, and `delete` handlers are optional. If you omit any of these handlers, Sveltebase Sync treats the channel as read-only for that operation and will automatically reject any incoming client mutations.
+
+If you *do* define them, you can throw regular JavaScript/TypeScript errors inside your mutation handlers. When an error is thrown:
+1. The server catches the error and rejects the mutation.
+2. The server sends a rejection response back to the client.
+3. The client receives the rejection, triggers the `rollback` function, and reverts the optimistic UI change in IndexedDB.
+
+```typescript
+create: async (ctx, data) => {
+  const user = await getSession(ctx);
+  
+  // Guard write action
+  if (user.role !== "editor" && user.role !== "admin") {
+    throw new Error("You do not have permission to create items.");
+  }
+  
+  const db = getDB(ctx.platform);
+  const [created] = await db.insert(todos).values(data).returning();
+  return created;
+},
+
+update: async (ctx, key, changes) => {
+  const user = await getSession(ctx);
+  const db = getDB(ctx.platform);
+
+  // Fetch target record to verify ownership
+  const [record] = await db.select().from(todos).where(eq(todos.id, key));
+  if (record.ownerId !== user.userId && user.role !== "admin") {
+    throw new Error("You cannot update a record owned by someone else.");
+  }
+
+  const [updated] = await db.update(todos).set(changes).where(eq(todos.id, key)).returning();
+  return updated;
+},
+
+delete: async (ctx, key) => {
+  const user = await getSession(ctx);
+  
+  // Guard delete action
+  if (user.role !== "admin") {
+    throw new Error("Only admins can delete items.");
+  }
+
+  const db = getDB(ctx.platform);
+  await db.delete(todos).where(eq(todos.id, key));
+}
+```
+
+---
+
+### The `scope` Hook (Row-Level Broadcast Filtering)
+The `scope` hook determines which of the connected and subscribed clients should receive real-time notifications when a database record is modified. It runs asynchronously after a mutation succeeds on the database.
+
+> [!CAUTION]
+> **Security Warning:** If you omit the `scope` hook, Sveltebase Sync defaults to broadcasting mutations to `"all"` subscribed connections. 
+> If your channel contains user-private data (meaning you filter by user ID inside the `fetch` handler), you **must** also define a `scope` hook that returns the user ID of the owner: `scope: (ctx, action, data) => [data.userId]`. Otherwise, a user's private updates will be broadcast to all connected users in real time.
+
+* Return **`"all"`** to broadcast the change to every client subscribed to the channel.
+* Return an **array of user IDs** (`string[]`) to restrict the broadcast. The broker will match these IDs against the connection's registered identity and skip broadcasting to everyone else.
+
+```typescript
+export const todoSync = defineSync<Todo>({
+  channel: "todos",
+
+  // Runs when a todo changes. Returns list of user IDs allowed to see this update
+  scope: async (ctx, action, data) => {
+    const db = getDB(ctx.platform);
+
+    // 1. Public records are broadcasted to all subscribers
+    if (data.published) {
+      return "all";
+    }
+
+    // 2. Draft/Private records are only broadcasted to admins
+    const admins = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.role, "admin"));
+
+    return admins.map((admin) => admin.id);
+  }
+});
+```
+
+#### How Connection Identities are Registered
+The broker matches the user IDs returned by `scope` to each active client's socket state. The server registers the connection's identity during the handshake using query parameters or the `x-user-id` header:
+```typescript
+const userId = url.searchParams.get("userId") || request.headers.get("x-user-id");
+```
+
+##### Authenticating using SvelteKit Sessions & Cookies (Recommended)
+Instead of exposing user IDs in client-side WebSocket URLs, you can resolve the user session on the server inside your SvelteKit route (`+server.ts`) and inject the verified `x-user-id` header before calling `handleUpgrade()`:
+
+```typescript
+// src/routes/api/sync/+server.ts
+import { handleUpgrade } from "@sveltebase/sync";
+import type { RequestEvent, RequestHandler } from "@sveltejs/kit";
+
+export const GET: RequestHandler = (event: RequestEvent) => {
+  // 1. Get user identity from your custom server-side session/cookies
+  const user = event.locals.user; // e.g., set by your auth hook middleware
+  if (!user) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
+  // 2. Clone the request and inject the verified user ID header
+  const request = new Request(event.request);
+  request.headers.set("x-user-id", user.id);
+
+  // 3. Hand off to the sync engine
+  return handleUpgrade(request, event.platform);
+};
+```
+This approach keeps WebSocket URLs clean of private IDs and ensures all active sockets are automatically authenticated with their verified session roles/IDs.
+
+

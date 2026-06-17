@@ -1,0 +1,49 @@
+{
+  "name": "@sveltebase/sync",
+  "version": "1.0.1",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
+  "svelte": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "svelte": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "svelte": "./dist/client/index.js",
+      "default": "./dist/client/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/engine.d.ts",
+      "default": "./dist/server/engine.js"
+    },
+    "./server/dev-engine": {
+      "types": "./dist/server/dev-engine.d.ts",
+      "default": "./dist/server/dev-engine.js"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "default": "./dist/vite.js"
+    }
+  },
+  "dependencies": {
+    "dexie": "^4.0.8"
+  },
+  "peerDependencies": {
+    "svelte": "^5.0.0",
+    "@sveltejs/kit": "^2.0.0"
+  },
+  "scripts": {
+    "build": "svelte-package --input ./src --output ./dist",
+    "check": "tsc --project tsconfig.json --noEmit",
+    "clean": "rm -rf dist"
+  }
+}

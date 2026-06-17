@@ -1,6 +1,6 @@
 {
   "name": "sveltebase-workspace",
-  "version": "0.5.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.1.26",
@@ -20,14 +20,18 @@
     "release:publish": "bun run build && bun run ./scripts/publish.mjs"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260617.1",
     "@sveltejs/package": "^2.5.7",
-    "@sveltejs/vite-plugin-svelte": "^7.0.0",
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@types/node": "^25.9.3",
     "publint": "^0.3.18",
-    "svelte": "^5.55.3",
-    "svelte-check": "^4.4.6",
+    "svelte": "^5.55.9",
+    "svelte-check": "^4.4.8",
     "tsup": "^8.5.1",
     "typescript": "^6.0.2",
-    "vite": "^8.0.8"
+    "vite": "^8.0.8",
+    "wrangler": "^4.101.0",
+    "zod": "^4.4.3"
   },
   "description": "A Bun workspace for Svelte packages.",
   "main": "index.js",
