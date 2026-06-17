@@ -23,4 +23,9 @@ export declare function tryCatch(task: () => Promise<TryCatchReturn> | TryCatchR
 export declare const wait: (ms: number) => Promise<unknown>;
 export { createAsync } from "./async.svelte.js";
 export declare function createId(): string;
+export declare function pluralize(count: number, { zero, one, other }: {
+    zero?: string;
+    one?: string;
+    other: string | ((count: number) => string);
+}): string;
 //# sourceMappingURL=index.d.ts.map

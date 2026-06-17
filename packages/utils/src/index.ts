@@ -163,3 +163,14 @@ export function createId(): string {
 	});
 }
 
+export function pluralize(
+  count: number,
+  { zero, one, other }: { zero?: string; one?: string; other: string | ((count: number) => string) }
+) {
+  if (count === 0 && zero) return zero;
+  if (count === 1 && one) return `1 ${one}`;
+  if (typeof other === "function") return other(count);
+
+  return `${count} ${other}`;
+}
+

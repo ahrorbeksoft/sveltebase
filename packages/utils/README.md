@@ -18,14 +18,13 @@ bun add svelte-sonner
 
 > `svelte` is a peer dependency and should already exist in your app.
 
-## What’s included
-
 - `Cookies` — browser cookie helpers
 - `createAsync` — wraps async functions with loading and error state
 - `tryCatch` — run a task with built-in toast/error handling
 - `timestamps` — generate `createdAt` / `updatedAt` values
 - `wait` — simple promise-based delay helper
 - `createId` — generate random UUIDs with fallback support
+- `pluralize` — format counts using custom zero, one, and other rules
 - `TryCatchReturn` — shared return type for async helpers
 
 ## Exports
@@ -35,6 +34,7 @@ import {
   Cookies,
   createAsync,
   createId,
+  pluralize,
   timestamps,
   tryCatch,
   wait,
@@ -280,6 +280,37 @@ Useful for:
 - generating unique client-side element IDs
 - local database key creation (e.g. Dexie/IndexedDB)
 - generating temp keys for list items
+
+---
+
+## `pluralize`
+
+A helper for formatting counts into readable strings using custom rules for zero, one, and multiple items.
+
+### Example
+
+```ts
+import { pluralize } from "@sveltebase/utils";
+
+// 1. Basic usage
+pluralize(0, { other: "items" }); // "0 items"
+pluralize(1, { one: "item", other: "items" }); // "1 item"
+pluralize(5, { one: "item", other: "items" }); // "5 items"
+
+// 2. Custom zero text
+pluralize(0, { zero: "No items", one: "item", other: "items" }); // "No items"
+
+// 3. Callback formatting for complex pluralizations
+pluralize(3, {
+  other: (count) => `${count} matches found`
+}); // "3 matches found"
+```
+
+Useful for:
+
+- localized text formatting
+- user-facing list item counts (e.g., "1 item", "No items", "4 items")
+- dynamic messaging depending on numeric results
 
 ---
 
