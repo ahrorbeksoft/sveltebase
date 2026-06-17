@@ -11,6 +11,7 @@ Reactive, local-first database synchronization library built for **Svelte 5** an
 - **Delta Syncing (Incremental Load)**: Automatically pulls only modified records since the last sync time to conserve network bandwidth.
 - **Hibernate Friendly**: Client-initiated heartbeats allow Cloudflare Durable Objects to sleep when idle, cutting active execution costs down to near zero.
 - **Vite Integration**: Custom dev plugin simulating Durable Objects and bindings proxy locally without full worker compilation loops.
+- **Database Agnostic**: Completely decoupled from the underlying storage. You are not locked into Cloudflare D1; the sync handler hooks (`fetch`, `create`, `update`, `delete`) are simple, asynchronous JavaScript callbacks where you can connect to PostgreSQL, MySQL, Supabase, Neon, MongoDB, or any database of your choice.
 
 ---
 
@@ -141,7 +142,11 @@ Use it in your Svelte 5 components:
 
 ### Step 2: Define Sync Handlers (Server)
 
-Define the handlers that translate IndexedDB operations (fetch, create, update, delete) to D1 database queries:
+> [!NOTE]
+> **Database Agnostic (No Lock-In):**
+> While the examples below connect to **Cloudflare D1 SQLite** (using Drizzle ORM), `@sveltebase/sync` is completely database-agnostic. The `fetch`, `create`, `update`, and `delete` handlers are standard asynchronous functions. You can fetch, save, or delete data using **any database** of your choice (PostgreSQL, MySQL, Supabase, Neon, MongoDB, etc.) by writing the appropriate database connection logic inside these hooks.
+
+Define the handlers that translate IndexedDB operations (fetch, create, update, delete) to database queries:
 
 ```typescript
 // src/lib/server/sync-todos.ts

@@ -1,6 +1,6 @@
 {
   "name": "sveltebase-workspace",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.1.26",
@@ -17,7 +17,8 @@
     "build:web": "bun run --filter @sveltebase/web build",
     "check:web": "bun run --filter @sveltebase/web check",
     "release:version": "bun run ./scripts/version.mjs",
-    "release:publish": "bun run build && bun run ./scripts/publish.mjs"
+    "release:publish": "bun run build && bun run ./scripts/publish.mjs",
+    "release": "bun run ./scripts/publish-all.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260617.1",

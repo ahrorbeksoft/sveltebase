@@ -9,4 +9,4 @@ A Bun workspace containing foundational Svelte 5 packages.
 - **[`@sveltebase/utils`](./packages/utils/README.md)**: Svelte utility package with helpers for cookies, async flows, keyed async state helpers, and direct `svelte-sonner` toast notifications.
 - **[`@sveltebase/state`](./packages/state/README.md)**: Svelte rune-based global state package.
 - **[`@sveltebase/i18n`](./packages/i18n/README.md)**: Locale state, translation, and formatting helpers.
-- **[`@sveltebase/instant`](./packages/instant/README.md)**: Generic InstantDB query helpers for Svelte.
+- **[`@sveltebase/instant`](./packages/instant/README.md) (Deprecated)**: Generic InstantDB query helpers for Svelte (No longer maintained). We have transitioned our stack to Cloudflare D1 SQLite with `@sveltebase/sync` and `@sveltebase/auth`.
