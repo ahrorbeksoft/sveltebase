@@ -1,3 +1,56 @@
+import type { SyncHandler } from "./index.js";
+
+export type PublishEventData<TRecord, TAction extends "create" | "update" | "delete"> =
+  TAction extends "create"
+    ? TRecord
+    : TAction extends "update"
+      ? Partial<TRecord>
+      : { updatedAt?: string } | undefined;
+
+export type InferSchemaFromHandlers<T extends SyncHandler[]> = {
+  [K in T[number] as K["config"]["channel"] extends string
+    ? K["config"]["channel"]
+    : K["config"]["channel"] extends (...args: any[]) => infer R
+      ? R extends string
+        ? R
+        : string
+      : string]: K extends SyncHandler<infer TRow> ? TRow : never;
+};
+
+export function createPublisher<TSchema extends Record<string, any>>(): <
+  TChannel extends keyof TSchema & string,
+  TAction extends "create" | "update" | "delete",
+>(
+  channel: TChannel | `${TChannel}:${string}`,
+  action: TAction,
+  key: string | undefined,
+  data: PublishEventData<TSchema[TChannel], TAction>,
+) => Promise<void>;
+
+export function createPublisher<THandlers extends SyncHandler[]>(
+  handlers: THandlers
+): <
+  TChannel extends keyof InferSchemaFromHandlers<THandlers> & string,
+  TAction extends "create" | "update" | "delete",
+>(
+  channel: TChannel | `${TChannel}:${string}`,
+  action: TAction,
+  key: string | undefined,
+  data: PublishEventData<InferSchemaFromHandlers<THandlers>[TChannel], TAction>,
+) => Promise<void>;
+
+export function createPublisher(handlers?: SyncHandler[]) {
+  return async (
+    channel: string,
+    action: "create" | "update" | "delete",
+    key: string | undefined,
+    data: any,
+  ): Promise<void> => {
+    const resolvedChannel = String(channel);
+    return publishEvent(resolvedChannel, action, key, data);
+  };
+}
+
 export async function publishEvent(
   channel: string,
   action: "create" | "update" | "delete",

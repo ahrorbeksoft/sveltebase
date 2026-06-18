@@ -482,4 +482,40 @@ export const GET: RequestHandler = (event: RequestEvent) => {
 ```
 This approach keeps WebSocket URLs clean of private IDs and ensures all active sockets are automatically authenticated with their verified session roles/IDs.
 
+---
+
+## 5. Type-Safe Backend Event Publishing (`createPublisher`)
+
+When publishing backend events (e.g. from standard API routes, message queues, or cron triggers) to push updates to connected clients, you can create a type-safe publisher matched to your application's database schema. This checks channels (including dynamic channel patterns like `"todos:user_123"`), actions, and payloads at compile-time:
+
+```typescript
+import { createPublisher } from "@sveltebase/sync";
+import type { Todo } from "$lib/server/db/schema";
+
+// Define schema matching channel names to model types
+type AppSyncSchema = {
+  todos: Todo;
+};
+
+// Create typed publish function (Option A: Explicit Schema)
+const publish = createPublisher<AppSyncSchema>();
+
+// Create typed publish function (Option B: Automatically inferred from Sync Handlers)
+import { handlers } from "./lib/server/sync-handlers.js";
+const publish = createPublisher(handlers);
+
+// 1. Publish a create event (expects full Todo payload)
+await publish("todos", "create", todo.id, todo);
+
+// 2. Publish an update event (expects Partial<Todo> payload)
+await publish("todos", "update", todo.id, { completed: true });
+
+// 3. Publish a delete event (expects optional { updatedAt: string } metadata)
+await publish("todos", "delete", todo.id, undefined);
+
+// 4. Supports scoped/dynamic channels (e.g. "channelName:scopeId")
+await publish("todos:user_123", "update", todo.id, { title: "New Title" });
+```
+
+
 
