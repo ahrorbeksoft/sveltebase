@@ -482,4 +482,95 @@ export const GET: RequestHandler = (event: RequestEvent) => {
 ```
 This approach keeps WebSocket URLs clean of private IDs and ensures all active sockets are automatically authenticated with their verified session roles/IDs.
 
+---
+
+## 5. Developer Experience (DX) & Client Enhancements
+
+The package features several DX improvements to simplify real-world application building:
+
+### A. Reactive Connection Status
+You can track the WebSocket's connection state in Svelte 5 reactively using `sync.status`:
+```svelte
+<script lang="ts">
+  import { sync } from "$lib/sync-client";
+</script>
+
+{#if sync.status === "connecting"}
+  <p class="text-amber-500">Connecting to real-time engine...</p>
+{:else if sync.status === "disconnected"}
+  <p class="text-rose-500">Offline. Reconnecting...</p>
+{:else}
+  <p class="text-emerald-500">Connected and Synced</p>
+{/if}
+```
+
+### B. Manual Instant Reconnection
+To instantly reconnect when the browser detects it has regained network access, you can call `sync.reconnect()`:
+```typescript
+if (typeof window !== "undefined") {
+  window.addEventListener("online", () => {
+    sync.reconnect(); // Instantly reconnects without waiting for the 2-second backoff
+  });
+}
+```
+
+### C. Dynamic & Async Connection URLs (e.g., JWT Auth)
+You can configure `url` as a function (optionally returning a Promise) to retrieve a fresh URL or append parameters (like dynamic access tokens) on every reconnection attempt:
+```typescript
+export const sync = new SyncClient<AppDatabaseSchema>({
+  name: "sveltebase-sync",
+  url: async () => {
+    const token = await getFreshJWTToken();
+    return `/api/sync?token=${token}`;
+  },
+  tables: { ... }
+});
+```
+
+### D. Automatic Svelte 5 Parameter Reactivity
+`useLiveQuery` is built using Svelte 5 `$effect` under the hood. Any Svelte 5 `$state` or `$derived` variables referenced synchronously within the query function will automatically re-subscribe with the updated query boundaries when they change:
+```svelte
+<script lang="ts">
+  let queryTerm = $state("");
+  
+  // Re-subscribes and updates the live query automatically when `queryTerm` changes
+  const results = todosTable.liveQuery((t) => {
+    const term = queryTerm;
+    return t.where("title").startsWith(term).toArray();
+  });
+</script>
+```
+
+### E. Table Wrapper Utilities & Direct Dexie Access
+The `.table()` wrapper returns helpers to minimize boilerplate and exposes direct typed access to the underlying Dexie table:
+```typescript
+const todosTable = sync.table("todos");
+
+// 1. Get a single row directly (non-reactive Promise)
+const todo = await todosTable.get("todo-id");
+
+// 2. Fetch all rows as a live query
+const allTodos = todosTable.list();
+
+// 3. Direct access to the raw Dexie table for advanced queries
+const count = await todosTable.rawTable.count();
+const active = await todosTable.rawTable.where("completed").equals(0).toArray();
+```
+
+### F. Structured Zod Validation Rejections
+When Zod validations (`validate.create` or `validate.update`) fail on the server, the server returns a formatted validation error. The client-side Promise is rejected with an Error that contains a `.validationErrors` array:
+```typescript
+try {
+  await todosTable.add({ title: "" });
+} catch (err: any) {
+  if (err.validationErrors) {
+    // validationErrors = [{ path: "title", message: "Required" }]
+    console.error("Validation issues:", err.validationErrors);
+  } else {
+    console.error("General error:", err.message);
+  }
+}
+```
+
+
 

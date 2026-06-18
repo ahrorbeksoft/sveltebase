@@ -223,11 +223,24 @@ export class SyncBroker {
         err,
       );
       if (msg.type === "mutate") {
+        let errorMessage = err.message || "Server error";
+        let validationErrors: any = undefined;
+
+        // Formats Zod validation errors for structured client rejection
+        if (err && err.name === "ZodError" && Array.isArray(err.issues)) {
+          validationErrors = err.issues.map((issue: any) => ({
+            path: issue.path.join("."),
+            message: issue.message,
+          }));
+          errorMessage = `Validation failed: ${err.issues.map((i: any) => `${i.path.join(".")}: ${i.message}`).join(", ")}`;
+        }
+
         conn.send(
           JSON.stringify({
             type: "reject",
             id: msg.id,
-            error: err.message || "Server error",
+            error: errorMessage,
+            validationErrors,
           }),
         );
       }
