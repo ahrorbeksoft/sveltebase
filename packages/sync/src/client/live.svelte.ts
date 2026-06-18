@@ -1,3 +1,4 @@
+import { onDestroy } from "svelte";
 import { liveQuery } from "dexie";
 
 export type LiveQueryResult<T> =
@@ -11,25 +12,22 @@ export function useLiveQuery<T>(queryFn: () => Promise<T> | T): LiveQueryResult<
   let status = $state<"loading" | "success" | "error">("loading");
 
   if (typeof window !== "undefined") {
-    $effect(() => {
-      const observable = liveQuery(queryFn);
-      const subscription = observable.subscribe({
-        next: (val) => {
-          data = val;
-          error = undefined;
-          status = "success";
-        },
-        error: (err) => {
-          data = undefined;
-          error = err;
-          status = "error";
-          console.error("liveQuery error:", err);
-        },
-      });
-
-      return () => {
-        subscription.unsubscribe();
-      };
+    const observable = liveQuery(queryFn);
+    const subscription = observable.subscribe({
+      next: (val) => {
+        data = val;
+        error = undefined;
+        status = "success";
+      },
+      error: (err) => {
+        data = undefined;
+        error = err;
+        status = "error";
+        console.error("liveQuery error:", err);
+      },
+    });
+    onDestroy(() => {
+      subscription.unsubscribe();
     });
   }
 

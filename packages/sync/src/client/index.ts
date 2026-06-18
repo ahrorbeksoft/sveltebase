@@ -11,7 +11,7 @@ export type TableConfig = {
 
 export type SyncClientOptions = {
   name: string;
-  url: string | (() => string | Promise<string>);
+  url: string;
   tables: Record<string, TableConfig>;
 };
 
@@ -30,16 +30,13 @@ export class SyncClient<
   TSchema extends Record<string, any> = Record<string, any>,
 > {
   public db: Dexie;
-  private wsUrl: string | (() => string | Promise<string>);
+  private wsUrl: string;
   private socket: WebSocket | undefined;
   private tableConfigs: Record<string, TableConfig>;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private pingInterval: ReturnType<typeof setInterval> | undefined;
   private closedByClient = false;
   private activeChannels = new Set<string>();
-
-  // Reactive connection status
-  private _status = $state<"connecting" | "connected" | "disconnected">("connecting");
 
   // Mutations waiting for ack/reject from server
   private pendingMutations = new Map<string, PendingMutation>();
@@ -54,7 +51,7 @@ export class SyncClient<
 
   constructor(options: {
     name: string;
-    url: string | (() => string | Promise<string>);
+    url: string;
     tables: Record<keyof TSchema & string, TableConfig>;
   }) {
     this.wsUrl = options.url;
@@ -73,42 +70,20 @@ export class SyncClient<
     }
   }
 
-  public get status() {
-    return this._status;
-  }
-
-  private async connect() {
+  private connect() {
     if (this.closedByClient) return;
-    this._status = "connecting";
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
-
-    let resolvedUrl: string;
-    try {
-      resolvedUrl = typeof this.wsUrl === "function" ? await this.wsUrl() : this.wsUrl;
-    } catch (err) {
-      console.error("SyncClient: Failed to resolve wsUrl", err);
-      this._status = "disconnected";
-      if (!this.closedByClient) {
-        this.reconnectTimer = setTimeout(() => this.connect(), 2000);
-      }
-      return;
-    }
-
     const fullUrl =
-      resolvedUrl.startsWith("ws://") || resolvedUrl.startsWith("wss://")
-        ? resolvedUrl
-        : `${protocol}//${host}${resolvedUrl}`;
+      this.wsUrl.startsWith("ws://") || this.wsUrl.startsWith("wss://")
+        ? this.wsUrl
+        : `${protocol}//${host}${this.wsUrl}`;
 
-    const socket = new WebSocket(fullUrl);
-    this.socket = socket;
+    this.socket = new WebSocket(fullUrl);
 
-    socket.addEventListener("open", async () => {
-      if (this.socket !== socket) return;
-
+    this.socket.addEventListener("open", async () => {
       console.log("SyncClient: WebSocket connected");
-      this._status = "connected";
       this.activeChannels.clear();
       this.startHeartbeat();
 
@@ -119,7 +94,7 @@ export class SyncClient<
 
       // Re-send all pending unacknowledged mutations
       for (const mut of this.pendingMutations.values()) {
-        socket.send(
+        this.socket?.send(
           JSON.stringify({
             type: "mutate",
             id: mut.id,
@@ -135,8 +110,7 @@ export class SyncClient<
       this.flushMutationQueue();
     });
 
-    socket.addEventListener("message", async (message) => {
-      if (this.socket !== socket) return;
+    this.socket.addEventListener("message", async (message) => {
       if (typeof message.data !== "string") return;
       if (message.data === "pong") return;
 
@@ -146,38 +120,17 @@ export class SyncClient<
       await this.handleServerMessage(msg);
     });
 
-    socket.addEventListener("close", () => {
-      if (this.socket === socket) {
-        this.socket = undefined;
-        this._status = "disconnected";
-        this.stopHeartbeat();
-        if (!this.closedByClient) {
-          this.reconnectTimer = setTimeout(() => this.connect(), 2000);
-        }
-      }
-    });
-
-    socket.addEventListener("error", (err) => {
-      if (this.socket === socket) {
-        console.error("SyncClient: WebSocket error", err);
-      }
-    });
-  }
-
-  public reconnect() {
-    this.closedByClient = false;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = undefined;
-    }
-    if (this.socket) {
-      try {
-        this.socket.close();
-      } catch {}
+    this.socket.addEventListener("close", () => {
       this.socket = undefined;
-      this._status = "disconnected";
-    }
-    this.connect();
+      this.stopHeartbeat();
+      if (!this.closedByClient) {
+        this.reconnectTimer = setTimeout(() => this.connect(), 2000);
+      }
+    });
+
+    this.socket.addEventListener("error", (err) => {
+      console.error("SyncClient: WebSocket error", err);
+    });
   }
 
   private startHeartbeat() {
@@ -311,13 +264,7 @@ export class SyncClient<
         if (pending) {
           console.warn(`Mutation ${msg.id} rejected by server: ${msg.error}`);
           await pending.rollback();
-          
-          const errorObj = new Error(msg.error);
-          if ((msg as any).validationErrors) {
-            (errorObj as any).validationErrors = (msg as any).validationErrors;
-          }
-          
-          pending.reject(errorObj);
+          pending.reject(new Error(msg.error));
           this.pendingMutations.delete(msg.id);
         }
         break;
@@ -358,20 +305,10 @@ export class SyncClient<
     }
 
     return {
-      rawTable: dexieTable,
-
       liveQuery: <TResult = TRow[]>(
         queryFn: (table: Table<TRow, string>) => Promise<TResult> | TResult,
       ) => {
         return useLiveQuery(() => queryFn(dexieTable));
-      },
-
-      list: (): LiveQueryResult<TRow[]> => {
-        return useLiveQuery(() => dexieTable.toArray());
-      },
-
-      get: async (id: string): Promise<TRow | undefined> => {
-        return dexieTable.get(id);
       },
 
       add: async (row: TRow): Promise<TRow> => {
@@ -483,16 +420,13 @@ export class SyncClient<
 
   public disconnect() {
     this.closedByClient = true;
-    this._status = "disconnected";
     this.stopHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
     }
     if (this.socket) {
-      try {
-        this.socket.close();
-      } catch {}
+      this.socket.close();
       this.socket = undefined;
     }
   }
