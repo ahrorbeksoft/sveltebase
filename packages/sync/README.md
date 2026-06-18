@@ -572,5 +572,34 @@ try {
 }
 ```
 
+### G. Type-Safe Backend Event Publishing (`createPublisher`)
+When publishing backend events (e.g. from standard API routes, message queues, or cron triggers) to push updates to connected clients, you can create a type-safe publisher matched to your application's database schema. This checks channels (including dynamic channel patterns like `"todos:user_123"`), actions, and payloads at compile-time:
+
+```typescript
+import { createPublisher } from "@sveltebase/sync";
+import type { Todo } from "$lib/server/db/schema";
+
+// Define schema matching channel names to model types
+type AppSyncSchema = {
+  todos: Todo;
+};
+
+// Create typed publisher instance
+const publisher = createPublisher<AppSyncSchema>();
+
+// 1. Publish a create event (expects full Todo payload)
+await publisher.publish("todos", "create", todo.id, todo);
+
+// 2. Publish an update event (expects Partial<Todo> payload)
+await publisher.publish("todos", "update", todo.id, { completed: true });
+
+// 3. Publish a delete event (expects optional { updatedAt: string } metadata)
+await publisher.publish("todos", "delete", todo.id, undefined);
+
+// 4. Supports scoped/dynamic channels (e.g. "channelName:scopeId")
+await publisher.publish("todos:user_123", "update", todo.id, { title: "New Title" });
+```
+
+
 
 
