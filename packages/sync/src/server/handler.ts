@@ -64,6 +64,18 @@ export async function publishEvent(
     isDev = env.dev;
   } catch {}
 
+  if (!isDev) {
+    const globalObj = typeof globalThis !== "undefined" ? globalThis : {};
+    const processEnv = (globalObj as any).process?.env;
+    if (
+      processEnv?.NODE_ENV === "development" ||
+      processEnv?.NODE_ENV === "test" ||
+      (globalObj as any).__sync_dev_broker__
+    ) {
+      isDev = true;
+    }
+  }
+
   if (isDev) {
     const { broadcastExternalChange } = await import("./dev-engine.js");
     await broadcastExternalChange(channel, action, key, data);
