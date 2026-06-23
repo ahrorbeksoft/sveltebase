@@ -552,6 +552,8 @@ class SyncClientClass<
 
 export type SyncClient<TSchema extends Record<string, any> = Record<string, any>> = SyncClientClass<TSchema> & {
   [K in keyof TSchema]: Table<TSchema[K]>;
+} & {
+  [tableName: string]: Table<any>;
 };
 
 export const SyncClient: new <
