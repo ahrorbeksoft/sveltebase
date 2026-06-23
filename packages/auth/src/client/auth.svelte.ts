@@ -1,4 +1,5 @@
 import type { SyncClient } from "@sveltebase/sync/client";
+import { liveQuery } from "dexie";
 
 export type MaybeGetter<T> = T | (() => T);
 
@@ -11,9 +12,9 @@ export interface AuthClientConfig {
 }
 
 async function clearSyncData(sync: SyncClient<any>) {
-  if (sync.db && typeof sync.db.tables !== "undefined") {
+  if (sync && typeof sync.tables !== "undefined") {
     try {
-      await Promise.all(sync.db.tables.map((table: any) => table.clear()));
+      await Promise.all(sync.tables.map((table: any) => table.clear()));
     } catch (err) {
       console.error("Failed to clear local database tables", err);
     }
@@ -24,7 +25,7 @@ export class AuthClientState<User extends { id: any }> {
   #userGetter = $state<MaybeGetter<User | null>>(null);
   #localOverride = $state<User | null | undefined>(undefined);
   #syncClient?: SyncClient<any>;
-  #usersQuery = $state<any>(null);
+  #usersSubscription?: { unsubscribe(): void };
 
   constructor(config?: AuthClientConfig) {
     this.#syncClient = config?.syncClient;
@@ -75,21 +76,13 @@ export class AuthClientState<User extends { id: any }> {
     });
 
     // Set up the internal sync channel subscription if syncClient is provided and not already initialized.
-    // Calling this here is safe because init() is executed during layout component initialization.
-    if (this.#syncClient && !this.#usersQuery) {
+    if (this.#syncClient && !this.#usersSubscription) {
       const sync = this.#syncClient;
       
-      // Create a live query monitoring the "users" channel
-      this.#usersQuery = sync.table("users").liveQuery((t) => t.toArray());
-
-      // Svelte 5 reactive effect to auto-logout on authentication failure
-      $effect(() => {
-        // Read the user reactively so Svelte tracks this effect dependency
-        const activeUser = this.user;
-        const query = this.#usersQuery;
-
-        if (query && query.status === "error") {
-          console.warn("WebSocket session verification failed: logging out.");
+      const observable = liveQuery(() => sync.table("users").toArray());
+      this.#usersSubscription = observable.subscribe({
+        error: (err) => {
+          console.warn("WebSocket session verification failed: logging out.", err);
           this.#localOverride = null;
           fetch("/api/auth/logout", { method: "POST" }).catch(() => {
             // Ignore fetch errors if offline or route not mounted
@@ -110,10 +103,10 @@ export class AuthClientState<User extends { id: any }> {
     const updatedUser = { ...activeUser, ...changes };
     this.#localOverride = updatedUser;
 
-    // 1. Update over Sync WebSocket
+    // 1. Update over Sync WebSocket using raw Dexie put
     if (this.#syncClient) {
       try {
-        await this.#syncClient.table("users").put(activeUser.id, changes);
+        await this.#syncClient.table("users").put(updatedUser);
       } catch (err) {
         console.error("Failed to update user profile over Sync WebSocket:", err);
       }

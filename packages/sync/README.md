@@ -90,25 +90,23 @@ export const sync = new SyncClient<AppDatabaseSchema>({
     },
   },
 });
-
-// Export typed table wrapper
-export const todosTable = sync.table("todos");
 ```
 
-Use it in your Svelte 5 components:
+Use it in your Svelte 5 components (using your preferred Dexie reactivity hook, such as `liveQuery` from `dexie` or `dexie-svelte-query`):
 ```svelte
 <script lang="ts">
-  import { todosTable } from "$lib/sync-client";
+  import { sync } from "$lib/sync-client";
+  import { liveQuery } from "dexie";
   import { Check, Trash } from "lucide-svelte";
 
-  // Reactive liveQuery updates instantly on local mutations & remote syncs
-  const todos = todosTable.liveQuery((t) => t.orderBy("createdAt").reverse().toArray());
+  // Standard Dexie liveQuery updates instantly on mutations & remote syncs
+  const todos = liveQuery(() => sync.todos.orderBy("createdAt").reverse().toArray());
 
   let title = "";
 
   async function addTodo() {
     if (!title.trim()) return;
-    await todosTable.add({
+    await sync.todos.add({
       id: crypto.randomUUID(),
       title,
       completed: false,
@@ -121,21 +119,15 @@ Use it in your Svelte 5 components:
 
 <input bind:value={title} onkeydown={(e) => e.key === 'Enter' && addTodo()} />
 
-{#if todos.isLoading}
-  <div>Loading todos...</div>
-{:else if todos.status === "error"}
-  <div>Error loading database: {todos.error?.message || todos.error}</div>
-{:else}
-  {#each todos.data as todo (todo.id)}
-    <div>
-      <button onclick={() => todosTable.put(todo.id, { completed: !todo.completed })}>
-        <Check class={todo.completed ? "text-emerald-500" : ""} />
-      </button>
-      <span>{todo.title}</span>
-      <button onclick={() => todosTable.delete(todo.id)}><Trash /></button>
-    </div>
-  {/each}
-{/if}
+{#each ($todos || []) as todo (todo.id)}
+  <div>
+    <button onclick={() => sync.todos.update(todo.id, { completed: !todo.completed })}>
+      <Check class={todo.completed ? "text-emerald-500" : ""} />
+    </button>
+    <span>{todo.title}</span>
+    <button onclick={() => sync.todos.delete(todo.id)}><Trash /></button>
+  </div>
+{/each}
 ```
 
 ---

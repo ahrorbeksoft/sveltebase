@@ -1,4 +1,4 @@
-export { SyncClient, useLiveQuery } from "./client/index.js";
+export { SyncClient } from "./client/index.js";
 export { defineSync } from "./server/index.js";
 export { handleUpgrade, publishEvent, createPublisher } from "./server/handler.js";
 export type { PublishEventData, InferSchemaFromHandlers } from "./server/handler.js";

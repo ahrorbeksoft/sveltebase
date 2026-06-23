@@ -1,8 +1,5 @@
-import Dexie, { type Table } from "dexie";
+import Dexie, { type Table, type PromiseExtended } from "dexie";
 import { parseSyncMessage, type SyncMessage } from "../protocol.js";
-import { useLiveQuery, type LiveQueryResult } from "./live.svelte.js";
-
-export { useLiveQuery, type LiveQueryResult };
 
 export type TableConfig = {
   indexes: string;
@@ -11,7 +8,7 @@ export type TableConfig = {
 
 export type SyncClientOptions = {
   name: string;
-  url: string;
+  url: string | (() => string | Promise<string>);
   tables: Record<string, TableConfig>;
 };
 
@@ -26,17 +23,19 @@ type PendingMutation = {
   reject: (reason: any) => void;
 };
 
-export class SyncClient<
+class SyncClientClass<
   TSchema extends Record<string, any> = Record<string, any>,
-> {
-  public db: Dexie;
-  private wsUrl: string;
+> extends Dexie {
+  private wsUrl: string | (() => string | Promise<string>);
   private socket: WebSocket | undefined;
   private tableConfigs: Record<string, TableConfig>;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private pingInterval: ReturnType<typeof setInterval> | undefined;
   private closedByClient = false;
   private activeChannels = new Set<string>();
+
+  // Reactive connection status
+  private _status = $state<"connecting" | "connected" | "disconnected">("connecting");
 
   // Mutations waiting for ack/reject from server
   private pendingMutations = new Map<string, PendingMutation>();
@@ -51,39 +50,209 @@ export class SyncClient<
 
   constructor(options: {
     name: string;
-    url: string;
+    url: string | (() => string | Promise<string>);
     tables: Record<keyof TSchema & string, TableConfig>;
   }) {
+    super(options.name);
     this.wsUrl = options.url;
     this.tableConfigs = options.tables;
 
     // Initialize Dexie database
-    this.db = new Dexie(options.name);
     const schema: Record<string, string> = {};
     for (const [tableName, config] of Object.entries(options.tables)) {
       schema[tableName] = config.indexes;
     }
-    this.db.version(1).stores(schema);
+    this.version(1).stores(schema);
+
+    // Decorate tables to intercept native Dexie write operations
+    this.decorateTables();
 
     if (typeof window !== "undefined") {
       this.connect();
     }
   }
 
-  private connect() {
+  public get status() {
+    return this._status;
+  }
+
+  private decorateTables() {
+    for (const [tableName, config] of Object.entries(this.tableConfigs)) {
+      const table = this.table(tableName);
+
+      const originalAdd = table.add.bind(table);
+      const originalPut = table.put.bind(table);
+      const originalUpdate = table.update.bind(table);
+      const originalDelete = table.delete.bind(table);
+
+      // Save original methods to bypass sync trigger loops when updating from WebSocket
+      (table as any)._originalMethods = {
+        add: originalAdd,
+        put: originalPut,
+        update: originalUpdate,
+        delete: originalDelete,
+      };
+
+      table.add = (async (row: any) => {
+        const id = row.id || crypto.randomUUID();
+        const fullRow = { ...row, id };
+
+        const rollback = async () => {
+          await originalDelete(id);
+        };
+
+        await originalAdd(fullRow);
+
+        return this.enqueueMutation(
+          config.channel,
+          "create",
+          id,
+          fullRow,
+          rollback,
+        );
+      }) as any;
+
+      table.put = (async (rowOrId: any, changes?: any) => {
+        // Overload 1: put(id, changes) - Partial Update
+        if (changes !== undefined) {
+          const id = rowOrId;
+          const existing = await table.get(id);
+          if (!existing) {
+            throw new Error(`Cannot update item ${id}: not found locally.`);
+          }
+
+          const rollback = async () => {
+            await originalPut(existing);
+          };
+
+          const updatedRow = { ...existing, ...changes };
+          await originalPut(updatedRow);
+
+          const diff: any = {};
+          for (const [k, v] of Object.entries(changes)) {
+            if (existing[k] !== v) {
+              diff[k] = v;
+            }
+          }
+
+          return this.enqueueMutation(
+            config.channel,
+            "update",
+            id,
+            diff,
+            rollback,
+          );
+        }
+
+        // Overload 2: put(row) - Insert/Replace
+        const row = rowOrId;
+        const id = row.id;
+        if (!id) {
+          throw new Error("put operation requires an inline 'id' property.");
+        }
+
+        const existing = await table.get(id);
+        if (!existing) {
+          return table.add(row);
+        }
+
+        const rollback = async () => {
+          await originalPut(existing);
+        };
+
+        const updatedRow = { ...existing, ...row };
+        await originalPut(updatedRow);
+
+        const diff: any = {};
+        for (const [k, v] of Object.entries(row)) {
+          if (existing[k] !== v) {
+            diff[k] = v;
+          }
+        }
+
+        return this.enqueueMutation(
+          config.channel,
+          "update",
+          id,
+          diff,
+          rollback,
+        );
+      }) as any;
+
+      table.update = (async (id: any, changes: any) => {
+        const existing = await table.get(id);
+        if (!existing) {
+          throw new Error(`Cannot update item ${id}: not found locally.`);
+        }
+
+        const rollback = async () => {
+          await originalPut(existing);
+        };
+
+        await originalUpdate(id, changes);
+
+        return this.enqueueMutation(
+          config.channel,
+          "update",
+          id,
+          changes,
+          rollback,
+          );
+      }) as any;
+
+      table.delete = (async (id: any) => {
+        const existing = await table.get(id);
+        if (!existing) return;
+
+        const rollback = async () => {
+          await originalPut(existing);
+        };
+
+        await originalDelete(id);
+
+        return this.enqueueMutation(
+          config.channel,
+          "delete",
+          id,
+          undefined,
+          rollback,
+        );
+      }) as any;
+    }
+  }
+
+  private async connect() {
     if (this.closedByClient) return;
+    this._status = "connecting";
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
+
+    let resolvedUrl: string;
+    try {
+      resolvedUrl = typeof this.wsUrl === "function" ? await this.wsUrl() : this.wsUrl;
+    } catch (err) {
+      console.error("SyncClient: Failed to resolve wsUrl", err);
+      this._status = "disconnected";
+      if (!this.closedByClient) {
+        this.reconnectTimer = setTimeout(() => this.connect(), 2000);
+      }
+      return;
+    }
+
     const fullUrl =
-      this.wsUrl.startsWith("ws://") || this.wsUrl.startsWith("wss://")
-        ? this.wsUrl
-        : `${protocol}//${host}${this.wsUrl}`;
+      resolvedUrl.startsWith("ws://") || resolvedUrl.startsWith("wss://")
+        ? resolvedUrl
+        : `${protocol}//${host}${resolvedUrl}`;
 
-    this.socket = new WebSocket(fullUrl);
+    const socket = new WebSocket(fullUrl);
+    this.socket = socket;
 
-    this.socket.addEventListener("open", async () => {
+    socket.addEventListener("open", async () => {
+      if (this.socket !== socket) return;
+
       console.log("SyncClient: WebSocket connected");
+      this._status = "connected";
       this.activeChannels.clear();
       this.startHeartbeat();
 
@@ -94,7 +263,7 @@ export class SyncClient<
 
       // Re-send all pending unacknowledged mutations
       for (const mut of this.pendingMutations.values()) {
-        this.socket?.send(
+        socket.send(
           JSON.stringify({
             type: "mutate",
             id: mut.id,
@@ -110,7 +279,8 @@ export class SyncClient<
       this.flushMutationQueue();
     });
 
-    this.socket.addEventListener("message", async (message) => {
+    socket.addEventListener("message", async (message) => {
+      if (this.socket !== socket) return;
       if (typeof message.data !== "string") return;
       if (message.data === "pong") return;
 
@@ -120,17 +290,38 @@ export class SyncClient<
       await this.handleServerMessage(msg);
     });
 
-    this.socket.addEventListener("close", () => {
-      this.socket = undefined;
-      this.stopHeartbeat();
-      if (!this.closedByClient) {
-        this.reconnectTimer = setTimeout(() => this.connect(), 2000);
+    socket.addEventListener("close", () => {
+      if (this.socket === socket) {
+        this.socket = undefined;
+        this._status = "disconnected";
+        this.stopHeartbeat();
+        if (!this.closedByClient) {
+          this.reconnectTimer = setTimeout(() => this.connect(), 2000);
+        }
       }
     });
 
-    this.socket.addEventListener("error", (err) => {
-      console.error("SyncClient: WebSocket error", err);
+    socket.addEventListener("error", (err) => {
+      if (this.socket === socket) {
+        console.error("SyncClient: WebSocket error", err);
+      }
     });
+  }
+
+  public reconnect() {
+    this.closedByClient = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    if (this.socket) {
+      try {
+        this.socket.close();
+      } catch {}
+      this.socket = undefined;
+      this._status = "disconnected";
+    }
+    this.connect();
   }
 
   private startHeartbeat() {
@@ -155,7 +346,7 @@ export class SyncClient<
       let since: string | undefined;
       if (tableName) {
         try {
-          const table = this.db.table(tableName);
+          const table = this.table(tableName);
           const latestRow = await table.orderBy("updatedAt").last();
           if (latestRow && latestRow.updatedAt) {
             since = latestRow.updatedAt;
@@ -188,7 +379,7 @@ export class SyncClient<
   }
 
   private async safePutRow(tableName: string, data: any) {
-    const table = this.db.table(tableName);
+    const table = this.table(tableName);
     if (!data || !data.id) return;
 
     const existing = await table.get(data.id);
@@ -200,7 +391,8 @@ export class SyncClient<
         return;
       }
     }
-    await table.put(data);
+    const originalPut = (table as any)._originalMethods?.put || table.put.bind(table);
+    await originalPut(data);
   }
 
   private async safeDeleteRow(
@@ -208,7 +400,7 @@ export class SyncClient<
     key: string,
     incomingTimeStr?: string,
   ) {
-    const table = this.db.table(tableName);
+    const table = this.table(tableName);
     if (incomingTimeStr) {
       const existing = await table.get(key);
       if (existing && existing.updatedAt) {
@@ -220,7 +412,8 @@ export class SyncClient<
         }
       }
     }
-    await table.delete(key);
+    const originalDelete = (table as any)._originalMethods?.delete || table.delete.bind(table);
+    await originalDelete(key);
   }
 
   private async handleServerMessage(msg: SyncMessage) {
@@ -228,7 +421,7 @@ export class SyncClient<
       case "snapshot": {
         const tableName = this.findTableByChannel(msg.channel);
         if (tableName) {
-          const table = this.db.table(tableName);
+          const table = this.table(tableName);
           if (msg.isDelta) {
             // Delta Sync: put changes using Last-Write-Wins
             for (const row of msg.data) {
@@ -236,7 +429,7 @@ export class SyncClient<
             }
           } else {
             // Full Snapshot: clear and replace
-            await this.db.transaction("rw", table, async () => {
+            await this.transaction("rw", table, async () => {
               await table.clear();
               await table.bulkPut(msg.data);
             });
@@ -264,7 +457,13 @@ export class SyncClient<
         if (pending) {
           console.warn(`Mutation ${msg.id} rejected by server: ${msg.error}`);
           await pending.rollback();
-          pending.reject(new Error(msg.error));
+          
+          const errorObj = new Error(msg.error);
+          if ((msg as any).validationErrors) {
+            (errorObj as any).validationErrors = (msg as any).validationErrors;
+          }
+          
+          pending.reject(errorObj);
           this.pendingMutations.delete(msg.id);
         }
         break;
@@ -296,90 +495,6 @@ export class SyncClient<
     return undefined;
   }
 
-  public table<TKey extends keyof TSchema & string>(tableName: TKey) {
-    type TRow = TSchema[TKey];
-    const dexieTable = this.db.table(tableName) as Table<TRow, string>;
-    const config = this.tableConfigs[tableName];
-    if (!config) {
-      throw new Error(`Table ${tableName} not defined in SyncClient config.`);
-    }
-
-    return {
-      liveQuery: <TResult = TRow[]>(
-        queryFn: (table: Table<TRow, string>) => Promise<TResult> | TResult,
-      ) => {
-        return useLiveQuery(() => queryFn(dexieTable));
-      },
-
-      add: async (row: TRow): Promise<TRow> => {
-        const rowData = row as any;
-        const id = rowData.id || crypto.randomUUID();
-        const fullRow = { ...rowData, id };
-
-        // Rollback function
-        const rollback = async () => {
-          await dexieTable.delete(id);
-        };
-
-        // Apply optimistic update
-        await dexieTable.put(fullRow);
-
-        return this.enqueueMutation(
-          config.channel,
-          "create",
-          id,
-          fullRow,
-          rollback,
-        );
-      },
-
-      put: async (id: string, changes: Partial<TRow>): Promise<TRow> => {
-        const existing = await dexieTable.get(id);
-        if (!existing) {
-          throw new Error(`Cannot update item ${id}: not found locally.`);
-        }
-
-        // Rollback function
-        const rollback = async () => {
-          await dexieTable.put(existing);
-        };
-
-        const updatedRow = { ...(existing as any), ...(changes as any) };
-
-        // Apply optimistic update
-        await dexieTable.put(updatedRow);
-
-        return this.enqueueMutation(
-          config.channel,
-          "update",
-          id,
-          changes,
-          rollback,
-        );
-      },
-
-      delete: async (id: string): Promise<void> => {
-        const existing = await dexieTable.get(id);
-        if (!existing) return; // Already deleted
-
-        // Rollback function
-        const rollback = async () => {
-          await dexieTable.put(existing);
-        };
-
-        // Apply optimistic update
-        await dexieTable.delete(id);
-
-        return this.enqueueMutation(
-          config.channel,
-          "delete",
-          id,
-          undefined,
-          rollback,
-        );
-      },
-    };
-  }
 
   private enqueueMutation(
     channel: string,
@@ -420,14 +535,29 @@ export class SyncClient<
 
   public disconnect() {
     this.closedByClient = true;
+    this._status = "disconnected";
     this.stopHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
     }
     if (this.socket) {
-      this.socket.close();
+      try {
+        this.socket.close();
+      } catch {}
       this.socket = undefined;
     }
   }
 }
+
+export type SyncClient<TSchema extends Record<string, any> = Record<string, any>> = SyncClientClass<TSchema> & {
+  [K in keyof TSchema]: Table<TSchema[K]>;
+};
+
+export const SyncClient: new <
+  TSchema extends Record<string, any> = Record<string, any>,
+>(options: {
+  name: string;
+  url: string | (() => string | Promise<string>);
+  tables: Record<keyof TSchema & string, TableConfig>;
+}) => SyncClient<TSchema> = SyncClientClass as any;
