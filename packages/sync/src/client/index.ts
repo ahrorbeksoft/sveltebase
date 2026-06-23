@@ -1,5 +1,6 @@
 import Dexie, { type Table, type PromiseExtended } from "dexie";
 import { parseSyncMessage, type SyncMessage } from "../protocol.js";
+import { ConnectionStatus } from "./status.svelte.js";
 
 export type TableConfig = {
   indexes: string;
@@ -34,8 +35,8 @@ class SyncClientClass<
   private closedByClient = false;
   private activeChannels = new Set<string>();
 
-  // Reactive connection status
-  private _status = $state<"connecting" | "connected" | "disconnected">("connecting");
+  // Reactive connection status delegated to status.svelte.ts
+  private _statusState = new ConnectionStatus();
 
   // Mutations waiting for ack/reject from server
   private pendingMutations = new Map<string, PendingMutation>();
@@ -73,7 +74,7 @@ class SyncClientClass<
   }
 
   public get status() {
-    return this._status;
+    return this._statusState.value;
   }
 
   private decorateTables() {
@@ -223,7 +224,7 @@ class SyncClientClass<
 
   private async connect() {
     if (this.closedByClient) return;
-    this._status = "connecting";
+    this._statusState.value = "connecting";
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
@@ -233,7 +234,7 @@ class SyncClientClass<
       resolvedUrl = typeof this.wsUrl === "function" ? await this.wsUrl() : this.wsUrl;
     } catch (err) {
       console.error("SyncClient: Failed to resolve wsUrl", err);
-      this._status = "disconnected";
+      this._statusState.value = "disconnected";
       if (!this.closedByClient) {
         this.reconnectTimer = setTimeout(() => this.connect(), 2000);
       }
@@ -252,7 +253,7 @@ class SyncClientClass<
       if (this.socket !== socket) return;
 
       console.log("SyncClient: WebSocket connected");
-      this._status = "connected";
+      this._statusState.value = "connected";
       this.activeChannels.clear();
       this.startHeartbeat();
 
@@ -293,7 +294,7 @@ class SyncClientClass<
     socket.addEventListener("close", () => {
       if (this.socket === socket) {
         this.socket = undefined;
-        this._status = "disconnected";
+        this._statusState.value = "disconnected";
         this.stopHeartbeat();
         if (!this.closedByClient) {
           this.reconnectTimer = setTimeout(() => this.connect(), 2000);
@@ -319,7 +320,7 @@ class SyncClientClass<
         this.socket.close();
       } catch {}
       this.socket = undefined;
-      this._status = "disconnected";
+      this._statusState.value = "disconnected";
     }
     this.connect();
   }
@@ -535,7 +536,7 @@ class SyncClientClass<
 
   public disconnect() {
     this.closedByClient = true;
-    this._status = "disconnected";
+    this._statusState.value = "disconnected";
     this.stopHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);

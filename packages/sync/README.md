@@ -130,6 +130,18 @@ Use it in your Svelte 5 components (using your preferred Dexie reactivity hook, 
 {/each}
 ```
 
+### Synced Database Operations
+
+Under the hood, `@sveltebase/sync` intercepts native Dexie table writes to capture and propagate mutations to the backend. The following methods automatically sync with the server:
+
+* **`.add(row)`**: Triggers a `"create"` sync mutation.
+* **`.put(row)` or `.put(id, changes)`**: Computes a diff of changed properties (for updates) or initiates a `"create"` mutation (for new rows) and sends it to the server.
+* **`.update(id, changes)`**: Performs a local partial update and propagates the changes to the server as an `"update"` mutation.
+* **`.delete(id)`**: Locally deletes the row and propagates a `"delete"` mutation to the server.
+
+> [!NOTE]
+> **Bulk methods** (such as `.bulkAdd()`, `.bulkPut()`, and `.bulkDelete()`) bypass backend syncing entirely. They write directly to IndexedDB, which is useful for performing offline seeding or local-only updates.
+
 ---
 
 ### Step 2: Define Sync Handlers (Server)
