@@ -310,4 +310,25 @@ export class SyncBroker {
       }
     }
   }
+
+  public async handleExternalBatchChange(
+    channel: string,
+    changes: Array<{ action: "create" | "update" | "delete"; key?: string; data?: any }>,
+  ) {
+    const batchMsg = JSON.stringify({
+      type: "batch",
+      channel,
+      changes,
+    });
+
+    for (const conn of this.connections) {
+      if (conn.getSubscribedChannels().has(channel)) {
+        try {
+          conn.send(batchMsg);
+        } catch {
+          this.connections.delete(conn);
+        }
+      }
+    }
+  }
 }

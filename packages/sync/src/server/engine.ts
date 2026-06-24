@@ -72,6 +72,19 @@ export class SyncEngineBase extends DurableObject<Env> {
       }
     }
 
+    if (url.pathname === "/broadcast-batch" && request.method === "POST") {
+      try {
+        const body = (await request.json()) as any;
+        const { channel, changes } = body;
+        await this.broker.handleExternalBatchChange(channel, changes);
+        return new Response(null, { status: 204 });
+      } catch (err: any) {
+        return new Response(err.message || "Error processing batch broadcast", {
+          status: 400,
+        });
+      }
+    }
+
     return new Response("Not found", { status: 404 });
   }
 

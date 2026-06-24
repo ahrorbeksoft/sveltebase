@@ -51,6 +51,44 @@ export function createPublisher(handlers?: SyncHandler[]) {
   };
 }
 
+export function createBulkPublisher<TSchema extends Record<string, any>>(): <
+  TChannel extends keyof TSchema & string,
+>(
+  channel: TChannel | `${TChannel}:${string}`,
+  changes: Array<{
+    action: "create" | "update" | "delete";
+    key?: string;
+    data?: any;
+  }>,
+) => Promise<void>;
+
+export function createBulkPublisher<THandlers extends SyncHandler[]>(
+  handlers: THandlers
+): <
+  TChannel extends keyof InferSchemaFromHandlers<THandlers> & string,
+>(
+  channel: TChannel | `${TChannel}:${string}`,
+  changes: Array<{
+    action: "create" | "update" | "delete";
+    key?: string;
+    data?: any;
+  }>,
+) => Promise<void>;
+
+export function createBulkPublisher(handlers?: SyncHandler[]) {
+  return async (
+    channel: string,
+    changes: Array<{
+      action: "create" | "update" | "delete";
+      key?: string;
+      data?: any;
+    }>,
+  ): Promise<void> => {
+    const resolvedChannel = String(channel);
+    return publishBulkEvent(resolvedChannel, changes);
+  };
+}
+
 export async function publishEvent(
   channel: string,
   action: "create" | "update" | "delete",
@@ -98,6 +136,58 @@ export async function publishEvent(
     });
   } catch (err) {
     console.error("Failed to publish sync event to Durable Object:", err);
+  }
+}
+
+export async function publishBulkEvent(
+  channel: string,
+  changes: Array<{
+    action: "create" | "update" | "delete";
+    key?: string;
+    data?: any;
+  }>,
+) {
+  const envId = "$app/environment";
+  let isDev = false;
+  try {
+    const env = await import(/* @vite-ignore */ envId);
+    isDev = env.dev;
+  } catch {}
+
+  if (!isDev) {
+    const globalObj = typeof globalThis !== "undefined" ? globalThis : {};
+    const processEnv = (globalObj as any).process?.env;
+    if (
+      processEnv?.NODE_ENV === "development" ||
+      processEnv?.NODE_ENV === "test" ||
+      (globalObj as any).__sync_dev_broker__
+    ) {
+      isDev = true;
+    }
+  }
+
+  if (isDev) {
+    const { broadcastExternalBatchChange } = await import("./dev-engine.js");
+    await broadcastExternalBatchChange(channel, changes);
+    return;
+  }
+
+  try {
+    const serverId = "$app/server";
+    const { getRequestEvent } = await import(/* @vite-ignore */ serverId);
+    const { platform } = getRequestEvent();
+    const namespace = platform?.env.SYNC_ENGINE;
+    if (!namespace) return;
+
+    const id = namespace.idFromName("global");
+    const stub = namespace.get(id);
+    await stub.fetch("https://realtime.internal/broadcast-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel, changes }),
+    });
+  } catch (err) {
+    console.error("Failed to publish bulk sync event to Durable Object:", err);
   }
 }
 

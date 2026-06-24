@@ -486,7 +486,23 @@ class SyncClientClass<
         }
         break;
       }
-    }
+      case "batch": {
+        const tableName = this.findTableByChannel(msg.channel);
+        if (!tableName) break;
+
+        const table = this.table(tableName);
+        await this.transaction("rw", table, async () => {
+          for (const change of msg.changes) {
+            if (change.action === "create" || change.action === "update") {
+              await this.safePutRow(tableName, change.data);
+            } else if (change.action === "delete" && change.key) {
+              const incomingTimeStr = change.data?.updatedAt;
+              await this.safeDeleteRow(tableName, change.key, incomingTimeStr);
+            }
+          }
+        });
+        break;
+      }
   }
 
   private findTableByChannel(channel: string): string | undefined {

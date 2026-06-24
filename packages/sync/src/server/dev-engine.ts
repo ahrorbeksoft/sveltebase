@@ -152,3 +152,15 @@ export async function broadcastExternalChange(
   const broker = getDevBroker();
   await broker.handleExternalChange(channel, action, key, data);
 }
+
+export async function broadcastExternalBatchChange(
+  channel: string,
+  changes: Array<{
+    action: "create" | "update" | "delete";
+    key?: string;
+    data?: any;
+  }>,
+) {
+  const broker = getDevBroker();
+  await broker.handleExternalBatchChange(channel, changes);
+}

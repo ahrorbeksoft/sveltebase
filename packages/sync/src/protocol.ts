@@ -21,6 +21,15 @@ export type SyncMessage =
       key?: string;
       data?: any;
       mutationId?: string;
+    }
+  | {
+      type: "batch";
+      channel: string;
+      changes: Array<{
+        action: "create" | "update" | "delete";
+        key?: string;
+        data?: any;
+      }>;
     };
 
 export function parseSyncMessage(data: string): SyncMessage | null {
