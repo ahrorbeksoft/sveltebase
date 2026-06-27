@@ -92,15 +92,17 @@ export const sync = new SyncClient<AppDatabaseSchema>({
 });
 ```
 
-Use it in your Svelte 5 components (using your preferred Dexie reactivity hook, such as `liveQuery` from `dexie` or `dexie-svelte-query`):
+Use it in your Svelte 5 components with `createLiveQuery`. It wraps Dexie's `liveQuery` in Svelte 5 rune-based reactive state and exposes `data`, `isLoading`, and `error`.
+
 ```svelte
 <script lang="ts">
   import { sync } from "$lib/sync-client";
-  import { liveQuery } from "dexie";
+  import { createLiveQuery } from "@sveltebase/sync/client";
   import { Check, Trash } from "lucide-svelte";
 
-  // Standard Dexie liveQuery updates instantly on mutations & remote syncs
-  const todos = liveQuery(() => sync.todos.orderBy("createdAt").reverse().toArray());
+  const todosQuery = createLiveQuery(() =>
+    sync.todos.orderBy("createdAt").reverse().toArray()
+  );
 
   let title = "";
 
@@ -119,7 +121,12 @@ Use it in your Svelte 5 components (using your preferred Dexie reactivity hook, 
 
 <input bind:value={title} onkeydown={(e) => e.key === 'Enter' && addTodo()} />
 
-{#each ($todos || []) as todo (todo.id)}
+{#if todosQuery.isLoading}
+  <p>Loading...</p>
+{:else if todosQuery.error}
+  <p>Failed to load todos.</p>
+{:else}
+  {#each (todosQuery.data || []) as todo (todo.id)}
   <div>
     <button onclick={() => sync.todos.update(todo.id, { completed: !todo.completed })}>
       <Check class={todo.completed ? "text-emerald-500" : ""} />
@@ -127,8 +134,24 @@ Use it in your Svelte 5 components (using your preferred Dexie reactivity hook, 
     <span>{todo.title}</span>
     <button onclick={() => sync.todos.delete(todo.id)}><Trash /></button>
   </div>
-{/each}
+  {/each}
+{/if}
 ```
+
+`createLiveQuery` accepts a Dexie query function and an optional dependency getter. When any dependency changes, the live query is recreated with the latest reactive values:
+
+```typescript
+const query = createLiveQuery(
+  () => sync.todos.where("completed").equals(false).toArray(),
+  () => [filterValue]
+);
+
+query.data;
+query.isLoading;
+query.error;
+```
+
+You can import it from either `@sveltebase/sync/client` or the root `@sveltebase/sync` entrypoint.
 
 ### Synced Database Operations
 
@@ -324,6 +347,41 @@ async function getSession(ctx: SyncContext) {
 }
 ```
 
+### Connection Auth (`ctx.auth`)
+Sveltebase Sync can resolve and store an authenticated app payload during the WebSocket handshake. The resolved payload is passed to every sync handler as `ctx.auth`.
+
+```typescript
+// src/routes/api/sync/+server.ts
+import { JWT_SECRET } from "$env/static/private";
+import { getVerifiedUserFromRequest } from "@sveltebase/auth";
+import { handleUpgrade } from "@sveltebase/sync";
+import type { User } from "$lib/server/db/schema";
+import type { RequestHandler } from "@sveltejs/kit";
+
+export const GET: RequestHandler = (event) => {
+  return handleUpgrade(event.request, event.platform, {
+    auth: async (request) => {
+      const user = await getVerifiedUserFromRequest<User>(
+        request,
+        JWT_SECRET
+      );
+
+      return user ? { user } : null;
+    },
+    identity: (auth) => auth.user.id,
+    allowUnauthenticated: false
+  });
+};
+```
+
+After this, every handler can access the user object:
+
+```typescript
+ctx.auth?.user;
+```
+
+The `identity` function returns the stable string/number key used by scoped broadcasts. If omitted, Sync defaults to `auth.user.id` when present. Existing `userId` query parameter and `x-user-id` header identity are still supported as legacy fallback, but should not be used as the primary auth mechanism for private data.
+
 ---
 
 ### The `authorize` Hook
@@ -350,7 +408,8 @@ Use the handshake HTTP request (`ctx.request`) to dynamically filter the records
 ```typescript
 fetch: async (ctx, since) => {
   const db = getDB(ctx.platform);
-  const user = await getSession(ctx);
+  const user = ctx.auth?.user;
+  if (!user) return [];
 
   let query = db.select().from(todos);
   const conditions = [];
@@ -393,12 +452,16 @@ create: async (ctx, data) => {
 },
 
 update: async (ctx, key, changes) => {
-  const user = await getSession(ctx);
+  const user = ctx.auth?.user;
+  if (!user) {
+    throw new Error("Unauthorized");
+  }
+
   const db = getDB(ctx.platform);
 
   // Fetch target record to verify ownership
   const [record] = await db.select().from(todos).where(eq(todos.id, key));
-  if (record.ownerId !== user.userId && user.role !== "admin") {
+  if (record.ownerId !== user.id && user.role !== "admin") {
     throw new Error("You cannot update a record owned by someone else.");
   }
 
@@ -456,35 +519,35 @@ export const todoSync = defineSync<Todo>({
 ```
 
 #### How Connection Identities are Registered
-The broker matches the user IDs returned by `scope` to each active client's socket state. The server registers the connection's identity during the handshake using query parameters or the `x-user-id` header:
-```typescript
-const userId = url.searchParams.get("userId") || request.headers.get("x-user-id");
-```
+The broker matches the IDs returned by `scope` to each active connection's registered identity. That identity is resolved during the WebSocket handshake with the `identity` option on `handleUpgrade`.
 
 ##### Authenticating using SvelteKit Sessions & Cookies (Recommended)
-Instead of exposing user IDs in client-side WebSocket URLs, you can resolve the user session on the server inside your SvelteKit route (`+server.ts`) and inject the verified `x-user-id` header before calling `handleUpgrade()`:
+Resolve the user session on the server inside your SvelteKit route (`+server.ts`) and return the full user object as connection auth:
 
 ```typescript
 // src/routes/api/sync/+server.ts
+import { JWT_SECRET } from "$env/static/private";
+import { getVerifiedUserFromRequest } from "@sveltebase/auth";
 import { handleUpgrade } from "@sveltebase/sync";
+import type { User } from "$lib/server/db/schema";
 import type { RequestEvent, RequestHandler } from "@sveltejs/kit";
 
-export const GET: RequestHandler = (event: RequestEvent) => {
-  // 1. Get user identity from your custom server-side session/cookies
-  const user = event.locals.user; // e.g., set by your auth hook middleware
-  if (!user) {
-    return new Response("Unauthorized", { status: 401 });
-  }
+export const GET: RequestHandler = async (event: RequestEvent) => {
+  return handleUpgrade(event.request, event.platform, {
+    auth: async (request) => {
+      const user = await getVerifiedUserFromRequest<User>(
+        request,
+        JWT_SECRET
+      );
 
-  // 2. Clone the request and inject the verified user ID header
-  const request = new Request(event.request);
-  request.headers.set("x-user-id", user.id);
-
-  // 3. Hand off to the sync engine
-  return handleUpgrade(request, event.platform);
+      return user ? { user } : null;
+    },
+    identity: (auth) => auth.user.id,
+    allowUnauthenticated: false
+  });
 };
 ```
-This approach keeps WebSocket URLs clean of private IDs and ensures all active sockets are automatically authenticated with their verified session roles/IDs.
+This approach keeps WebSocket URLs clean of private IDs, makes `ctx.auth.user` available to your sync handlers, and gives the broker a stable identity for `scope` filtering.
 
 ---
 
@@ -520,6 +583,3 @@ await publish("todos", "delete", todo.id, undefined);
 // 4. Supports scoped/dynamic channels (e.g. "channelName:scopeId")
 await publish("todos:user_123", "update", todo.id, { title: "New Title" });
 ```
-
-
-

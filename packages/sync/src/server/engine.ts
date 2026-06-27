@@ -1,9 +1,26 @@
 import { DurableObject } from "cloudflare:workers";
 import { SyncBroker, type ISyncConnection } from "./broker.js";
+import { INTERNAL_AUTH_HEADER } from "./handler.js";
+
+type SerializedConnectionAuth = {
+  auth: any;
+  identity: string | null;
+};
+
+function deserializeConnectionAuth(value: string | null): SerializedConnectionAuth | null {
+  if (!value) return null;
+
+  try {
+    return JSON.parse(decodeURIComponent(escape(atob(value))));
+  } catch {
+    return null;
+  }
+}
 
 class CloudflareSyncConnection implements ISyncConnection {
   private ws: WebSocket;
   private auth: any = null;
+  private identity: string | null = null;
   private subscribedChannels = new Set<string>();
   public readonly headers: Headers;
   public readonly url: string;
@@ -36,6 +53,14 @@ class CloudflareSyncConnection implements ISyncConnection {
 
   setAuth(newAuth: any) {
     this.auth = newAuth;
+  }
+
+  getIdentity() {
+    return this.identity;
+  }
+
+  setIdentity(identity: string | null) {
+    this.identity = identity;
   }
 
   getSubscribedChannels() {
@@ -99,11 +124,20 @@ export class SyncEngineBase extends DurableObject<Env> {
 
     const conn = new CloudflareSyncConnection(server, request);
 
+    const forwardedAuth = deserializeConnectionAuth(
+      request.headers.get(INTERNAL_AUTH_HEADER),
+    );
+    if (forwardedAuth) {
+      conn.setAuth(forwardedAuth.auth);
+      conn.setIdentity(forwardedAuth.identity);
+    }
+
     const url = new URL(request.url);
     const userId =
       url.searchParams.get("userId") || request.headers.get("x-user-id");
-    if (userId) {
+    if (userId && !conn.getAuth()) {
       conn.setAuth({ userId });
+      conn.setIdentity(userId);
     }
 
     this.connMap.set(server, conn);

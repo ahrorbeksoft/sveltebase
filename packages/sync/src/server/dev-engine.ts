@@ -1,5 +1,6 @@
 import { SyncBroker, type ISyncConnection } from "./broker.js";
 import type { SyncHandler } from "./index.js";
+import type { SyncUpgradeOptions } from "./handler.js";
 import type { IncomingMessage } from "node:http";
 
 const GLOBAL_KEY = "__sync_dev_broker__";
@@ -33,17 +34,19 @@ function getDevBroker(): SyncBroker {
   throw new Error("Sync dev broker not initialized. Call setHandlers first.");
 }
 
-export function addClient(
+export async function addClient(
   ws: {
     send: (data: string) => void;
     close: (code?: number, reason?: string) => void;
     on: (event: string, listener: (...args: any[]) => void) => void;
   },
   req: IncomingMessage,
-) {
+  options?: SyncUpgradeOptions,
+): Promise<boolean> {
   const broker = getDevBroker();
   const subscribedChannels = new Set<string>();
   let auth: any = null;
+  let identity: string | null = null;
 
   // Convert Node IncomingMessage headers to web-standard Headers
   const headers = new Headers();
@@ -62,12 +65,35 @@ export function addClient(
     req.url ?? "",
     `http://${req.headers.host || "localhost"}`,
   );
-  
-  // Align with DO behavior to set local dev auth
-  const userId = urlObj.searchParams.get("userId") || headers.get("x-user-id");
-  if (userId) {
-    auth = { userId };
-  }
+
+  const initConnection = async () => {
+    const request = new Request(urlObj.toString(), { headers });
+
+    if (options?.auth) {
+      auth = (await options.auth(request, undefined)) ?? null;
+
+      if (!auth && options.allowUnauthenticated === false) {
+        ws.close(1008, "Unauthorized");
+        return false;
+      }
+
+      if (auth) {
+        const identityValue = options.identity
+          ? options.identity(auth)
+          : ((auth as any)?.user?.id ?? (auth as any)?.userId);
+        identity = identityValue == null ? null : String(identityValue);
+      }
+    }
+
+    // Legacy fallback for existing demos/apps that pass identity in URL/header.
+    const userId = urlObj.searchParams.get("userId") || headers.get("x-user-id");
+    if (userId && !auth) {
+      auth = { userId };
+      identity = userId;
+    }
+
+    return true;
+  };
 
   const conn: ISyncConnection = {
     send(data) {
@@ -82,6 +108,12 @@ export function addClient(
     setAuth(newAuth) {
       auth = newAuth;
     },
+    getIdentity() {
+      return identity;
+    },
+    setIdentity(newIdentity) {
+      identity = newIdentity;
+    },
     getSubscribedChannels() {
       return subscribedChannels;
     },
@@ -89,8 +121,18 @@ export function addClient(
     url: urlObj.toString(),
   };
 
-  broker.registerConnection(conn);
-  console.log("dev-engine: addClient registered connection");
+  try {
+    const ok = await initConnection();
+    if (!ok) return false;
+    broker.registerConnection(conn);
+    console.log("dev-engine: addClient registered connection");
+  } catch (err) {
+    console.error("dev-engine: Error initializing connection:", err);
+    try {
+      ws.close(1011, "Internal server error");
+    } catch {}
+    return false;
+  }
 
   ws.on("message", async (data: any) => {
     const messageString = String(data);
@@ -118,6 +160,8 @@ export function addClient(
     console.error("dev-engine: WebSocket connection error:", err);
     broker.removeConnection(conn);
   });
+
+  return true;
 }
 
 const GLOBAL_PLATFORM_KEY = "__sync_dev_platform__";

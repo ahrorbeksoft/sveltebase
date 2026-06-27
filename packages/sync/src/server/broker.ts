@@ -6,6 +6,8 @@ export interface ISyncConnection {
   close(code?: number, reason?: string): void;
   getAuth(): any;
   setAuth(auth: any): void;
+  getIdentity(): string | null;
+  setIdentity(identity: string | null): void;
   getSubscribedChannels(): Set<string>;
   readonly headers: Headers;
   readonly url: string;
@@ -14,21 +16,10 @@ export interface ISyncConnection {
 export class SyncBroker {
   private handlers: Map<string, SyncHandler>;
   private connections: Set<ISyncConnection> = new Set();
-  private authorizeConnection?: (
-    request: Request,
-    platform: App.Platform | undefined,
-  ) => Promise<any>;
 
-  constructor(
-    handlers: SyncHandler[],
-    authorizeConnection?: (
-      request: Request,
-      platform: App.Platform | undefined,
-    ) => Promise<any>,
-  ) {
+  constructor(handlers: SyncHandler[]) {
     this.handlers = new Map();
     this.setHandlers(handlers);
-    this.authorizeConnection = authorizeConnection;
   }
 
   public setHandlers(handlers: SyncHandler[]) {
@@ -271,8 +262,7 @@ export class SyncBroker {
 
       // Filter based on scope
       if (allowedUserIds !== "all") {
-        const connAuth = conn.getAuth();
-        const userId = connAuth?.userId;
+        const userId = conn.getIdentity();
         if (!userId || !allowedUserIds.includes(userId)) {
           continue;
         }

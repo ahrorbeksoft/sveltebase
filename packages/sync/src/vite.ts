@@ -1,6 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { Plugin } from "vite";
+import type { SyncUpgradeOptions } from "./server/handler.js";
 
 const SYNC_PATH = "/api/sync";
 
@@ -15,6 +16,9 @@ interface WsWebSocketServer {
 
 export type SyncDevPluginOptions = {
   handlersPath?: string;
+  auth?: SyncUpgradeOptions["auth"];
+  identity?: SyncUpgradeOptions["identity"];
+  allowUnauthenticated?: SyncUpgradeOptions["allowUnauthenticated"];
 };
 
 export function syncDevPlugin(options?: SyncDevPluginOptions): Plugin {
@@ -71,10 +75,22 @@ export function syncDevPlugin(options?: SyncDevPluginOptions): Plugin {
               (client as any).off("message", onMessage);
 
               // Register client in the dev engine
-              (devEngine.addClient as (ws: unknown, req: unknown) => void)(
+              const connected = await (devEngine.addClient as (
+                ws: unknown,
+                req: unknown,
+                options?: SyncUpgradeOptions,
+              ) => Promise<boolean>)(
                 client,
                 request,
+                {
+                  auth: options?.auth,
+                  identity: options?.identity,
+                  allowUnauthenticated: options?.allowUnauthenticated,
+                },
               );
+              if (!connected) {
+                return;
+              }
               console.log("sync-dev-plugin: WebSocket upgrade handler completed, replaying buffered messages:", messageQueue.length);
 
               // Replay any buffered messages

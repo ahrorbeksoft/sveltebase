@@ -197,6 +197,47 @@ export const handlers = [
 ];
 ```
 
+`createAuthSync` registers and protects the `"users"` sync channel. It verifies the session token when the client subscribes to that channel and can call your `verifyUser` hook to check the database.
+
+To make the verified user object available to every other sync handler, resolve connection auth in your `/api/sync` WebSocket upgrade route.
+
+Recommended SvelteKit setup:
+
+```typescript
+// src/routes/api/sync/+server.ts
+import { JWT_SECRET } from "$env/static/private";
+import { getVerifiedUserFromRequest } from "@sveltebase/auth";
+import { handleUpgrade } from "@sveltebase/sync";
+import type { User } from "$lib/server/db/schema";
+import type { RequestEvent, RequestHandler } from "@sveltejs/kit";
+
+export const GET: RequestHandler = async (event: RequestEvent) => {
+  return handleUpgrade(event.request, event.platform, {
+    auth: async (request) => {
+      const user = await getVerifiedUserFromRequest<User>(
+        request,
+        JWT_SECRET
+      );
+
+      return user ? { user } : null;
+    },
+    identity: (auth) => auth.user.id,
+    allowUnauthenticated: false
+  });
+};
+```
+
+After this, other sync handlers can use `ctx.auth.user` for row ownership checks. The `identity` option gives `@sveltebase/sync` a stable user ID for `scope` filtering:
+
+```typescript
+fetch: async (ctx) => {
+  const user = ctx.auth?.user;
+  if (!user) return [];
+
+  return db.select().from(todos).where(eq(todos.userId, user.id));
+}
+```
+
 ---
 
 ## 6. API Reference
@@ -228,7 +269,7 @@ export const handlers = [
 ### Sync Server Handler (`@sveltebase/auth/server`)
 
 * **`createAuthSync(config: SyncAuthConfig)`**
-  Establishes the read-only `"users"` sync channel verifying WebSocket subscriptions.
+  Establishes the `"users"` sync channel and verifies WebSocket subscriptions for auth state. For unrelated sync channels, use `handleUpgrade(..., { auth, identity })` in your `/api/sync` route to populate `ctx.auth`.
 
 ---
 

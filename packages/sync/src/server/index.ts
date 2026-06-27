@@ -1,44 +1,48 @@
 import type { ZodSchema } from "zod";
 
-export type SyncContext = {
-  platform: App.Platform | undefined;
-  request: Request;
-  auth?: any;
+export type SyncConnectionAuth<TUser = unknown> = {
+  user: TUser;
 };
 
-export type SyncHandlerConfig<TRow = any> = {
-  channel: string | ((ctx: SyncContext) => string);
-  fetch: (ctx: SyncContext, since?: string) => Promise<TRow[]>;
-  create?: (ctx: SyncContext, data: TRow) => Promise<TRow>;
+export type SyncContext<TAuth = any> = {
+  platform: App.Platform | undefined;
+  request: Request;
+  auth: TAuth | null;
+};
+
+export type SyncHandlerConfig<TRow = any, TAuth = any> = {
+  channel: string | ((ctx: SyncContext<TAuth>) => string);
+  fetch: (ctx: SyncContext<TAuth>, since?: string) => Promise<TRow[]>;
+  create?: (ctx: SyncContext<TAuth>, data: TRow) => Promise<TRow>;
   update?: (
-    ctx: SyncContext,
+    ctx: SyncContext<TAuth>,
     key: string,
     changes: Partial<TRow>,
   ) => Promise<TRow>;
-  delete?: (ctx: SyncContext, key: string) => Promise<void>;
-  authorize?: (ctx: SyncContext) => Promise<void>;
+  delete?: (ctx: SyncContext<TAuth>, key: string) => Promise<void>;
+  authorize?: (ctx: SyncContext<TAuth>) => Promise<void>;
   validate?: {
     create?: ZodSchema<any>;
     update?: ZodSchema<any>;
   };
   scope?: (
-    ctx: SyncContext,
+    ctx: SyncContext<TAuth>,
     action: "create" | "update" | "delete",
     data: TRow,
   ) => Promise<string[] | "all"> | string[] | "all";
 };
 
-export interface SyncHandler<TRow = any> {
-  config: SyncHandlerConfig<TRow>;
-  resolveChannel(ctx: SyncContext): string;
+export interface SyncHandler<TRow = any, TAuth = any> {
+  config: SyncHandlerConfig<TRow, TAuth>;
+  resolveChannel(ctx: SyncContext<TAuth>): string;
 }
 
-export function defineSync<TRow = any>(
-  config: SyncHandlerConfig<TRow>,
-): SyncHandler<TRow> {
+export function defineSync<TRow = any, TAuth = any>(
+  config: SyncHandlerConfig<TRow, TAuth>,
+): SyncHandler<TRow, TAuth> {
   return {
     config,
-    resolveChannel(ctx: SyncContext): string {
+    resolveChannel(ctx: SyncContext<TAuth>): string {
       return typeof config.channel === "function"
         ? config.channel(ctx)
         : config.channel;

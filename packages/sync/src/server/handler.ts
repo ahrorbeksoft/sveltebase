@@ -1,5 +1,45 @@
 import type { SyncHandler } from "./index.js";
 
+export type SyncAuthResult<TAuth> = TAuth | null | undefined;
+
+export type SyncUpgradeOptions<TAuth = any> = {
+  /**
+   * Resolves the authenticated app payload for this WebSocket connection.
+   * Return null/undefined when no session is present.
+   */
+  auth?: (
+    request: Request,
+    platform: App.Platform | undefined,
+  ) => Promise<SyncAuthResult<TAuth>> | SyncAuthResult<TAuth>;
+  /**
+   * Returns the stable identity key used by scope filtering.
+   * Defaults to auth.user.id when available, then auth.userId for legacy payloads.
+   */
+  identity?: (auth: TAuth) => string | number | bigint | null | undefined;
+  /**
+   * Defaults to true so existing public channels continue to work.
+   * Set false to reject WebSocket upgrades without a resolved auth payload.
+   */
+  allowUnauthenticated?: boolean;
+};
+
+const INTERNAL_AUTH_HEADER = "x-sveltebase-sync-auth";
+
+type SerializedConnectionAuth = {
+  auth: any;
+  identity: string | null;
+};
+
+function defaultIdentity(auth: any): string | null {
+  const value = auth?.user?.id ?? auth?.userId;
+  return value == null ? null : String(value);
+}
+
+function serializeConnectionAuth(auth: any, identity: string | null): string {
+  const payload: SerializedConnectionAuth = { auth, identity };
+  return btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+}
+
 export type PublishEventData<TRecord, TAction extends "create" | "update" | "delete"> =
   TAction extends "create"
     ? TRecord
@@ -191,9 +231,10 @@ export async function publishBulkEvent(
   }
 }
 
-export async function handleUpgrade(
+export async function handleUpgrade<TAuth = any>(
   request: Request,
   platform: App.Platform | undefined,
+  options?: SyncUpgradeOptions<TAuth>,
 ): Promise<Response> {
   if (request.headers.get("Upgrade") !== "websocket") {
     return new Response("Expected Upgrade: websocket", { status: 426 });
@@ -205,14 +246,47 @@ export async function handleUpgrade(
   }
 
   try {
+    let resolvedAuth: TAuth | null = null;
+    let identity: string | null = null;
+
+    if (options?.auth) {
+      resolvedAuth = (await options.auth(request, platform)) ?? null;
+
+      if (!resolvedAuth && options.allowUnauthenticated === false) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      if (resolvedAuth) {
+        const identityValue = options.identity
+          ? options.identity(resolvedAuth)
+          : defaultIdentity(resolvedAuth);
+        identity = identityValue == null ? null : String(identityValue);
+      }
+    }
+
+    const forwardedRequest = new Request(
+      "https://realtime.internal/websocket",
+      request,
+    );
+    forwardedRequest.headers.delete(INTERNAL_AUTH_HEADER);
+
+    if (resolvedAuth) {
+      forwardedRequest.headers.set(
+        INTERNAL_AUTH_HEADER,
+        serializeConnectionAuth(resolvedAuth, identity),
+      );
+    } else if (options?.auth) {
+      forwardedRequest.headers.delete(INTERNAL_AUTH_HEADER);
+    }
+
     const id = namespace.idFromName("global");
     const stub = namespace.get(id);
-    return await stub.fetch(
-      new Request("https://realtime.internal/websocket", request),
-    );
+    return await stub.fetch(forwardedRequest);
   } catch (err: any) {
     return new Response(err.message || "SyncEngine binding is not available", {
       status: 503,
     });
   }
 }
+
+export { INTERNAL_AUTH_HEADER };
