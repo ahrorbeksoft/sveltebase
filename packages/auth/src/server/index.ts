@@ -4,8 +4,10 @@ import { getUserFromRequest, verifyJWT, getVerifiedUserFromRequest } from "../in
 export interface SyncAuthConfig<User = any> {
   /**
    * Secret key used to verify the JWT tokens.
+   * Optional when the sync Worker uses jwtCookieAuth(), because ctx.auth.user
+   * is already verified during the websocket handshake.
    */
-  jwtSecret: string;
+  jwtSecret?: string;
   /**
    * Name of the session cookie.
    * @default "sf_session"
@@ -37,7 +39,25 @@ export function createAuthSync<User = any>(config: SyncAuthConfig<User>) {
 
     // Runs automatically when the client queries/subscribes to the "users" channel
     authorize: async (ctx) => {
-      const user = getUserFromRequest<{ id: string; token: string }>(ctx.request, cookieName);
+      const authenticatedUser = (ctx.auth as any)?.user as User | undefined;
+      if (authenticatedUser) {
+        if (config.verifyUser) {
+          const isValid = await config.verifyUser(authenticatedUser, ctx);
+          if (!isValid) {
+            throw new Error("Unauthorized: User no longer exists");
+          }
+        }
+        return;
+      }
+
+      if (!config.jwtSecret) {
+        throw new Error("Unauthorized: No verified sync auth found");
+      }
+
+      const user = getUserFromRequest<{ id: string; token: string }>(
+        ctx.request,
+        cookieName,
+      );
       if (!user) {
         throw new Error("Unauthorized: No session cookie found");
       }
@@ -61,6 +81,9 @@ export function createAuthSync<User = any>(config: SyncAuthConfig<User>) {
 
     // Returns the current session user so the client knows it is successfully authorized
     fetch: async (ctx) => {
+      const authenticatedUser = (ctx.auth as any)?.user as User | undefined;
+      if (authenticatedUser) return [authenticatedUser];
+
       const user = getUserFromRequest<User>(ctx.request, cookieName);
       return user ? [user] : [];
     },
@@ -71,7 +94,15 @@ export function createAuthSync<User = any>(config: SyncAuthConfig<User>) {
     
     update: async (ctx, key, changes) => {
       // Verify token authenticity before allowing writes
-      const user = await getVerifiedUserFromRequest<{ id: any; token: string }>(ctx.request, config.jwtSecret, cookieName);
+      const user =
+        ((ctx.auth as any)?.user as { id: any; token: string } | undefined) ??
+        (config.jwtSecret
+          ? await getVerifiedUserFromRequest<{ id: any; token: string }>(
+              ctx.request,
+              config.jwtSecret,
+              cookieName,
+            )
+          : null);
       if (!user) {
         throw new Error("Unauthorized: Invalid session");
       }

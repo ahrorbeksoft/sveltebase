@@ -168,26 +168,49 @@ Initialize the state once using a Svelte 5 reactive getter:
 
 ---
 
-## 5. WebSocket Sync Verification (Post-Load Security)
+## 5. Sync Worker Verification
 
-To run background cryptographic and database checks, register the `createAuthSync` handler on your sync server:
+Sync authentication is verified inside the standalone sync Worker, not in the SvelteKit app Worker. The app Worker should proxy `/api/sync` to the sync Worker and should not forward resolved auth objects.
+
+Create the sync Worker with `jwtCookieAuth()`:
+
+```typescript
+// src/worker/sync.ts
+import { jwtCookieAuth } from "@sveltebase/auth/sync";
+import { defineSyncWorker, SyncEngine } from "@sveltebase/sync/cloudflare";
+import { handlers } from "$lib/server/sync-handlers";
+
+export default defineSyncWorker({
+  handlers,
+  auth: jwtCookieAuth()
+});
+
+export { SyncEngine };
+```
+
+`jwtCookieAuth()` reads the `sf_session` cookie by default, verifies it with `platform.env.JWT_SECRET`, resolves identity from `user.id`, and marks unauthenticated websocket connections as rejected by default.
+
+Both Workers need the same secret:
+
+```bash
+wrangler secret put JWT_SECRET --config wrangler.jsonc
+wrangler secret put JWT_SECRET --config wrangler.sync.jsonc
+```
+
+Register `createAuthSync()` on the sync Worker handlers to protect the `"users"` channel and optionally check the database:
 
 ```typescript
 // src/lib/server/sync-handlers.ts
 import { createAuthSync } from "@sveltebase/auth/server";
-import { JWT_SECRET } from "$env/static/private";
 import { getDB } from "./db.js";
 
 export const handlers = [
   createAuthSync({
-    jwtSecret: JWT_SECRET,
-    // Database check to verify if the user account is active/valid
     verifyUser: async (user, ctx) => {
       const db = getDB(ctx.platform);
       const activeUser = await db.select().from(users).where(eq(users.id, user.id)).get();
       return !!activeUser && !activeUser.isSuspended;
     },
-    // Optional persistence hook for user mutations (e.g. auth.update)
     onUpdate: async (userId, changes, ctx) => {
       const db = getDB(ctx.platform);
       return await db.update(users).set(changes).where(eq(users.id, userId)).returning();
@@ -197,37 +220,7 @@ export const handlers = [
 ];
 ```
 
-`createAuthSync` registers and protects the `"users"` sync channel. It verifies the session token when the client subscribes to that channel and can call your `verifyUser` hook to check the database.
-
-To make the verified user object available to every other sync handler, resolve connection auth in your `/api/sync` WebSocket upgrade route.
-
-Recommended SvelteKit setup:
-
-```typescript
-// src/routes/api/sync/+server.ts
-import { JWT_SECRET } from "$env/static/private";
-import { getVerifiedUserFromRequest } from "@sveltebase/auth";
-import { handleUpgrade } from "@sveltebase/sync";
-import type { User } from "$lib/server/db/schema";
-import type { RequestEvent, RequestHandler } from "@sveltejs/kit";
-
-export const GET: RequestHandler = async (event: RequestEvent) => {
-  return handleUpgrade(event.request, event.platform, {
-    auth: async (request) => {
-      const user = await getVerifiedUserFromRequest<User>(
-        request,
-        JWT_SECRET
-      );
-
-      return user ? { user } : null;
-    },
-    identity: (auth) => auth.user.id,
-    allowUnauthenticated: false
-  });
-};
-```
-
-After this, other sync handlers can use `ctx.auth.user` for row ownership checks. The `identity` option gives `@sveltebase/sync` a stable user ID for `scope` filtering:
+Other sync handlers can use `ctx.auth?.user` and `ctx.identity` for row ownership checks:
 
 ```typescript
 fetch: async (ctx) => {
@@ -238,7 +231,17 @@ fetch: async (ctx) => {
 }
 ```
 
----
+Keep the browser connecting to the app origin so the session cookie is sent:
+
+```typescript
+// src/routes/api/sync/+server.ts
+import { SYNC_WORKER_URL } from "$env/static/private";
+import { syncProxy } from "@sveltebase/sync/sveltekit";
+
+export const { GET, POST } = syncProxy({
+  fallbackUrl: SYNC_WORKER_URL
+});
+```
 
 ## 6. API Reference
 
@@ -269,7 +272,9 @@ fetch: async (ctx) => {
 ### Sync Server Handler (`@sveltebase/auth/server`)
 
 * **`createAuthSync(config: SyncAuthConfig)`**
-  Establishes the `"users"` sync channel and verifies WebSocket subscriptions for auth state. For unrelated sync channels, use `handleUpgrade(..., { auth, identity })` in your `/api/sync` route to populate `ctx.auth`.
+  Establishes the `"users"` sync channel. Use `jwtCookieAuth()` in the standalone sync Worker to populate `ctx.auth` and `ctx.identity` for all sync handlers.
+* **`jwtCookieAuth(options?)`** from `@sveltebase/auth/sync`
+  Verifies the `sf_session` cookie using `platform.env.JWT_SECRET` during the sync Worker websocket handshake.
 
 ---
 

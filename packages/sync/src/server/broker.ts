@@ -1,4 +1,4 @@
-import type { SyncHandler, SyncContext } from "./index.js";
+import type { SyncHandler, SyncContext, SyncPlatform } from "./index.js";
 import { parseSyncMessage } from "../protocol.js";
 
 export interface ISyncConnection {
@@ -86,7 +86,7 @@ export class SyncBroker {
   public async handleMessage(
     conn: ISyncConnection,
     rawMessage: string,
-    platform: App.Platform | undefined,
+    platform: SyncPlatform,
     request: Request,
   ) {
     const msg = parseSyncMessage(rawMessage);
@@ -97,6 +97,7 @@ export class SyncBroker {
       platform,
       request,
       auth,
+      identity: conn.getIdentity(),
     };
 
     try {

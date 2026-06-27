@@ -4,10 +4,24 @@ export type SyncConnectionAuth<TUser = unknown> = {
   user: TUser;
 };
 
-export type SyncContext<TAuth = any> = {
-  platform: App.Platform | undefined;
+export type SyncPlatform<
+  TEnv extends Record<string, unknown> = Record<string, unknown>,
+> = {
+  env: TEnv;
+  ctx?: ExecutionContext;
+  context?: ExecutionContext;
+  caches?: CacheStorage;
+  cf?: IncomingRequestCfProperties;
+};
+
+export type SyncContext<
+  TAuth = any,
+  TEnv extends Record<string, unknown> = Record<string, unknown>,
+> = {
+  platform: SyncPlatform<TEnv>;
   request: Request;
   auth: TAuth | null;
+  identity: string | null;
 };
 
 export type SyncHandlerConfig<TRow = any, TAuth = any> = {
@@ -49,3 +63,18 @@ export function defineSync<TRow = any, TAuth = any>(
     },
   };
 }
+
+export {
+  createBulkPublisher,
+  createPublisher,
+  INTERNAL_AUTH_HEADER,
+} from "./handler.js";
+export type {
+  BulkPublishFn,
+  InferSchemaFromHandlers,
+  PublishEventData,
+  PublishFn,
+  SyncAuthResult,
+  SyncPublisherOptions,
+} from "./handler.js";
+export { SyncEngineBase } from "./engine.js";

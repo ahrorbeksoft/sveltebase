@@ -1,6 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { SyncBroker, type ISyncConnection } from "./broker.js";
 import { INTERNAL_AUTH_HEADER } from "./handler.js";
+import type { SyncHandler, SyncPlatform } from "./index.js";
+
+type SyncEngineEnv = Record<string, unknown>;
 
 type SerializedConnectionAuth = {
   auth: any;
@@ -68,11 +71,15 @@ class CloudflareSyncConnection implements ISyncConnection {
   }
 }
 
-export class SyncEngineBase extends DurableObject<Env> {
+export class SyncEngineBase extends DurableObject<SyncEngineEnv> {
   protected broker: SyncBroker;
   private connMap = new Map<WebSocket, CloudflareSyncConnection>();
 
-  constructor(ctx: DurableObjectState, env: Env, handlers: any[]) {
+  constructor(
+    ctx: DurableObjectState,
+    env: SyncEngineEnv,
+    handlers: SyncHandler[],
+  ) {
     super(ctx, env);
     this.broker = new SyncBroker(handlers);
   }
@@ -132,14 +139,6 @@ export class SyncEngineBase extends DurableObject<Env> {
       conn.setIdentity(forwardedAuth.identity);
     }
 
-    const url = new URL(request.url);
-    const userId =
-      url.searchParams.get("userId") || request.headers.get("x-user-id");
-    if (userId && !conn.getAuth()) {
-      conn.setAuth({ userId });
-      conn.setIdentity(userId);
-    }
-
     this.connMap.set(server, conn);
     this.broker.registerConnection(conn);
 
@@ -158,10 +157,13 @@ export class SyncEngineBase extends DurableObject<Env> {
     const request = new Request(conn.url, {
       headers: conn.headers,
     });
+    const platform: SyncPlatform = {
+      env: this.env as Record<string, unknown>,
+    };
     await this.broker.handleMessage(
       conn,
       message,
-      this.env as any,
+      platform,
       request,
     );
   }

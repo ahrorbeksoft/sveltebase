@@ -1,51 +1,17 @@
-import type { SyncHandler } from "./index.js";
+import type { SyncHandler, SyncPlatform } from "./index.js";
 
 export type SyncAuthResult<TAuth> = TAuth | null | undefined;
 
-export type SyncUpgradeOptions<TAuth = any> = {
-  /**
-   * Resolves the authenticated app payload for this WebSocket connection.
-   * Return null/undefined when no session is present.
-   */
-  auth?: (
-    request: Request,
-    platform: App.Platform | undefined,
-  ) => Promise<SyncAuthResult<TAuth>> | SyncAuthResult<TAuth>;
-  /**
-   * Returns the stable identity key used by scope filtering.
-   * Defaults to auth.user.id when available, then auth.userId for legacy payloads.
-   */
-  identity?: (auth: TAuth) => string | number | bigint | null | undefined;
-  /**
-   * Defaults to true so existing public channels continue to work.
-   * Set false to reject WebSocket upgrades without a resolved auth payload.
-   */
-  allowUnauthenticated?: boolean;
-};
+export const INTERNAL_AUTH_HEADER = "x-sveltebase-sync-auth";
 
-const INTERNAL_AUTH_HEADER = "x-sveltebase-sync-auth";
-
-type SerializedConnectionAuth = {
-  auth: any;
-  identity: string | null;
-};
-
-function defaultIdentity(auth: any): string | null {
-  const value = auth?.user?.id ?? auth?.userId;
-  return value == null ? null : String(value);
-}
-
-function serializeConnectionAuth(auth: any, identity: string | null): string {
-  const payload: SerializedConnectionAuth = { auth, identity };
-  return btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
-}
-
-export type PublishEventData<TRecord, TAction extends "create" | "update" | "delete"> =
-  TAction extends "create"
-    ? TRecord
-    : TAction extends "update"
-      ? Partial<TRecord>
-      : { updatedAt?: string } | undefined;
+export type PublishEventData<
+  TRecord,
+  TAction extends "create" | "update" | "delete",
+> = TAction extends "create"
+  ? TRecord
+  : TAction extends "update"
+    ? Partial<TRecord>
+    : { updatedAt?: string } | undefined;
 
 export type InferSchemaFromHandlers<T extends SyncHandler[]> = {
   [K in T[number] as K["config"]["channel"] extends string
@@ -57,7 +23,14 @@ export type InferSchemaFromHandlers<T extends SyncHandler[]> = {
       : string]: K extends SyncHandler<infer TRow> ? TRow : never;
 };
 
-export function createPublisher<TSchema extends Record<string, any>>(): <
+export type SyncPublisherOptions = {
+  binding?: string;
+  fallbackUrl?: string;
+  durableObjectBinding?: string;
+  platform?: SyncPlatform;
+};
+
+export type PublishFn<TSchema extends Record<string, unknown>> = <
   TChannel extends keyof TSchema & string,
   TAction extends "create" | "update" | "delete",
 >(
@@ -67,31 +40,7 @@ export function createPublisher<TSchema extends Record<string, any>>(): <
   data: PublishEventData<TSchema[TChannel], TAction>,
 ) => Promise<void>;
 
-export function createPublisher<THandlers extends SyncHandler[]>(
-  handlers: THandlers
-): <
-  TChannel extends keyof InferSchemaFromHandlers<THandlers> & string,
-  TAction extends "create" | "update" | "delete",
->(
-  channel: TChannel | `${TChannel}:${string}`,
-  action: TAction,
-  key: string | undefined,
-  data: PublishEventData<InferSchemaFromHandlers<THandlers>[TChannel], TAction>,
-) => Promise<void>;
-
-export function createPublisher(handlers?: SyncHandler[]) {
-  return async (
-    channel: string,
-    action: "create" | "update" | "delete",
-    key: string | undefined,
-    data: any,
-  ): Promise<void> => {
-    const resolvedChannel = String(channel);
-    return publishEvent(resolvedChannel, action, key, data);
-  };
-}
-
-export function createBulkPublisher<TSchema extends Record<string, any>>(): <
+export type BulkPublishFn<TSchema extends Record<string, unknown>> = <
   TChannel extends keyof TSchema & string,
 >(
   channel: TChannel | `${TChannel}:${string}`,
@@ -102,20 +51,150 @@ export function createBulkPublisher<TSchema extends Record<string, any>>(): <
   }>,
 ) => Promise<void>;
 
-export function createBulkPublisher<THandlers extends SyncHandler[]>(
-  handlers: THandlers
-): <
-  TChannel extends keyof InferSchemaFromHandlers<THandlers> & string,
->(
-  channel: TChannel | `${TChannel}:${string}`,
-  changes: Array<{
-    action: "create" | "update" | "delete";
-    key?: string;
-    data?: any;
-  }>,
-) => Promise<void>;
+function getEnv(options: SyncPublisherOptions) {
+  return options.platform?.env;
+}
 
-export function createBulkPublisher(handlers?: SyncHandler[]) {
+function normalizeEndpoint(baseUrl: string, pathname: string) {
+  return new URL(pathname, baseUrl).toString();
+}
+
+async function publishToDurableObject(
+  platform: SyncPlatform,
+  durableObjectBinding: string,
+  pathname: "/broadcast" | "/broadcast-batch",
+  body: unknown,
+) {
+  const namespace = platform.env[durableObjectBinding] as
+    | DurableObjectNamespace
+    | undefined;
+  if (!namespace) {
+    throw new Error(`Missing ${durableObjectBinding} Durable Object binding`);
+  }
+
+  const id = namespace.idFromName("global");
+  const stub = namespace.get(id);
+  const response = await stub.fetch(`https://sync.internal${pathname}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+}
+
+async function publishToServiceBinding(
+  binding: Fetcher,
+  pathname: "/broadcast" | "/broadcast-batch",
+  body: unknown,
+) {
+  const response = await binding.fetch(`https://sync.internal${pathname}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+}
+
+async function publishToFallbackUrl(
+  fallbackUrl: string,
+  pathname: "/broadcast" | "/broadcast-batch",
+  body: unknown,
+) {
+  const response = await fetch(normalizeEndpoint(fallbackUrl, pathname), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+}
+
+async function publish(
+  options: SyncPublisherOptions,
+  pathname: "/broadcast" | "/broadcast-batch",
+  body: unknown,
+) {
+  const env = getEnv(options);
+  const durableObjectBinding = options.durableObjectBinding ?? "SYNC_ENGINE";
+  const bindingName = options.binding ?? "SYNC_WORKER";
+
+  if (options.platform && env?.[durableObjectBinding]) {
+    await publishToDurableObject(
+      options.platform,
+      durableObjectBinding,
+      pathname,
+      body,
+    );
+    return;
+  }
+
+  const serviceBinding = env?.[bindingName] as Fetcher | undefined;
+  if (serviceBinding?.fetch) {
+    await publishToServiceBinding(serviceBinding, pathname, body);
+    return;
+  }
+
+  if (options.fallbackUrl) {
+    await publishToFallbackUrl(options.fallbackUrl, pathname, body);
+    return;
+  }
+
+  throw new Error(
+    `Missing sync publisher target: provide platform.env.${durableObjectBinding}, platform.env.${bindingName}, or fallbackUrl`,
+  );
+}
+
+export function createPublisher<TSchema extends Record<string, unknown>>(
+  options: SyncPublisherOptions,
+): PublishFn<TSchema>;
+
+export function createPublisher<THandlers extends SyncHandler[]>(
+  options: SyncPublisherOptions,
+  handlers: THandlers,
+): PublishFn<InferSchemaFromHandlers<THandlers>>;
+
+export function createPublisher(
+  options: SyncPublisherOptions,
+  handlers?: SyncHandler[],
+) {
+  void handlers;
+  return async (
+    channel: string,
+    action: "create" | "update" | "delete",
+    key: string | undefined,
+    data: any,
+  ): Promise<void> => {
+    await publish(options, "/broadcast", {
+      channel: String(channel),
+      action,
+      key,
+      data,
+    });
+  };
+}
+
+export function createBulkPublisher<TSchema extends Record<string, unknown>>(
+  options: SyncPublisherOptions,
+): BulkPublishFn<TSchema>;
+
+export function createBulkPublisher<THandlers extends SyncHandler[]>(
+  options: SyncPublisherOptions,
+  handlers: THandlers,
+): BulkPublishFn<InferSchemaFromHandlers<THandlers>>;
+
+export function createBulkPublisher(
+  options: SyncPublisherOptions,
+  handlers?: SyncHandler[],
+) {
+  void handlers;
   return async (
     channel: string,
     changes: Array<{
@@ -124,169 +203,9 @@ export function createBulkPublisher(handlers?: SyncHandler[]) {
       data?: any;
     }>,
   ): Promise<void> => {
-    const resolvedChannel = String(channel);
-    return publishBulkEvent(resolvedChannel, changes);
+    await publish(options, "/broadcast-batch", {
+      channel: String(channel),
+      changes,
+    });
   };
 }
-
-export async function publishEvent(
-  channel: string,
-  action: "create" | "update" | "delete",
-  key: string | undefined,
-  data: any,
-) {
-  const envId = "$app/environment";
-  let isDev = false;
-  try {
-    const env = await import(/* @vite-ignore */ envId);
-    isDev = env.dev;
-  } catch {}
-
-  if (!isDev) {
-    const globalObj = typeof globalThis !== "undefined" ? globalThis : {};
-    const processEnv = (globalObj as any).process?.env;
-    if (
-      processEnv?.NODE_ENV === "development" ||
-      processEnv?.NODE_ENV === "test" ||
-      (globalObj as any).__sync_dev_broker__
-    ) {
-      isDev = true;
-    }
-  }
-
-  if (isDev) {
-    const { broadcastExternalChange } = await import("./dev-engine.js");
-    await broadcastExternalChange(channel, action, key, data);
-    return;
-  }
-
-  try {
-    const serverId = "$app/server";
-    const { getRequestEvent } = await import(/* @vite-ignore */ serverId);
-    const { platform } = getRequestEvent();
-    const namespace = platform?.env.SYNC_ENGINE;
-    if (!namespace) return;
-
-    const id = namespace.idFromName("global");
-    const stub = namespace.get(id);
-    await stub.fetch("https://realtime.internal/broadcast", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channel, action, key, data }),
-    });
-  } catch (err) {
-    console.error("Failed to publish sync event to Durable Object:", err);
-  }
-}
-
-export async function publishBulkEvent(
-  channel: string,
-  changes: Array<{
-    action: "create" | "update" | "delete";
-    key?: string;
-    data?: any;
-  }>,
-) {
-  const envId = "$app/environment";
-  let isDev = false;
-  try {
-    const env = await import(/* @vite-ignore */ envId);
-    isDev = env.dev;
-  } catch {}
-
-  if (!isDev) {
-    const globalObj = typeof globalThis !== "undefined" ? globalThis : {};
-    const processEnv = (globalObj as any).process?.env;
-    if (
-      processEnv?.NODE_ENV === "development" ||
-      processEnv?.NODE_ENV === "test" ||
-      (globalObj as any).__sync_dev_broker__
-    ) {
-      isDev = true;
-    }
-  }
-
-  if (isDev) {
-    const { broadcastExternalBatchChange } = await import("./dev-engine.js");
-    await broadcastExternalBatchChange(channel, changes);
-    return;
-  }
-
-  try {
-    const serverId = "$app/server";
-    const { getRequestEvent } = await import(/* @vite-ignore */ serverId);
-    const { platform } = getRequestEvent();
-    const namespace = platform?.env.SYNC_ENGINE;
-    if (!namespace) return;
-
-    const id = namespace.idFromName("global");
-    const stub = namespace.get(id);
-    await stub.fetch("https://realtime.internal/broadcast-batch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channel, changes }),
-    });
-  } catch (err) {
-    console.error("Failed to publish bulk sync event to Durable Object:", err);
-  }
-}
-
-export async function handleUpgrade<TAuth = any>(
-  request: Request,
-  platform: App.Platform | undefined,
-  options?: SyncUpgradeOptions<TAuth>,
-): Promise<Response> {
-  if (request.headers.get("Upgrade") !== "websocket") {
-    return new Response("Expected Upgrade: websocket", { status: 426 });
-  }
-
-  const namespace = (platform as any)?.env?.SYNC_ENGINE;
-  if (!namespace) {
-    return new Response("SyncEngine binding is not available", { status: 500 });
-  }
-
-  try {
-    let resolvedAuth: TAuth | null = null;
-    let identity: string | null = null;
-
-    if (options?.auth) {
-      resolvedAuth = (await options.auth(request, platform)) ?? null;
-
-      if (!resolvedAuth && options.allowUnauthenticated === false) {
-        return new Response("Unauthorized", { status: 401 });
-      }
-
-      if (resolvedAuth) {
-        const identityValue = options.identity
-          ? options.identity(resolvedAuth)
-          : defaultIdentity(resolvedAuth);
-        identity = identityValue == null ? null : String(identityValue);
-      }
-    }
-
-    const forwardedRequest = new Request(
-      "https://realtime.internal/websocket",
-      request,
-    );
-    forwardedRequest.headers.delete(INTERNAL_AUTH_HEADER);
-
-    if (resolvedAuth) {
-      forwardedRequest.headers.set(
-        INTERNAL_AUTH_HEADER,
-        serializeConnectionAuth(resolvedAuth, identity),
-      );
-    } else if (options?.auth) {
-      forwardedRequest.headers.delete(INTERNAL_AUTH_HEADER);
-    }
-
-    const id = namespace.idFromName("global");
-    const stub = namespace.get(id);
-    return await stub.fetch(forwardedRequest);
-  } catch (err: any) {
-    return new Response(err.message || "SyncEngine binding is not available", {
-      status: 503,
-    });
-  }
-}
-
-export { INTERNAL_AUTH_HEADER };
