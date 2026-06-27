@@ -1,6 +1,9 @@
-import Dexie, { type Table, type PromiseExtended } from "dexie";
+import Dexie, { type Table } from "dexie";
 import { parseSyncMessage, type SyncMessage } from "../protocol.js";
 import { ConnectionStatus } from "./status.svelte.js";
+
+export { createLiveQuery } from "./live-query.svelte.js";
+export type { LiveQueryState } from "./live-query.svelte.js";
 
 export type TableConfig = {
   indexes: string;
@@ -503,6 +506,7 @@ class SyncClientClass<
         });
         break;
       }
+    }
   }
 
   private findTableByChannel(channel: string): string | undefined {
