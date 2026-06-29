@@ -15,6 +15,11 @@ export interface AuthClientConfig {
    */
   verifyTable?: string;
   /**
+   * App-specific comparison for deciding if a synced verify row belongs to
+   * the current session user.
+   */
+  verifyUser?: (sessionUser: any, syncedUser: any) => boolean;
+  /**
    * Base path for auth route handlers.
    * @default "/api/auth"
    */
@@ -48,6 +53,9 @@ export class AuthClientState<User extends { id: string }> {
   #routesBase: string;
   #onInvalidSession?: () => void | Promise<void>;
   #refreshWhenChanged?: boolean | ((sessionUser: User, syncedUser: User) => boolean);
+  #verifyUser: (sessionUser: User, syncedUser: any) => boolean;
+  #isVerifying = false;
+  #verificationReady = false;
 
   constructor(config?: AuthClientConfig) {
     this.#syncClient = config?.syncClient;
@@ -55,6 +63,9 @@ export class AuthClientState<User extends { id: string }> {
     this.#routesBase = config?.routesBase ?? "/api/auth";
     this.#onInvalidSession = config?.onInvalidSession;
     this.#refreshWhenChanged = config?.refreshWhenChanged;
+    this.#verifyUser = config?.verifyUser ?? ((sessionUser, syncedUser) => {
+      return String(sessionUser.id) === String(syncedUser?.id);
+    });
   }
 
   /**
@@ -108,9 +119,14 @@ export class AuthClientState<User extends { id: string }> {
       this.#verifySubscription = observable.subscribe({
         next: (rows) => {
           const activeUser = this.user;
-          if (!activeUser || !this.#refreshWhenChanged) return;
-          const syncedUser = rows.find((row: User) => String(row.id) === String(activeUser.id));
-          if (!syncedUser) return;
+          if (!activeUser || this.#isVerifying || !this.#verificationReady) return;
+          const syncedUser = rows.find((row: User) => this.#verifyUser(activeUser, row));
+          if (!syncedUser) {
+            this.handleInvalidSession();
+            return;
+          }
+
+          if (!this.#refreshWhenChanged) return;
 
           const shouldRefresh =
             this.#refreshWhenChanged === true
@@ -124,18 +140,53 @@ export class AuthClientState<User extends { id: string }> {
         },
         error: (err) => {
           console.warn("WebSocket session verification failed: logging out.", err);
-          this.#localOverride = null;
-          const invalid = this.#onInvalidSession?.();
-          if (invalid && typeof invalid.then === "function") {
-            invalid.catch((hookErr) => {
-              console.error("onInvalidSession hook failed", hookErr);
-            });
-          } else {
-            this.logout();
-          }
+          this.handleInvalidSession();
           clearSyncData(sync);
         }
       });
+    }
+  }
+
+  private async verifySyncedUser(
+    user: User | null,
+    options?: { reconnect?: boolean },
+  ): Promise<User | null> {
+    if (!user || !this.#syncClient) return user;
+    const resyncTable = (this.#syncClient as any).resyncTable as
+      | ((tableName: string, options?: { reconnect?: boolean }) => Promise<any[]>)
+      | undefined;
+    if (!resyncTable) return user;
+
+    this.#isVerifying = true;
+    try {
+      const rows = await resyncTable.call(
+        this.#syncClient,
+        this.#verifyTable,
+        options,
+      );
+      const syncedUser = rows.find((row) => this.#verifyUser(user, row));
+      if (!syncedUser) {
+        await this.handleInvalidSession();
+        return null;
+      }
+      this.#verificationReady = true;
+      return syncedUser as User;
+    } finally {
+      this.#isVerifying = false;
+    }
+  }
+
+  private async handleInvalidSession() {
+    this.#localOverride = null;
+    const invalid = this.#onInvalidSession?.();
+    if (invalid && typeof invalid.then === "function") {
+      await invalid.catch((hookErr) => {
+        console.error("onInvalidSession hook failed", hookErr);
+      });
+    }
+    this.#verificationReady = false;
+    if (this.#syncClient) {
+      await clearSyncData(this.#syncClient);
     }
   }
 
@@ -154,10 +205,11 @@ export class AuthClientState<User extends { id: string }> {
 
     const user = await response.json() as User;
     this.#localOverride = user;
-    if (this.#syncClient) {
-      this.#syncClient.reconnect();
+    const verifiedUser = await this.verifySyncedUser(user, { reconnect: true });
+    if (!verifiedUser) {
+      throw new Error("Invalid session");
     }
-    return user;
+    return verifiedUser;
   }
 
   /**
@@ -180,10 +232,7 @@ export class AuthClientState<User extends { id: string }> {
 
     const user = await response.json() as User;
     this.#localOverride = user;
-    if (this.#syncClient) {
-      this.#syncClient.reconnect();
-    }
-    return user;
+    return await this.verifySyncedUser(user, { reconnect: true });
   }
 
   /**
@@ -206,7 +255,7 @@ export class AuthClientState<User extends { id: string }> {
 
     const user = await response.json() as User;
     this.#localOverride = user;
-    return user;
+    return await this.verifySyncedUser(user);
   }
 
   /**

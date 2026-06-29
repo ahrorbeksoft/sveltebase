@@ -28,6 +28,11 @@ type PendingMutation = {
   reject: (reason: any) => void;
 };
 
+type PendingSnapshot = {
+  resolve: (rows: any[]) => void;
+  reject: (reason: any) => void;
+};
+
 class SyncClientClass<
   TSchema extends Record<string, any> = Record<string, any>,
 > extends Dexie {
@@ -44,6 +49,7 @@ class SyncClientClass<
 
   // Mutations waiting for ack/reject from server
   private pendingMutations = new Map<string, PendingMutation>();
+  private pendingSnapshots = new Map<string, PendingSnapshot[]>();
   // Mutations queued to be sent when connection is established
   private mutationQueue: Array<{
     id: string;
@@ -263,11 +269,14 @@ class SyncClientClass<
 
       // Re-subscribe to all tables (delta-sync aware)
       for (const config of Object.values(this.tableConfigs)) {
-        await this.subscribeToChannel(config.channel);
+        await this.subscribeToChannel(config.channel, { socket });
       }
+
+      if (this.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
 
       // Re-send all pending unacknowledged mutations
       for (const mut of this.pendingMutations.values()) {
+        if (this.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
         socket.send(
           JSON.stringify({
             type: "mutate",
@@ -281,7 +290,7 @@ class SyncClientClass<
       }
 
       // Flush queued mutations
-      this.flushMutationQueue();
+      this.flushMutationQueue(socket);
     });
 
     socket.addEventListener("message", async (message) => {
@@ -354,11 +363,15 @@ class SyncClientClass<
     return value == null ? undefined : String(value);
   }
 
-  private async subscribeToChannel(channel: string) {
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+  private async subscribeToChannel(
+    channel: string,
+    options?: { forceFull?: boolean; socket?: WebSocket },
+  ) {
+    const socket = options?.socket ?? this.socket;
+    if (socket && socket === this.socket && socket.readyState === WebSocket.OPEN) {
       const tableName = this.findTableByChannel(channel);
       let since: string | undefined;
-      if (tableName) {
+      if (tableName && !options?.forceFull) {
         try {
           const table = this.table(tableName);
           const updatedAtField = this.getUpdatedAtField(tableName);
@@ -370,17 +383,104 @@ class SyncClientClass<
           // Ignore if query fails or table is empty
         }
       }
-      this.socket.send(JSON.stringify({ type: "subscribe", channel, since }));
+      if (socket !== this.socket || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ type: "subscribe", channel, since }));
       this.activeChannels.add(channel);
     }
   }
 
-  private flushMutationQueue() {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+  public async resyncTable(
+    tableName: keyof TSchema & string,
+    options?: { reconnect?: boolean },
+  ): Promise<any[]> {
+    const config = this.tableConfigs[String(tableName)];
+    if (!config) {
+      throw new Error(`No sync table configured for ${String(tableName)}`);
+    }
+    return this.resyncChannel(config.channel, options);
+  }
+
+  public async resyncChannel(
+    channel: string,
+    options?: { reconnect?: boolean },
+  ): Promise<any[]> {
+    if (
+      options?.reconnect ||
+      !this.socket ||
+      this.socket.readyState === WebSocket.CLOSING ||
+      this.socket.readyState === WebSocket.CLOSED
+    ) {
+      this.reconnect();
+    }
+
+    await this.waitForSocket();
+
+    const snapshot = new Promise<any[]>((resolve, reject) => {
+      const queue = this.pendingSnapshots.get(channel) ?? [];
+      queue.push({ resolve, reject });
+      this.pendingSnapshots.set(channel, queue);
+    });
+
+    await this.subscribeToChannel(channel, { forceFull: true });
+    return snapshot;
+  }
+
+  private waitForSocket(): Promise<void> {
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("Timed out waiting for sync connection"));
+      }, 10000);
+
+      let socket: WebSocket | undefined;
+      let poll: ReturnType<typeof setInterval> | undefined;
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        if (poll) clearInterval(poll);
+        socket?.removeEventListener("open", onOpen);
+        socket?.removeEventListener("error", onError);
+      };
+      const onOpen = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = () => {
+        cleanup();
+        reject(new Error("Failed to connect sync websocket"));
+      };
+
+      const attach = () => {
+        if (socket === this.socket) return;
+        socket?.removeEventListener("open", onOpen);
+        socket?.removeEventListener("error", onError);
+        socket = this.socket;
+        if (!socket) return;
+        if (socket.readyState === WebSocket.OPEN) {
+          cleanup();
+          resolve();
+          return;
+        }
+        socket.addEventListener("open", onOpen, { once: true });
+        socket.addEventListener("error", onError, { once: true });
+      };
+
+      attach();
+      poll = setInterval(attach, 25);
+    });
+  }
+
+  private flushMutationQueue(socket = this.socket) {
+    if (!socket || socket !== this.socket || socket.readyState !== WebSocket.OPEN) return;
 
     while (this.mutationQueue.length > 0) {
+      if (socket !== this.socket || socket.readyState !== WebSocket.OPEN) return;
       const mut = this.mutationQueue.shift()!;
-      this.socket.send(
+      socket.send(
         JSON.stringify({
           type: "mutate",
           id: mut.id,
@@ -449,8 +549,17 @@ class SyncClientClass<
             // Full Snapshot: clear and replace
             await this.transaction("rw", table, async () => {
               await table.clear();
-              await table.bulkPut(msg.data);
+              for (const row of msg.data) {
+                await this.safePutRow(tableName, row);
+              }
             });
+          }
+        }
+        const pending = this.pendingSnapshots.get(msg.channel);
+        if (pending?.length) {
+          this.pendingSnapshots.delete(msg.channel);
+          for (const waiter of pending) {
+            waiter.resolve(msg.data);
           }
         }
         break;
@@ -471,6 +580,16 @@ class SyncClientClass<
         break;
       }
       case "reject": {
+        if (msg.id === "subscribe") {
+          for (const pending of this.pendingSnapshots.values()) {
+            for (const waiter of pending) {
+              waiter.reject(new Error(msg.error));
+            }
+          }
+          this.pendingSnapshots.clear();
+          break;
+        }
+
         const pending = this.pendingMutations.get(msg.id);
         if (pending) {
           console.warn(`Mutation ${msg.id} rejected by server: ${msg.error}`);
