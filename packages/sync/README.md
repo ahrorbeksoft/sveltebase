@@ -1,32 +1,28 @@
 # @sveltebase/sync
 
-Reactive, local-first database synchronization for Svelte 5 using a separate Cloudflare Worker for realtime sync.
+Reactive, local-first database synchronization for Svelte 5 on Cloudflare Workers.
 
 ## Architecture
 
-`@sveltebase/sync` now uses two Workers:
+`@sveltebase/sync` uses one Cloudflare Worker:
 
 ```txt
 browser
   -> SvelteKit app Worker
-      /api/sync -> env.SYNC_WORKER.fetch(request)
-  -> sync Worker
-      owns SyncEngine Durable Object
-      owns websocket upgrades
-      owns broadcasts
-      owns sync database/runtime bindings
-      owns sync auth verification
+      /api/sync -> SyncEngine Durable Object
+      server writes -> configured SyncEngine binding
 ```
 
-The SvelteKit app Worker does not export sync Durable Objects. This lets apps use the official `@sveltejs/adapter-cloudflare`.
+The production Worker wraps the official `@sveltejs/adapter-cloudflare` output and exports the `SyncEngine` Durable Object. Vite dev uses `syncDevPlugin()` for the WebSocket broker and `adapter-cloudflare` platform proxy for local Cloudflare bindings.
 
 ## Imports
 
 ```ts
 import { SyncClient, createLiveQuery } from "@sveltebase/sync/client";
-import { defineSync, createPublisher } from "@sveltebase/sync/server";
-import { syncProxy } from "@sveltebase/sync/sveltekit";
-import { defineSyncWorker, SyncEngine } from "@sveltebase/sync/cloudflare";
+import { defineSync, publishEvent } from "@sveltebase/sync/server";
+import { syncEngineRoute } from "@sveltebase/sync/sveltekit";
+import { createSyncAppWorker, SyncEngine } from "@sveltebase/sync/cloudflare";
+import { syncDevPlugin } from "@sveltebase/sync/vite";
 ```
 
 ## Client
@@ -35,22 +31,14 @@ import { defineSyncWorker, SyncEngine } from "@sveltebase/sync/cloudflare";
 // src/lib/sync-client.ts
 import { SyncClient } from "@sveltebase/sync/client";
 
-type AppSchema = {
-  todos: {
-    id: string;
-    title: string;
-    completed: boolean;
-    updatedAt: string;
-  };
-};
-
-export const sync = new SyncClient<AppSchema>({
+export const sync = new SyncClient({
   name: "app-sync",
   url: "/api/sync",
   tables: {
     todos: {
       indexes: "id, completed, updatedAt",
       channel: "todos",
+      updatedAtField: "updatedAt",
     },
   },
 });
@@ -58,7 +46,7 @@ export const sync = new SyncClient<AppSchema>({
 
 ## Sync Handlers
 
-Handlers run in the sync Worker. Use `ctx.platform.env` for Cloudflare bindings, `ctx.auth` for verified auth data, and `ctx.identity` for ownership/scoped fanout.
+Handlers run in the sync engine. Use `ctx.platform.env` for Cloudflare bindings, `ctx.auth` for verified auth data, and `ctx.identity` for ownership/scoped fanout.
 
 ```ts
 // src/lib/server/sync-handlers.ts
@@ -69,14 +57,11 @@ export const todoSync = defineSync({
 
   fetch: async (ctx, since) => {
     const db = ctx.platform.env.DB;
-    // Query any database here.
     return [];
   },
 
   authorize: async (ctx) => {
-    if (!ctx.auth) {
-      throw new Error("Unauthorized");
-    }
+    if (!ctx.auth) throw new Error("Unauthorized");
   },
 
   scope: (ctx) => {
@@ -87,97 +72,116 @@ export const todoSync = defineSync({
 export const handlers = [todoSync];
 ```
 
-## Sync Worker
-
-Create a standalone Worker entrypoint that owns the Durable Object:
+## SvelteKit Route For Vite Dev
 
 ```ts
-// src/worker/sync.ts
-import { jwtCookieAuth } from "@sveltebase/auth/sync";
-import { defineSyncWorker, SyncEngine } from "@sveltebase/sync/cloudflare";
+// src/routes/api/sync/+server.ts
+import { sessionCookieAuth } from "@sveltebase/auth/sync";
+import { syncEngineRoute } from "@sveltebase/sync/sveltekit";
 import { handlers } from "$lib/server/sync-handlers";
 
-export default defineSyncWorker({
+export const { GET } = syncEngineRoute({
   handlers,
-  auth: jwtCookieAuth(),
+  auth: sessionCookieAuth(),
+  allowUnauthenticated: true,
+  // Defaults to "SYNC_ENGINE".
+  syncEngineBinding: "SYNC_ENGINE",
+});
+```
+
+## Worker Wrapper For Wrangler And Production
+
+```ts
+// src/worker/app.ts
+import app from "../../.svelte-kit/cloudflare/_worker.js";
+import { sessionCookieAuth } from "@sveltebase/auth/sync";
+import { createSyncAppWorker, SyncEngine } from "@sveltebase/sync/cloudflare";
+import { handlers } from "$lib/server/sync-handlers";
+
+export default createSyncAppWorker(app, {
+  handlers,
+  auth: sessionCookieAuth(),
+  allowUnauthenticated: true,
+  // Defaults to "SYNC_ENGINE".
+  syncEngineBinding: "SYNC_ENGINE",
 });
 
 export { SyncEngine };
 ```
 
-`defineSyncWorker()` handles:
-
-- `GET /api/sync`: public websocket upgrade endpoint
-- `POST /broadcast`: publish one external change
-- `POST /broadcast-batch`: publish a batch of external changes
-
-`GET /websocket` is internal to the sync Worker and Durable Object.
-
-## SvelteKit Proxy Route
-
-Keep browsers connecting to the app origin so existing cookies are sent:
-
-```ts
-// src/routes/api/sync/+server.ts
-import { SYNC_WORKER_URL } from "$env/static/private";
-import { syncProxy } from "@sveltebase/sync/sveltekit";
-
-export const { GET, POST } = syncProxy({
-  fallbackUrl: SYNC_WORKER_URL,
-});
-```
-
-In production, configure a Cloudflare service binding named `SYNC_WORKER`. In local development, use `fallbackUrl` such as `http://localhost:8788/api/sync`.
+`createSyncAppWorker()` handles `GET /api/sync` and internal broadcast routes, then delegates all other requests to the adapter output.
 
 ## Publishing Server Events
 
-Publishing is explicit. It never reads SvelteKit request context implicitly.
+Publishing targets the current one-worker sync runtime automatically. In production, `createSyncAppWorker()` or `syncEngineRoute()` registers the configured Durable Object binding; in Vite dev, `syncDevPlugin()` provides the in-process broker.
 
 ```ts
-import { createPublisher } from "@sveltebase/sync/server";
+import { publishBulkEvent, publishEvent } from "@sveltebase/sync/server";
 
-type AppSchema = {
-  todos: { id: string; title: string; updatedAt: string };
-};
-
-const publish = createPublisher<AppSchema>({
-  platform: ctx.platform,
-  binding: "SYNC_WORKER",
-  fallbackUrl: env.SYNC_WORKER_URL,
-});
-
-await publish("todos", "update", todo.id, todo);
+await publishEvent("todos", "update", todo.id, todo);
+await publishBulkEvent("todos", [
+  { action: "update", key: todo.id, data: todo },
+]);
 ```
 
-Inside the sync Worker, `createPublisher()` publishes directly to `platform.env.SYNC_ENGINE`. Inside the app Worker, it publishes through `platform.env.SYNC_WORKER.fetch()`. Without a binding, it uses `fallbackUrl`.
+## Vite Dev
 
-## Cloudflare Configuration
+```ts
+// vite.config.ts
+import { sveltekit } from "@sveltejs/kit/vite";
+import { syncDevPlugin } from "@sveltebase/sync/vite";
+import { sessionCookieAuth } from "@sveltebase/auth/sync";
+import { defineConfig } from "vite";
 
-App Worker:
+export default defineConfig({
+  plugins: [
+    syncDevPlugin({
+      auth: sessionCookieAuth(),
+      allowUnauthenticated: true,
+      wranglerConfigPath: "wrangler.local.jsonc",
+    }),
+    sveltekit(),
+  ],
+});
+```
+
+## Svelte Config
+
+```js
+// svelte.config.js
+import adapter from "@sveltejs/adapter-cloudflare";
+import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
+
+export default {
+  preprocess: vitePreprocess(),
+  kit: {
+    adapter: adapter({
+      platformProxy: {
+        configPath: "wrangler.local.jsonc",
+      },
+    }),
+  },
+};
+```
+
+## Wrangler Configuration
+
+Main config for Wrangler dev with remote bindings and production deploy:
 
 ```jsonc
+// wrangler.jsonc
 {
   "name": "my-app",
-  "main": ".svelte-kit/cloudflare/_worker.js",
+  "main": "src/worker/app.ts",
   "compatibility_date": "2026-06-07",
   "compatibility_flags": ["nodejs_compat"],
-  "services": [
+  "d1_databases": [
     {
-      "binding": "SYNC_WORKER",
-      "service": "my-app-sync"
+      "binding": "DB",
+      "database_name": "my-app",
+      "database_id": "..."
     }
-  ]
-}
-```
-
-Sync Worker:
-
-```jsonc
-{
-  "name": "my-app-sync",
-  "main": "./src/worker/sync.ts",
-  "compatibility_date": "2026-06-07",
-  "compatibility_flags": ["nodejs_compat"],
+  ],
   "durable_objects": {
     "bindings": [
       {
@@ -195,9 +199,45 @@ Sync Worker:
 }
 ```
 
-Both Workers need the same session secret when using `@sveltebase/auth/sync`:
+If your Durable Object binding uses a different name, pass the same name to the sync setup:
 
-```bash
-wrangler secret put JWT_SECRET --config wrangler.jsonc
-wrangler secret put JWT_SECRET --config wrangler.sync.jsonc
+```ts
+export default createSyncAppWorker(app, {
+  handlers,
+  syncEngineBinding: "MY_SYNC_ENGINE",
+});
 ```
+
+```jsonc
+{
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MY_SYNC_ENGINE",
+        "class_name": "SyncEngine"
+      }
+    ]
+  }
+}
+```
+
+Local config for adapter platform proxy in Vite dev:
+
+```jsonc
+// wrangler.local.jsonc
+{
+  "name": "my-app-local",
+  "main": ".svelte-kit/cloudflare/_worker.js",
+  "compatibility_date": "2026-06-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "my-app",
+      "database_id": "..."
+    }
+  ]
+}
+```
+
+Use `wrangler secret put JWT_SECRET --config wrangler.jsonc` for remote/prod secrets. Use `.env` for Vite dev secrets loaded by the platform proxy.

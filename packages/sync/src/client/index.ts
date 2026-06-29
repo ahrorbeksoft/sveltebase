@@ -8,6 +8,7 @@ export type { LiveQueryState } from "./live-query.svelte.js";
 export type TableConfig = {
   indexes: string;
   channel: string;
+  updatedAtField?: string;
 };
 
 export type SyncClientOptions = {
@@ -344,6 +345,15 @@ class SyncClientClass<
     }
   }
 
+  private getUpdatedAtField(tableName: string) {
+    return this.tableConfigs[tableName]?.updatedAtField ?? "updatedAt";
+  }
+
+  private getUpdatedAtValue(tableName: string, row: any): string | undefined {
+    const value = row?.[this.getUpdatedAtField(tableName)];
+    return value == null ? undefined : String(value);
+  }
+
   private async subscribeToChannel(channel: string) {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       const tableName = this.findTableByChannel(channel);
@@ -351,9 +361,10 @@ class SyncClientClass<
       if (tableName) {
         try {
           const table = this.table(tableName);
-          const latestRow = await table.orderBy("updatedAt").last();
-          if (latestRow && latestRow.updatedAt) {
-            since = latestRow.updatedAt;
+          const updatedAtField = this.getUpdatedAtField(tableName);
+          const latestRow = await table.orderBy(updatedAtField).last();
+          if (latestRow) {
+            since = this.getUpdatedAtValue(tableName, latestRow);
           }
         } catch {
           // Ignore if query fails or table is empty
@@ -387,9 +398,11 @@ class SyncClientClass<
     if (!data || !data.id) return;
 
     const existing = await table.get(data.id);
-    if (existing && existing.updatedAt && data.updatedAt) {
-      const existingTime = new Date(existing.updatedAt).getTime();
-      const incomingTime = new Date(data.updatedAt).getTime();
+    const existingUpdatedAt = this.getUpdatedAtValue(tableName, existing);
+    const incomingUpdatedAt = this.getUpdatedAtValue(tableName, data);
+    if (existingUpdatedAt && incomingUpdatedAt) {
+      const existingTime = new Date(existingUpdatedAt).getTime();
+      const incomingTime = new Date(incomingUpdatedAt).getTime();
       if (incomingTime < existingTime) {
         // Ignore older update (Last-Write-Wins)
         return;
@@ -407,8 +420,9 @@ class SyncClientClass<
     const table = this.table(tableName);
     if (incomingTimeStr) {
       const existing = await table.get(key);
-      if (existing && existing.updatedAt) {
-        const existingTime = new Date(existing.updatedAt).getTime();
+      const existingUpdatedAt = this.getUpdatedAtValue(tableName, existing);
+      if (existingUpdatedAt) {
+        const existingTime = new Date(existingUpdatedAt).getTime();
         const incomingTime = new Date(incomingTimeStr).getTime();
         if (incomingTime < existingTime) {
           // Ignore older delete
@@ -484,7 +498,7 @@ class SyncClientClass<
         if (msg.action === "create" || msg.action === "update") {
           await this.safePutRow(tableName, msg.data);
         } else if (msg.action === "delete" && msg.key) {
-          const incomingTimeStr = msg.data?.updatedAt;
+          const incomingTimeStr = this.getUpdatedAtValue(tableName, msg.data);
           await this.safeDeleteRow(tableName, msg.key, incomingTimeStr);
         }
         break;
@@ -499,7 +513,10 @@ class SyncClientClass<
             if (change.action === "create" || change.action === "update") {
               await this.safePutRow(tableName, change.data);
             } else if (change.action === "delete" && change.key) {
-              const incomingTimeStr = change.data?.updatedAt;
+              const incomingTimeStr = this.getUpdatedAtValue(
+                tableName,
+                change.data,
+              );
               await this.safeDeleteRow(tableName, change.key, incomingTimeStr);
             }
           }

@@ -1,14 +1,18 @@
 import { getVerifiedUserFromRequest } from "../index.js";
 import type { SyncPlatform } from "@sveltebase/sync";
 
-export function jwtCookieAuth<User extends { id: any }>(options?: {
+export function sessionCookieAuth<User extends { id: string }>(options?: {
+  secret?: string | ((platform: SyncPlatform) => string | undefined);
   secretBinding?: string;
   cookieName?: string;
   identity?: (user: User) => string | number | bigint | null | undefined;
 }) {
   const resolver = async (request: Request, platform: SyncPlatform) => {
     const secretBinding = options?.secretBinding ?? "JWT_SECRET";
-    const secret = platform.env[secretBinding];
+    const secret =
+      typeof options?.secret === "function"
+        ? options.secret(platform)
+        : options?.secret ?? platform.env[secretBinding];
     if (!secret) {
       throw new Error(`Missing ${secretBinding} binding for sync auth`);
     }

@@ -1,24 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
+import { deserializeConnectionAuth } from "./auth.js";
 import { SyncBroker, type ISyncConnection } from "./broker.js";
 import { INTERNAL_AUTH_HEADER } from "./handler.js";
 import type { SyncHandler, SyncPlatform } from "./index.js";
 
 type SyncEngineEnv = Record<string, unknown>;
-
-type SerializedConnectionAuth = {
-  auth: any;
-  identity: string | null;
-};
-
-function deserializeConnectionAuth(value: string | null): SerializedConnectionAuth | null {
-  if (!value) return null;
-
-  try {
-    return JSON.parse(decodeURIComponent(escape(atob(value))));
-  } catch {
-    return null;
-  }
-}
 
 class CloudflareSyncConnection implements ISyncConnection {
   private ws: WebSocket;

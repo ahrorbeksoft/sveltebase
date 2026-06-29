@@ -1,53 +1,59 @@
 import type { RequestHandler } from "@sveltejs/kit";
+import { configurePublisherPlatform } from "../server/handler.js";
+import {
+  handleSyncRequest,
+  type SyncWorkerOptions,
+} from "../cloudflare/handler.js";
 
-export type SyncProxyOptions = {
-  binding?: string;
-  fallbackUrl?: string;
+export type SyncEngineRouteOptions<TAuth = unknown> =
+  SyncWorkerOptions<TAuth>;
+
+type CloudflarePlatform = {
+  env?: Record<string, unknown>;
+  context?: ExecutionContext;
+  ctx?: ExecutionContext;
 };
 
-function buildFallbackRequest(request: Request, fallbackUrl: string) {
-  const sourceUrl = new URL(request.url);
-  const targetUrl = new URL(fallbackUrl);
-  targetUrl.search = sourceUrl.search;
+function getExecutionContext(platform: CloudflarePlatform | undefined) {
+  const context = platform?.context ?? platform?.ctx;
+  if (context) return context;
 
-  return new Request(targetUrl, {
-    method: request.method,
-    headers: request.headers,
-    body: request.body,
-    redirect: request.redirect,
-  });
+  return {
+    waitUntil() {},
+    passThroughOnException() {},
+  } as unknown as ExecutionContext;
 }
 
-export function syncProxy(options?: SyncProxyOptions): {
+export function syncEngineRoute<TAuth = unknown>(
+  options: SyncEngineRouteOptions<TAuth>,
+): {
   GET: RequestHandler;
-  POST: RequestHandler;
 } {
-  const bindingName = options?.binding ?? "SYNC_WORKER";
-
   const handler: RequestHandler = async (event) => {
-    const platform = event.platform as
-      | { env?: Record<string, unknown> }
-      | undefined;
-    const serviceBinding = platform?.env?.[bindingName] as
-      | Fetcher
-      | undefined;
+    const platform = event.platform as CloudflarePlatform | undefined;
+    const env = platform?.env;
 
-    if (serviceBinding?.fetch) {
-      return serviceBinding.fetch(event.request);
+    if (!env) {
+      return new Response(
+        "Missing Cloudflare platform env. Configure adapter-cloudflare platformProxy for Vite dev or run under wrangler.",
+        { status: 500 },
+      );
     }
 
-    if (options?.fallbackUrl) {
-      return fetch(buildFallbackRequest(event.request, options.fallbackUrl));
-    }
+    configurePublisherPlatform(
+      { env },
+      options.syncEngineBinding ?? "SYNC_ENGINE",
+    );
 
-    return new Response(
-      `Missing sync Worker binding ${bindingName}. Configure a service binding or pass fallbackUrl to syncProxy().`,
-      { status: 500 },
+    return handleSyncRequest(
+      event.request,
+      env,
+      getExecutionContext(platform),
+      options,
     );
   };
 
   return {
     GET: handler,
-    POST: handler,
   };
 }

@@ -14,23 +14,23 @@ export interface ISyncConnection {
 }
 
 export class SyncBroker {
-  private handlers: Map<string, SyncHandler>;
+  private handlers = new Map<string, SyncHandler>();
+  private dynamicHandlers: SyncHandler[] = [];
   private connections: Set<ISyncConnection> = new Set();
 
   constructor(handlers: SyncHandler[]) {
-    this.handlers = new Map();
     this.setHandlers(handlers);
   }
 
   public setHandlers(handlers: SyncHandler[]) {
     this.handlers.clear();
+    this.dynamicHandlers = [];
+
     for (const h of handlers) {
-      // Resolve static channel to register, or we can register dynamic channel routing
-      // If it's a dynamic channel resolver function, we will match channel prefix or resolve dynamically
-      // Let's support both static channels and dynamic channel prefixes (or lookups).
-      // If config.channel is a function, we register it under a wildcard or handle it dynamically.
       if (typeof h.config.channel === "string") {
         this.handlers.set(h.config.channel, h);
+      } else {
+        this.dynamicHandlers.push(h);
       }
     }
   }
@@ -43,36 +43,21 @@ export class SyncBroker {
     this.connections.delete(conn);
   }
 
-  /**
-   * Resolves the appropriate handler for a channel name.
-   */
-  private findHandler(channel: string): SyncHandler | undefined {
-    // Static match
+  private findHandler(
+    channel: string,
+    ctx: SyncContext,
+  ): SyncHandler | undefined {
     const handler = this.handlers.get(channel);
     if (handler) return handler;
 
-    // Dynamic match: check dynamic handlers
-    for (const h of this.handlers.values()) {
-      if (typeof h.config.channel === "function") {
-        // We'll check if it matches in some way, but generally dynamic channel is resolved
-        // during subscribe and stored.
+    for (const h of this.dynamicHandlers) {
+      try {
+        if (h.resolveChannel(ctx) === channel) return h;
+      } catch {
+        // Ignore handlers that cannot resolve for this connection context.
       }
     }
 
-    // Fallback: search all handlers to see if they resolve to this channel for a generic context
-    // (this is rare, usually channels are static or follow a pattern like channel:userId)
-    for (const [, h] of this.handlers) {
-      if (typeof h.config.channel === "function") {
-        // Let's assume dynamic channels are in format "prefix:id". We can match by prefix.
-        const staticChannelPrefix =
-          typeof h.config.channel === "string" ? h.config.channel : "";
-        if (staticChannelPrefix && channel.startsWith(staticChannelPrefix)) {
-          return h;
-        }
-      }
-    }
-
-    // Let's support matching prefix like "todos:" -> match the todos handler
     const colonIndex = channel.indexOf(":");
     if (colonIndex !== -1) {
       const prefix = channel.substring(0, colonIndex);
@@ -107,7 +92,7 @@ export class SyncBroker {
           break;
 
         case "subscribe": {
-          const handler = this.findHandler(msg.channel);
+          const handler = this.findHandler(msg.channel, ctx);
           if (!handler) {
             conn.send(
               JSON.stringify({
@@ -144,7 +129,7 @@ export class SyncBroker {
           break;
 
         case "mutate": {
-          const handler = this.findHandler(msg.channel);
+          const handler = this.findHandler(msg.channel, ctx);
           if (!handler) {
             conn.send(
               JSON.stringify({

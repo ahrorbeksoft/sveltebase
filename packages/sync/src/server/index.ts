@@ -68,13 +68,14 @@ export {
   createBulkPublisher,
   createPublisher,
   INTERNAL_AUTH_HEADER,
+  publishBulkEvent,
+  publishEvent,
 } from "./handler.js";
 export type {
   BulkPublishFn,
-  InferSchemaFromHandlers,
+  PublishBulkEventFn,
   PublishEventData,
+  PublishEventFn,
   PublishFn,
   SyncAuthResult,
-  SyncPublisherOptions,
 } from "./handler.js";
-export { SyncEngineBase } from "./engine.js";

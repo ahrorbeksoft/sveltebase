@@ -1,14 +1,17 @@
 import type { Cookies } from "@sveltejs/kit";
 
-export type SessionUser<User> = User & { token: string };
+export type SessionPayload<User extends { id: string }> = {
+  user: User;
+  exp?: number;
+};
 
 export interface AuthConfig {
   /**
-   * Secret key used to sign and verify JWTs.
+   * Secret key used to sign and verify session cookies.
    */
-  jwtSecret: string;
+  secret: string;
   /**
-   * Name of the cookie storing the session token.
+   * Name of the cookie storing the signed session payload.
    * @default "sf_session"
    */
   cookieName?: string;
@@ -22,6 +25,7 @@ export interface AuthConfig {
     sameSite?: "lax" | "strict" | "none";
     domain?: string;
     maxAge?: number;
+    expires?: Date;
   };
 }
 
@@ -120,23 +124,43 @@ export async function verifyJWT(token: string, secret: string): Promise<Record<s
 }
 
 /**
- * Decodes the raw user session from cookies without verifying the JWT.
- * Best used in layout load functions for super-fast, database-free SSR.
+ * Signs a full session payload into an opaque cookie value.
  */
+export async function signSessionPayload<User extends { id: string }>(
+  payload: SessionPayload<User>,
+  secret: string,
+): Promise<string> {
+  return signJWT(payload, secret);
+}
+
 /**
- * Decodes the raw user session from cookies without verifying the JWT.
- * Best used in layout load functions for super-fast, database-free SSR.
+ * Verifies a signed session cookie value and returns the full session payload.
  */
-export function getUserFromCookie<User>(
+export async function verifySessionPayload<User extends { id: string }>(
+  cookieValue: string,
+  secret: string,
+): Promise<SessionPayload<User>> {
+  const payload = await verifyJWT(cookieValue, secret);
+  if (!payload.user || typeof payload.user.id !== "string") {
+    throw new Error("Invalid session payload");
+  }
+  return payload as SessionPayload<User>;
+}
+
+/**
+ * Extracts and verifies the signed user session from SvelteKit cookies.
+ */
+export async function getUserFromCookie<User extends { id: string }>(
   cookies: Cookies,
-  cookieName = "sf_session"
-): SessionUser<User> | null {
+  secret: string,
+  cookieName = "sf_session",
+): Promise<User | null> {
   const cookieVal = cookies.get(cookieName);
   if (!cookieVal) return null;
 
   try {
-    const jsonStr = atob(cookieVal);
-    return JSON.parse(jsonStr) as SessionUser<User>;
+    const session = await verifySessionPayload<User>(cookieVal, secret);
+    return session.user;
   } catch {
     return null;
   }
@@ -158,12 +182,13 @@ export function parseCookies(cookieHeader: string): Record<string, string> {
 }
 
 /**
- * Extracts and decodes the user session from standard Request headers without verifying it.
+ * Extracts and verifies the signed user session from standard Request headers.
  */
-export function getUserFromRequest<User>(
+export async function getUserFromRequest<User extends { id: string }>(
   request: Request,
-  cookieName = "sf_session"
-): SessionUser<User> | null {
+  secret: string,
+  cookieName = "sf_session",
+): Promise<User | null> {
   const cookieHeader = request.headers.get("Cookie");
   if (!cookieHeader) return null;
 
@@ -172,8 +197,8 @@ export function getUserFromRequest<User>(
   if (!rawSession) return null;
 
   try {
-    const jsonStr = atob(rawSession);
-    return JSON.parse(jsonStr) as SessionUser<User>;
+    const session = await verifySessionPayload<User>(rawSession, secret);
+    return session.user;
   } catch {
     return null;
   }
@@ -181,28 +206,19 @@ export function getUserFromRequest<User>(
 
 /**
  * Extracts and cryptographically verifies the user session from standard Request headers.
- * Best used in write/mutation contexts.
  */
-export async function getVerifiedUserFromRequest<User extends { id: any }>(
+export async function getVerifiedUserFromRequest<User extends { id: string }>(
   request: Request,
-  jwtSecret: string,
-  cookieName = "sf_session"
-): Promise<SessionUser<User> | null> {
-  const user = getUserFromRequest<User>(request, cookieName);
-  if (!user) return null;
-
-  try {
-    await verifyJWT(user.token, jwtSecret);
-    return user;
-  } catch {
-    return null;
-  }
+  secret: string,
+  cookieName = "sf_session",
+): Promise<User | null> {
+  return getUserFromRequest<User>(request, secret, cookieName);
 }
 
 /**
  * Creates SvelteKit server-side session management helpers.
  */
-export function createServerAuth<User extends { id: any }>(config: AuthConfig) {
+export function createServerAuth<User extends { id: string }>(config: AuthConfig) {
   const cookieName = config.cookieName || "sf_session";
   const defaultCookieOptions = {
     path: "/",
@@ -214,13 +230,13 @@ export function createServerAuth<User extends { id: any }>(config: AuthConfig) {
 
   return {
     /**
-     * Signs the user object into a JWT, embeds the token, and writes it to the SvelteKit cookies.
+     * Signs the full session payload and writes it to the SvelteKit cookies.
      */
     async login(
       cookies: Cookies,
       userPayload: User,
       options?: { maxAge?: number; expires?: Date }
-    ): Promise<SessionUser<User>> {
+    ): Promise<User> {
       let expiresAt: number | undefined;
       if (options?.maxAge) {
         expiresAt = Date.now() + options.maxAge * 1000;
@@ -230,21 +246,37 @@ export function createServerAuth<User extends { id: any }>(config: AuthConfig) {
         expiresAt = Date.now() + defaultCookieOptions.maxAge * 1000;
       }
 
-      // Generate the verified JWT token using user id
-      const token = await signJWT({ id: userPayload.id }, config.jwtSecret, expiresAt);
-
-      const sessionUser: SessionUser<User> = {
-        ...userPayload,
-        token,
-      };
-
-      const cookieVal = btoa(JSON.stringify(sessionUser));
+      const cookieVal = await signSessionPayload<User>(
+        {
+          user: userPayload,
+          ...(expiresAt ? { exp: Math.floor(expiresAt / 1000) } : {}),
+        },
+        config.secret,
+      );
       cookies.set(cookieName, cookieVal, {
         ...defaultCookieOptions,
         ...options,
       });
 
-      return sessionUser;
+      return userPayload;
+    },
+
+    /**
+     * Verifies the signed session cookie and returns the stored user snapshot.
+     */
+    async getUser(cookies: Cookies): Promise<User | null> {
+      return getUserFromCookie<User>(cookies, config.secret, cookieName);
+    },
+
+    /**
+     * Rewrites the signed session cookie with a fresh user object.
+     */
+    async refresh(
+      cookies: Cookies,
+      userPayload: User,
+      options?: { maxAge?: number; expires?: Date },
+    ): Promise<User> {
+      return this.login(cookies, userPayload, options);
     },
 
     /**

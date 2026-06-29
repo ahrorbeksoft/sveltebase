@@ -1,4 +1,4 @@
-import type { SyncHandler, SyncPlatform } from "./index.js";
+import type { SyncPlatform } from "./index.js";
 
 export type SyncAuthResult<TAuth> = TAuth | null | undefined;
 
@@ -11,24 +11,7 @@ export type PublishEventData<
   ? TRecord
   : TAction extends "update"
     ? Partial<TRecord>
-    : { updatedAt?: string } | undefined;
-
-export type InferSchemaFromHandlers<T extends SyncHandler[]> = {
-  [K in T[number] as K["config"]["channel"] extends string
-    ? K["config"]["channel"]
-    : K["config"]["channel"] extends (...args: any[]) => infer R
-      ? R extends string
-        ? R
-        : string
-      : string]: K extends SyncHandler<infer TRow> ? TRow : never;
-};
-
-export type SyncPublisherOptions = {
-  binding?: string;
-  fallbackUrl?: string;
-  durableObjectBinding?: string;
-  platform?: SyncPlatform;
-};
+    : Partial<TRecord> | undefined;
 
 export type PublishFn<TSchema extends Record<string, unknown>> = <
   TChannel extends keyof TSchema & string,
@@ -51,25 +34,57 @@ export type BulkPublishFn<TSchema extends Record<string, unknown>> = <
   }>,
 ) => Promise<void>;
 
-function getEnv(options: SyncPublisherOptions) {
-  return options.platform?.env;
+export type PublishEventFn<TSchema extends Record<string, unknown>> =
+  PublishFn<TSchema>;
+
+export type PublishBulkEventFn<TSchema extends Record<string, unknown>> =
+  BulkPublishFn<TSchema>;
+
+const GLOBAL_PLATFORM_KEY = "__sveltebase_sync_platform__";
+const DEFAULT_SYNC_ENGINE_BINDING = "SYNC_ENGINE";
+
+type PublisherRuntime = {
+  platform: SyncPlatform;
+  syncEngineBinding: string;
+};
+
+function hasDevBroker() {
+  const globalObject = globalThis as unknown as Record<string, unknown>;
+  return Boolean(globalObject.__sveltebase_sync_dev_broker__);
 }
 
-function normalizeEndpoint(baseUrl: string, pathname: string) {
-  return new URL(pathname, baseUrl).toString();
+export function configurePublisherPlatform(
+  platform: SyncPlatform,
+  syncEngineBinding = DEFAULT_SYNC_ENGINE_BINDING,
+) {
+  const globalObject = globalThis as unknown as Record<
+    string,
+    PublisherRuntime | undefined
+  >;
+  globalObject[GLOBAL_PLATFORM_KEY] = { platform, syncEngineBinding };
+}
+
+function getPublisherRuntime() {
+  const globalObject = globalThis as unknown as Record<
+    string,
+    PublisherRuntime | undefined
+  >;
+  return globalObject[GLOBAL_PLATFORM_KEY];
 }
 
 async function publishToDurableObject(
   platform: SyncPlatform,
-  durableObjectBinding: string,
+  syncEngineBinding: string,
   pathname: "/broadcast" | "/broadcast-batch",
   body: unknown,
 ) {
-  const namespace = platform.env[durableObjectBinding] as
+  const namespace = platform.env[syncEngineBinding] as
     | DurableObjectNamespace
     | undefined;
   if (!namespace) {
-    throw new Error(`Missing ${durableObjectBinding} Durable Object binding`);
+    throw new Error(
+      `Missing ${syncEngineBinding} Durable Object binding`,
+    );
   }
 
   const id = namespace.idFromName("global");
@@ -85,127 +100,117 @@ async function publishToDurableObject(
   }
 }
 
-async function publishToServiceBinding(
-  binding: Fetcher,
+async function publishToDevBroker(
   pathname: "/broadcast" | "/broadcast-batch",
-  body: unknown,
+  body: any,
 ) {
-  const response = await binding.fetch(`https://sync.internal${pathname}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const devEngine = await import("./dev-engine.js");
 
-  if (!response.ok) {
-    throw new Error(await response.text());
+  if (pathname === "/broadcast-batch") {
+    await devEngine.broadcastExternalBatchChange(
+      String(body.channel),
+      Array.isArray(body.changes) ? body.changes : [],
+    );
+    return;
   }
-}
 
-async function publishToFallbackUrl(
-  fallbackUrl: string,
-  pathname: "/broadcast" | "/broadcast-batch",
-  body: unknown,
-) {
-  const response = await fetch(normalizeEndpoint(fallbackUrl, pathname), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
+  await devEngine.broadcastExternalChange(
+    String(body.channel),
+    body.action,
+    body.key,
+    body.data,
+  );
 }
 
 async function publish(
-  options: SyncPublisherOptions,
   pathname: "/broadcast" | "/broadcast-batch",
   body: unknown,
 ) {
-  const env = getEnv(options);
-  const durableObjectBinding = options.durableObjectBinding ?? "SYNC_ENGINE";
-  const bindingName = options.binding ?? "SYNC_WORKER";
+  const runtime = getPublisherRuntime();
 
-  if (options.platform && env?.[durableObjectBinding]) {
+  if (runtime?.platform.env[runtime.syncEngineBinding]) {
     await publishToDurableObject(
-      options.platform,
-      durableObjectBinding,
+      runtime.platform,
+      runtime.syncEngineBinding,
       pathname,
       body,
     );
     return;
   }
 
-  const serviceBinding = env?.[bindingName] as Fetcher | undefined;
-  if (serviceBinding?.fetch) {
-    await publishToServiceBinding(serviceBinding, pathname, body);
-    return;
-  }
-
-  if (options.fallbackUrl) {
-    await publishToFallbackUrl(options.fallbackUrl, pathname, body);
+  if (hasDevBroker()) {
+    await publishToDevBroker(pathname, body);
     return;
   }
 
   throw new Error(
-    `Missing sync publisher target: provide platform.env.${durableObjectBinding}, platform.env.${bindingName}, or fallbackUrl`,
+    "Missing sync publisher target: use createSyncAppWorker() in production or syncDevPlugin() in Vite dev",
   );
 }
 
-export function createPublisher<TSchema extends Record<string, unknown>>(
-  options: SyncPublisherOptions,
-): PublishFn<TSchema>;
+export function createPublisher<
+  TSchema extends Record<string, unknown>,
+>(): PublishFn<TSchema>;
 
-export function createPublisher<THandlers extends SyncHandler[]>(
-  options: SyncPublisherOptions,
-  handlers: THandlers,
-): PublishFn<InferSchemaFromHandlers<THandlers>>;
+export function createPublisher() {
+  return publishEvent;
+}
 
-export function createPublisher(
-  options: SyncPublisherOptions,
-  handlers?: SyncHandler[],
-) {
-  void handlers;
-  return async (
+export async function publishEvent<
+  TSchema extends Record<string, unknown>,
+  TChannel extends keyof TSchema & string,
+  TAction extends "create" | "update" | "delete",
+>(
+  channel: TChannel | `${TChannel}:${string}`,
+  action: TAction,
+  key: string | undefined,
+  data: PublishEventData<TSchema[TChannel], TAction>,
+): Promise<void>;
+
+export async function publishEvent(
     channel: string,
     action: "create" | "update" | "delete",
     key: string | undefined,
     data: any,
-  ): Promise<void> => {
-    await publish(options, "/broadcast", {
-      channel: String(channel),
-      action,
-      key,
-      data,
-    });
-  };
+): Promise<void> {
+  await publish("/broadcast", {
+    channel: String(channel),
+    action,
+    key,
+    data,
+  });
 }
 
-export function createBulkPublisher<TSchema extends Record<string, unknown>>(
-  options: SyncPublisherOptions,
-): BulkPublishFn<TSchema>;
+export function createBulkPublisher<
+  TSchema extends Record<string, unknown>,
+>(): BulkPublishFn<TSchema>;
 
-export function createBulkPublisher<THandlers extends SyncHandler[]>(
-  options: SyncPublisherOptions,
-  handlers: THandlers,
-): BulkPublishFn<InferSchemaFromHandlers<THandlers>>;
+export function createBulkPublisher() {
+  return publishBulkEvent;
+}
 
-export function createBulkPublisher(
-  options: SyncPublisherOptions,
-  handlers?: SyncHandler[],
-) {
-  void handlers;
-  return async (
+export async function publishBulkEvent<
+  TSchema extends Record<string, unknown>,
+  TChannel extends keyof TSchema & string,
+>(
+  channel: TChannel | `${TChannel}:${string}`,
+  changes: Array<{
+    action: "create" | "update" | "delete";
+    key?: string;
+    data?: any;
+  }>,
+): Promise<void>;
+
+export async function publishBulkEvent(
     channel: string,
     changes: Array<{
       action: "create" | "update" | "delete";
       key?: string;
       data?: any;
     }>,
-  ): Promise<void> => {
-    await publish(options, "/broadcast-batch", {
-      channel: String(channel),
-      changes,
-    });
-  };
+): Promise<void> {
+  await publish("/broadcast-batch", {
+    channel: String(channel),
+    changes,
+  });
 }
