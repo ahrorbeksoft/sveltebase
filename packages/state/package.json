@@ -1,6 +1,6 @@
 {
   "name": "@sveltebase/state",
-  "version": "1.3.0",
+  "version": "1.4.6",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -18,7 +18,7 @@
     }
   },
   "dependencies": {
-    "@sveltebase/utils": "1.3.0"
+    "@sveltebase/utils": "1.4.6"
   },
   "peerDependencies": {
     "svelte": "^5.0.0"
@@ -33,7 +33,7 @@
   },
   "homepage": "https://github.com/ahrorbeksoft/sveltebase/tree/main/packages/state#readme",
   "scripts": {
-    "build": "svelte-package --input ./src --output ./dist",
+    "build": "svelte-package --input ./src --output ./dist --tsconfig ./tsconfig.package.json",
     "check": "tsc --project tsconfig.json --noEmit",
     "lint": "bun run build && publint --strict --pack npm",
     "clean": "rm -rf dist"
