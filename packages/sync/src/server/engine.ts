@@ -81,7 +81,14 @@ export class SyncEngineBase extends DurableObject<SyncEngineEnv> {
       try {
         const body = (await request.json()) as any;
         const { channel, action, key, data } = body;
-        await this.broker.handleExternalChange(channel, action, key, data);
+        await this.broker.handleExternalChange(
+          channel,
+          action,
+          key,
+          data,
+          { env: this.env as Record<string, unknown> },
+          request,
+        );
         return new Response(null, { status: 204 });
       } catch (err: any) {
         return new Response(err.message || "Error processing broadcast", {
@@ -94,7 +101,12 @@ export class SyncEngineBase extends DurableObject<SyncEngineEnv> {
       try {
         const body = (await request.json()) as any;
         const { channel, changes } = body;
-        await this.broker.handleExternalBatchChange(channel, changes);
+        await this.broker.handleExternalBatchChange(
+          channel,
+          changes,
+          { env: this.env as Record<string, unknown> },
+          request,
+        );
         return new Response(null, { status: 204 });
       } catch (err: any) {
         return new Response(err.message || "Error processing batch broadcast", {

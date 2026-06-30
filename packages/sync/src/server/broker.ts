@@ -43,6 +43,31 @@ export class SyncBroker {
     this.connections.delete(conn);
   }
 
+  private createConnectionContext(
+    conn: ISyncConnection,
+    platform: SyncPlatform,
+    request?: Request,
+  ): SyncContext {
+    return {
+      platform,
+      request: request ?? new Request(conn.url, { headers: conn.headers }),
+      auth: conn.getAuth(),
+      identity: conn.getIdentity(),
+    };
+  }
+
+  private createExternalContext(
+    platform: SyncPlatform,
+    request?: Request,
+  ): SyncContext {
+    return {
+      platform,
+      request: request ?? new Request("https://sync.internal/broadcast"),
+      auth: null,
+      identity: null,
+    };
+  }
+
   private findHandler(
     channel: string,
     ctx: SyncContext,
@@ -68,6 +93,26 @@ export class SyncBroker {
     return undefined;
   }
 
+  private findExternalHandler(
+    channel: string,
+    platform: SyncPlatform,
+    request?: Request,
+  ): SyncHandler | undefined {
+    const externalCtx = this.createExternalContext(platform, request);
+    const handler = this.findHandler(channel, externalCtx);
+    if (handler) return handler;
+
+    for (const conn of this.connections) {
+      if (!conn.getSubscribedChannels().has(channel)) continue;
+
+      const connCtx = this.createConnectionContext(conn, platform);
+      const connHandler = this.findHandler(channel, connCtx);
+      if (connHandler) return connHandler;
+    }
+
+    return undefined;
+  }
+
   public async handleMessage(
     conn: ISyncConnection,
     rawMessage: string,
@@ -77,13 +122,7 @@ export class SyncBroker {
     const msg = parseSyncMessage(rawMessage);
     if (!msg) return;
 
-    const auth = conn.getAuth();
-    const ctx: SyncContext = {
-      platform,
-      request,
-      auth,
-      identity: conn.getIdentity(),
-    };
+    const ctx = this.createConnectionContext(conn, platform, request);
 
     try {
       switch (msg.type) {
@@ -181,8 +220,7 @@ export class SyncBroker {
           );
 
           // Broadcast changes to other subscribers
-          this.broadcastChange(
-            conn,
+          await this.broadcastChange(
             msg.channel,
             msg.action,
             msg.key || result?.id,
@@ -212,7 +250,6 @@ export class SyncBroker {
   }
 
   private async broadcastChange(
-    sender: ISyncConnection,
     channel: string,
     action: "create" | "update" | "delete",
     key: string | undefined,
@@ -230,32 +267,47 @@ export class SyncBroker {
       mutationId,
     });
 
-    // Determine scope
-    let allowedUserIds: string[] | "all" = "all";
-    if (handler.config.scope) {
-      try {
-        allowedUserIds = await handler.config.scope(ctx, action, data);
-      } catch (e) {
-        console.error("SyncBroker: error resolving broadcast scope:", e);
-      }
+    const allowedUserIds = await this.resolveScope(
+      handler,
+      ctx,
+      action,
+      data,
+    );
+
+    this.sendToScopedSubscribers(channel, changeMsg, allowedUserIds);
+  }
+
+  private async resolveScope(
+    handler: SyncHandler | undefined,
+    ctx: SyncContext,
+    action: "create" | "update" | "delete",
+    data: any,
+  ) {
+    if (!handler?.config.scope) return "all";
+
+    try {
+      return await handler.config.scope(ctx, action, data);
+    } catch (e) {
+      console.error("SyncBroker: error resolving broadcast scope:", e);
+      return [];
     }
+  }
 
+  private sendToScopedSubscribers(
+    channel: string,
+    message: string,
+    allowedUserIds: string[] | "all",
+  ) {
     for (const conn of this.connections) {
-      // Don't send to connections not subscribed to this channel
-      if (!conn.getSubscribedChannels().has(channel)) {
-        continue;
-      }
+      if (!conn.getSubscribedChannels().has(channel)) continue;
 
-      // Filter based on scope
       if (allowedUserIds !== "all") {
         const userId = conn.getIdentity();
-        if (!userId || !allowedUserIds.includes(userId)) {
-          continue;
-        }
+        if (!userId || !allowedUserIds.includes(userId)) continue;
       }
 
       try {
-        conn.send(changeMsg);
+        conn.send(message);
       } catch {
         this.connections.delete(conn);
       }
@@ -267,6 +319,8 @@ export class SyncBroker {
     action: "create" | "update" | "delete",
     key: string | undefined,
     data: any,
+    platform: SyncPlatform = { env: {} },
+    request?: Request,
   ) {
     const changeMsg = JSON.stringify({
       type: "change",
@@ -276,35 +330,56 @@ export class SyncBroker {
       data,
     });
 
-    for (const conn of this.connections) {
-      if (conn.getSubscribedChannels().has(channel)) {
-        try {
-          conn.send(changeMsg);
-        } catch {
-          this.connections.delete(conn);
-        }
-      }
-    }
+    const ctx = this.createExternalContext(platform, request);
+    const handler = this.findExternalHandler(channel, platform, request);
+    const allowedUserIds = await this.resolveScope(
+      handler,
+      ctx,
+      action,
+      data,
+    );
+
+    this.sendToScopedSubscribers(channel, changeMsg, allowedUserIds);
   }
 
   public async handleExternalBatchChange(
     channel: string,
     changes: Array<{ action: "create" | "update" | "delete"; key?: string; data?: any }>,
+    platform: SyncPlatform = { env: {} },
+    request?: Request,
   ) {
-    const batchMsg = JSON.stringify({
-      type: "batch",
-      channel,
-      changes,
-    });
+    const ctx = this.createExternalContext(platform, request);
+    const handler = this.findExternalHandler(channel, platform, request);
 
-    for (const conn of this.connections) {
-      if (conn.getSubscribedChannels().has(channel)) {
-        try {
-          conn.send(batchMsg);
-        } catch {
-          this.connections.delete(conn);
-        }
-      }
+    if (!handler?.config.scope) {
+      const batchMsg = JSON.stringify({
+        type: "batch",
+        channel,
+        changes,
+      });
+      this.sendToScopedSubscribers(channel, batchMsg, "all");
+      return;
+    }
+
+    // Resolve each change independently. A batch can contain rows with
+    // different audiences, and unioning those audiences would leak data.
+    for (const change of changes) {
+      const changeMsg = JSON.stringify({
+        type: "change",
+        channel,
+        action: change.action,
+        key: change.key,
+        data: change.data,
+      });
+
+      const allowedUserIds = await this.resolveScope(
+        handler,
+        ctx,
+        change.action,
+        change.data,
+      );
+
+      this.sendToScopedSubscribers(channel, changeMsg, allowedUserIds);
     }
   }
 }

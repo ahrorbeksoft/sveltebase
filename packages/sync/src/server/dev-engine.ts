@@ -210,7 +210,8 @@ export async function broadcastExternalChange(
   data: any,
 ) {
   const broker = getDevBroker();
-  await broker.handleExternalChange(channel, action, key, data);
+  const platform = await resolvePlatform();
+  await broker.handleExternalChange(channel, action, key, data, platform);
 }
 
 export async function broadcastExternalBatchChange(
@@ -222,5 +223,6 @@ export async function broadcastExternalBatchChange(
   }>,
 ) {
   const broker = getDevBroker();
-  await broker.handleExternalBatchChange(channel, changes);
+  const platform = await resolvePlatform();
+  await broker.handleExternalBatchChange(channel, changes, platform);
 }
