@@ -19,7 +19,7 @@ The production Worker wraps the official `@sveltejs/adapter-cloudflare` output a
 
 ```ts
 import { SyncClient, createLiveQuery } from "@sveltebase/sync/client";
-import { defineSync, publishEvent } from "@sveltebase/sync/server";
+import { defineSync, publishChangeEvent, publishEvent } from "@sveltebase/sync/server";
 import { syncEngineRoute } from "@sveltebase/sync/sveltekit";
 import { createSyncAppWorker, SyncEngine } from "@sveltebase/sync/cloudflare";
 import { syncDevPlugin } from "@sveltebase/sync/vite";
@@ -116,12 +116,21 @@ export { SyncEngine };
 Publishing targets the current one-worker sync runtime automatically. In production, `createSyncAppWorker()` or `syncEngineRoute()` registers the configured Durable Object binding; in Vite dev, `syncDevPlugin()` provides the in-process broker.
 
 ```ts
-import { publishBulkEvent, publishEvent } from "@sveltebase/sync/server";
+import {
+  publishBulkEvent,
+  publishChangeEvent,
+  publishEvent,
+} from "@sveltebase/sync/server";
 
 await publishEvent("todos", "update", todo.id, todo);
 await publishBulkEvent("todos", [
   { action: "update", key: todo.id, data: todo },
 ]);
+
+// Notify subscribed clients that the channel changed. Clients refetch the
+// channel delta through the handler fetch function, so authorization stays
+// centralized in fetch instead of the WebSocket payload.
+await publishChangeEvent("todos");
 ```
 
 ## Vite Dev

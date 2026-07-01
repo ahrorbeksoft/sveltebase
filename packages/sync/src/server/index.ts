@@ -66,13 +66,16 @@ export function defineSync<TRow = any, TAuth = any>(
 
 export {
   createBulkPublisher,
+  createPublishChangeEvent,
   createPublisher,
   INTERNAL_AUTH_HEADER,
   publishBulkEvent,
+  publishChangeEvent,
   publishEvent,
 } from "./handler.js";
 export type {
   BulkPublishFn,
+  PublishChangeEventFn,
   PublishBulkEventFn,
   PublishEventData,
   PublishEventFn,

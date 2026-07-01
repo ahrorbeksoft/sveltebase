@@ -30,7 +30,8 @@ export type SyncMessage =
         key?: string;
         data?: any;
       }>;
-    };
+    }
+  | { type: "channel-change"; channel: string };
 
 export function parseSyncMessage(data: string): SyncMessage | null {
   try {

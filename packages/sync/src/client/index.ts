@@ -43,6 +43,7 @@ class SyncClientClass<
   private pingInterval: ReturnType<typeof setInterval> | undefined;
   private closedByClient = false;
   private activeChannels = new Set<string>();
+  private changeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   // Reactive connection status delegated to status.svelte.ts
   private _statusState = new ConnectionStatus();
@@ -642,7 +643,30 @@ class SyncClientClass<
         });
         break;
       }
+      case "channel-change": {
+        this.scheduleChannelResync(msg.channel);
+        break;
+      }
     }
+  }
+
+  private scheduleChannelResync(channel: string) {
+    const existing = this.changeTimers.get(channel);
+    if (existing) clearTimeout(existing);
+
+    const timer = setTimeout(() => {
+      this.changeTimers.delete(channel);
+      if (
+        !this.socket ||
+        this.socket.readyState !== WebSocket.OPEN ||
+        !this.activeChannels.has(channel)
+      ) {
+        return;
+      }
+      void this.subscribeToChannel(channel);
+    }, 50);
+
+    this.changeTimers.set(channel, timer);
   }
 
   private findTableByChannel(channel: string): string | undefined {
@@ -694,6 +718,10 @@ class SyncClientClass<
     this.closedByClient = true;
     this._statusState.value = "disconnected";
     this.stopHeartbeat();
+    for (const timer of this.changeTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.changeTimers.clear();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;

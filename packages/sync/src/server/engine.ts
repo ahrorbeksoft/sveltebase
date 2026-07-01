@@ -115,6 +115,19 @@ export class SyncEngineBase extends DurableObject<SyncEngineEnv> {
       }
     }
 
+    if (url.pathname === "/broadcast-change" && request.method === "POST") {
+      try {
+        const body = (await request.json()) as any;
+        const { channel } = body;
+        await this.broker.handleExternalChannelChange(String(channel));
+        return new Response(null, { status: 204 });
+      } catch (err: any) {
+        return new Response(err.message || "Error processing change broadcast", {
+          status: 400,
+        });
+      }
+    }
+
     return new Response("Not found", { status: 404 });
   }
 

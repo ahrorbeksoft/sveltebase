@@ -40,6 +40,12 @@ export type PublishEventFn<TSchema extends Record<string, unknown>> =
 export type PublishBulkEventFn<TSchema extends Record<string, unknown>> =
   BulkPublishFn<TSchema>;
 
+export type PublishChangeEventFn<TSchema extends Record<string, unknown>> = <
+  TChannel extends keyof TSchema & string,
+>(
+  channel: TChannel | `${TChannel}:${string}`,
+) => Promise<void>;
+
 const GLOBAL_PLATFORM_KEY = "__sveltebase_sync_platform__";
 const DEFAULT_SYNC_ENGINE_BINDING = "SYNC_ENGINE";
 
@@ -75,7 +81,7 @@ function getPublisherRuntime() {
 async function publishToDurableObject(
   platform: SyncPlatform,
   syncEngineBinding: string,
-  pathname: "/broadcast" | "/broadcast-batch",
+  pathname: "/broadcast" | "/broadcast-batch" | "/broadcast-change",
   body: unknown,
 ) {
   const namespace = platform.env[syncEngineBinding] as
@@ -101,10 +107,15 @@ async function publishToDurableObject(
 }
 
 async function publishToDevBroker(
-  pathname: "/broadcast" | "/broadcast-batch",
+  pathname: "/broadcast" | "/broadcast-batch" | "/broadcast-change",
   body: any,
 ) {
   const devEngine = await import("./dev-engine.js");
+
+  if (pathname === "/broadcast-change") {
+    await devEngine.broadcastChannelChange(String(body.channel));
+    return;
+  }
 
   if (pathname === "/broadcast-batch") {
     await devEngine.broadcastExternalBatchChange(
@@ -123,7 +134,7 @@ async function publishToDevBroker(
 }
 
 async function publish(
-  pathname: "/broadcast" | "/broadcast-batch",
+  pathname: "/broadcast" | "/broadcast-batch" | "/broadcast-change",
   body: unknown,
 ) {
   const runtime = getPublisherRuntime();
@@ -212,5 +223,24 @@ export async function publishBulkEvent(
   await publish("/broadcast-batch", {
     channel: String(channel),
     changes,
+  });
+}
+
+export function createPublishChangeEvent<
+  TSchema extends Record<string, unknown>,
+>(): PublishChangeEventFn<TSchema>;
+
+export function createPublishChangeEvent() {
+  return publishChangeEvent;
+}
+
+export async function publishChangeEvent<
+  TSchema extends Record<string, unknown>,
+  TChannel extends keyof TSchema & string,
+>(channel: TChannel | `${TChannel}:${string}`): Promise<void>;
+
+export async function publishChangeEvent(channel: string): Promise<void> {
+  await publish("/broadcast-change", {
+    channel: String(channel),
   });
 }

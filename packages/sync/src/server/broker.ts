@@ -314,6 +314,27 @@ export class SyncBroker {
     }
   }
 
+  private sendToSubscribers(channel: string, message: string) {
+    for (const conn of this.connections) {
+      if (!conn.getSubscribedChannels().has(channel)) continue;
+
+      try {
+        conn.send(message);
+      } catch {
+        this.connections.delete(conn);
+      }
+    }
+  }
+
+  public async handleExternalChannelChange(channel: string) {
+    const changeMsg = JSON.stringify({
+      type: "channel-change",
+      channel,
+    });
+
+    this.sendToSubscribers(channel, changeMsg);
+  }
+
   public async handleExternalChange(
     channel: string,
     action: "create" | "update" | "delete",

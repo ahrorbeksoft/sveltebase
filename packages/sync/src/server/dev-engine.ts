@@ -226,3 +226,8 @@ export async function broadcastExternalBatchChange(
   const platform = await resolvePlatform();
   await broker.handleExternalBatchChange(channel, changes, platform);
 }
+
+export async function broadcastChannelChange(channel: string) {
+  const broker = getDevBroker();
+  await broker.handleExternalChannelChange(channel);
+}
