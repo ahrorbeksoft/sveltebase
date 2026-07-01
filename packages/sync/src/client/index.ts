@@ -5,15 +5,33 @@ import { ConnectionStatus } from "./status.svelte.js";
 export { createLiveQuery } from "./live-query.svelte.js";
 export type { LiveQueryState } from "./live-query.svelte.js";
 
+/**
+ * Local IndexedDB table configuration for one synced table.
+ *
+ * `indexes` is the Dexie schema string. `channel` must match a server
+ * `defineSync({ channel })` value. `updatedAtField` enables delta snapshots by
+ * telling the client which timestamp to send as `since`.
+ */
 export type TableConfig = {
   indexes: string;
   channel: string;
   updatedAtField?: string;
 };
 
+/**
+ * Options for creating a sync client database.
+ */
 export type SyncClientOptions = {
+  /** Dexie database name stored in the browser. */
   name: string;
+  /**
+   * Websocket URL or async URL resolver.
+   *
+   * Relative paths such as `"/api/sync"` are resolved against the current
+   * browser host and protocol.
+   */
   url: string | (() => string | Promise<string>);
+  /** Dexie tables that should be kept in sync with server channels. */
   tables: Record<string, TableConfig>;
 };
 
@@ -60,6 +78,12 @@ class SyncClientClass<
     data?: any;
   }> = [];
 
+  /**
+   * Creates the local Dexie database and starts the websocket connection in the browser.
+   *
+   * The constructor also decorates configured tables so normal Dexie writes
+   * become optimistic sync mutations.
+   */
   constructor(options: {
     name: string;
     url: string | (() => string | Promise<string>);
@@ -84,10 +108,22 @@ class SyncClientClass<
     }
   }
 
+  /**
+   * Current reactive websocket status.
+   *
+   * Useful in Svelte components for showing offline/connecting state.
+   */
   public get status() {
     return this._statusState.value;
   }
 
+  /**
+   * Wraps configured Dexie table write methods with sync-aware versions.
+   *
+   * Local writes are applied optimistically first, then sent to the server. If
+   * the server rejects a mutation, the stored rollback function restores the
+   * previous local row.
+   */
   private decorateTables() {
     for (const [tableName, config] of Object.entries(this.tableConfigs)) {
       const table = this.table(tableName);
@@ -233,6 +269,12 @@ class SyncClientClass<
     }
   }
 
+  /**
+   * Opens the websocket and installs message/reconnect handlers.
+   *
+   * Called automatically in the browser constructor and again after disconnects
+   * unless `disconnect()` was called by user code.
+   */
   private async connect() {
     if (this.closedByClient) return;
     this._statusState.value = "connecting";
@@ -323,6 +365,12 @@ class SyncClientClass<
     });
   }
 
+  /**
+   * Forces the client to open a fresh websocket connection.
+   *
+   * Use this after auth changes, for example after login, so the websocket is
+   * recreated with the latest cookies.
+   */
   public reconnect() {
     this.closedByClient = false;
     if (this.reconnectTimer) {
@@ -339,6 +387,9 @@ class SyncClientClass<
     this.connect();
   }
 
+  /**
+   * Starts a periodic ping so intermediaries do not close an idle websocket.
+   */
   private startHeartbeat() {
     this.stopHeartbeat();
     this.pingInterval = setInterval(() => {
@@ -348,6 +399,9 @@ class SyncClientClass<
     }, 55000); // 55 seconds
   }
 
+  /**
+   * Stops the websocket heartbeat timer.
+   */
   private stopHeartbeat() {
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
@@ -355,15 +409,27 @@ class SyncClientClass<
     }
   }
 
+  /**
+   * Returns the timestamp field used for delta sync on a table.
+   */
   private getUpdatedAtField(tableName: string) {
     return this.tableConfigs[tableName]?.updatedAtField ?? "updatedAt";
   }
 
+  /**
+   * Reads a comparable timestamp from a row for last-write-wins checks.
+   */
   private getUpdatedAtValue(tableName: string, row: any): string | undefined {
     const value = row?.[this.getUpdatedAtField(tableName)];
     return value == null ? undefined : String(value);
   }
 
+  /**
+   * Subscribes the websocket to a server channel and requests a snapshot.
+   *
+   * When possible, sends `since` from the newest local row so the server can
+   * return only changed rows. `forceFull` disables that optimization.
+   */
   private async subscribeToChannel(
     channel: string,
     options?: { forceFull?: boolean; socket?: WebSocket },
@@ -390,6 +456,16 @@ class SyncClientClass<
     }
   }
 
+  /**
+   * Forces a fresh snapshot for the table's configured channel.
+   *
+   * Useful after login/session verification or when user code needs to wait
+   * until local IndexedDB has been refreshed from the server.
+   *
+   * @param tableName Local Dexie table name from the client schema.
+   * @param options.reconnect Reopen the websocket before resyncing.
+   * @returns Rows returned by the server snapshot.
+   */
   public async resyncTable(
     tableName: keyof TSchema & string,
     options?: { reconnect?: boolean },
@@ -401,6 +477,12 @@ class SyncClientClass<
     return this.resyncChannel(config.channel, options);
   }
 
+  /**
+   * Forces a fresh snapshot for a channel and resolves with the server rows.
+   *
+   * This sends a full subscribe request and waits for the matching `snapshot`
+   * message.
+   */
   public async resyncChannel(
     channel: string,
     options?: { reconnect?: boolean },
@@ -426,6 +508,12 @@ class SyncClientClass<
     return snapshot;
   }
 
+  /**
+   * Waits until the current websocket is open.
+   *
+   * The promise rejects after 10 seconds so callers do not hang forever when the
+   * sync endpoint is unavailable.
+   */
   private waitForSocket(): Promise<void> {
     if (this.socket?.readyState === WebSocket.OPEN) {
       return Promise.resolve();
@@ -475,6 +563,9 @@ class SyncClientClass<
     });
   }
 
+  /**
+   * Sends mutations queued while the websocket was closed.
+   */
   private flushMutationQueue(socket = this.socket) {
     if (!socket || socket !== this.socket || socket.readyState !== WebSocket.OPEN) return;
 
@@ -494,6 +585,12 @@ class SyncClientClass<
     }
   }
 
+  /**
+   * Applies a server row without triggering another sync mutation.
+   *
+   * Uses the table's `updatedAtField` for last-write-wins conflict handling when
+   * both local and incoming rows have timestamps.
+   */
   private async safePutRow(tableName: string, data: any) {
     const table = this.table(tableName);
     if (!data || !data.id) return;
@@ -513,6 +610,12 @@ class SyncClientClass<
     await originalPut(data);
   }
 
+  /**
+   * Applies a server delete without triggering another sync mutation.
+   *
+   * If the server includes a timestamp, older deletes are ignored so a newer
+   * local row is not removed.
+   */
   private async safeDeleteRow(
     tableName: string,
     key: string,
@@ -535,6 +638,13 @@ class SyncClientClass<
     await originalDelete(key);
   }
 
+  /**
+   * Applies one server protocol message to local IndexedDB and pending promises.
+   *
+   * Snapshots hydrate tables, acknowledgements resolve optimistic writes,
+   * rejections roll them back, and change messages update local rows from other
+   * clients or external server publishers.
+   */
   private async handleServerMessage(msg: SyncMessage) {
     switch (msg.type) {
       case "snapshot": {
@@ -650,6 +760,12 @@ class SyncClientClass<
     }
   }
 
+  /**
+   * Debounces a `channel-change` notification into a fresh subscribe request.
+   *
+   * Multiple external change notifications in the same burst result in one
+   * resync.
+   */
   private scheduleChannelResync(channel: string) {
     const existing = this.changeTimers.get(channel);
     if (existing) clearTimeout(existing);
@@ -669,6 +785,9 @@ class SyncClientClass<
     this.changeTimers.set(channel, timer);
   }
 
+  /**
+   * Finds the local table configured for a server channel.
+   */
   private findTableByChannel(channel: string): string | undefined {
     for (const [tableName, config] of Object.entries(this.tableConfigs)) {
       if (config.channel === channel) return tableName;
@@ -677,6 +796,13 @@ class SyncClientClass<
   }
 
 
+  /**
+   * Records and sends an optimistic mutation.
+   *
+   * The returned promise resolves when the server sends `ack` and rejects after
+   * `reject`, at which point `rollback` has already restored the previous local
+   * state.
+   */
   private enqueueMutation(
     channel: string,
     action: "create" | "update" | "delete",
@@ -714,6 +840,12 @@ class SyncClientClass<
     });
   }
 
+  /**
+   * Closes the websocket and disables automatic reconnects.
+   *
+   * Local IndexedDB data is left intact; call table clear methods or auth logout
+   * helpers if you also need to remove cached rows.
+   */
   public disconnect() {
     this.closedByClient = true;
     this._statusState.value = "disconnected";
@@ -735,12 +867,32 @@ class SyncClientClass<
   }
 }
 
+/**
+ * Dexie database type returned by `new SyncClient(...)`.
+ *
+ * Table names from `TSchema` are available as typed Dexie tables while still
+ * allowing dynamic table access through Dexie's standard API.
+ */
 export type SyncClient<TSchema extends Record<string, any> = Record<string, any>> = SyncClientClass<TSchema> & {
   [K in keyof TSchema]: Table<TSchema[K]>;
 } & {
   [tableName: string]: Table<any>;
 };
 
+/**
+ * Creates a sync-enabled Dexie client.
+ *
+ * @example
+ * ```ts
+ * const db = new SyncClient<{ todos: Todo }>({
+ *   name: "app",
+ *   url: "/api/sync",
+ *   tables: {
+ *     todos: { indexes: "id, updatedAt", channel: "todos" }
+ *   }
+ * });
+ * ```
+ */
 export const SyncClient: new <
   TSchema extends Record<string, any> = Record<string, any>,
 >(options: {

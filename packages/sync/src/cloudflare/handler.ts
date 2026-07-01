@@ -8,6 +8,9 @@ import type { SyncHandler, SyncPlatform } from "../server/index.js";
 
 let activeHandlers: SyncHandler[] = [];
 
+/**
+ * Creates the platform object passed to sync auth and handlers.
+ */
 function createPlatform(
   request: Request,
   env: Record<string, unknown>,
@@ -22,33 +25,69 @@ function createPlatform(
   };
 }
 
+/**
+ * Returns a copy of the request URL with a different pathname.
+ */
 function withPath(request: Request, pathname: string) {
   const url = new URL(request.url);
   url.pathname = pathname;
   return url.toString();
 }
 
+/**
+ * Checks whether a request is trying to upgrade to a websocket.
+ */
 function isWebSocketRequest(request: Request) {
   return request.headers.get("Upgrade")?.toLowerCase() === "websocket";
 }
 
+/**
+ * Stores the active sync handlers for the Durable Object constructor.
+ *
+ * Called by Cloudflare and SvelteKit adapters before requests are routed.
+ */
 export function configureSyncEngine(handlers: SyncHandler[]) {
   activeHandlers = handlers;
 }
 
+/**
+ * Returns handlers previously registered with `configureSyncEngine`.
+ *
+ * `SyncEngine` calls this in its Durable Object constructor.
+ */
 export function getSyncEngineHandlers() {
   return activeHandlers;
 }
 
+/**
+ * Options for handling sync requests in a Cloudflare Worker.
+ */
 export type SyncWorkerOptions<TAuth = unknown> = {
+  /** Handlers returned by `defineSync`. */
   handlers: SyncHandler[];
+  /** Durable Object binding name. Defaults to `"SYNC_ENGINE"`. */
   syncEngineBinding?: string;
+  /** Public websocket path. Defaults to `"/api/sync"`. */
   websocketPath?: string;
+  /**
+   * Resolves auth for the websocket request before it is forwarded.
+   *
+   * Return a user/session object for authenticated clients or `null` for guests.
+   */
   auth?: (
     request: Request,
     platform: SyncPlatform,
   ) => Promise<SyncAuthResult<TAuth>> | SyncAuthResult<TAuth>;
+  /**
+   * Converts the auth object into the identity string used by `scope`.
+   */
   identity?: (auth: TAuth) => string | number | bigint | null | undefined;
+  /**
+   * Whether clients without auth may connect.
+   *
+   * Defaults to `true` unless the auth resolver carries metadata from helpers
+   * such as `sessionCookieAuth`.
+   */
   allowUnauthenticated?: boolean;
 };
 
@@ -57,6 +96,9 @@ type SyncAuthResolverMetadata = {
   identity?: (auth: any) => string | number | bigint | null | undefined;
 };
 
+/**
+ * Forwards a request to the singleton sync Durable Object instance.
+ */
 async function forwardToEngine(
   request: Request,
   env: Record<string, unknown>,
@@ -76,6 +118,12 @@ async function forwardToEngine(
   return namespace.get(id).fetch(request);
 }
 
+/**
+ * Authenticates and forwards a public websocket request to the Durable Object.
+ *
+ * Auth is serialized into an internal header after stripping any client-supplied
+ * value with the same name.
+ */
 async function handleWebSocket<TAuth>(
   request: Request,
   env: Record<string, unknown>,
@@ -141,6 +189,13 @@ async function handleWebSocket<TAuth>(
   );
 }
 
+/**
+ * Handles public sync HTTP requests in a Cloudflare Worker.
+ *
+ * Websocket requests are authenticated and forwarded to `/websocket` on the
+ * Durable Object. Broadcast endpoints are also forwarded after internal headers
+ * are stripped.
+ */
 export async function handleSyncRequest<TAuth = unknown>(
   request: Request,
   env: Record<string, unknown>,

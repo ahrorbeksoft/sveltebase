@@ -1,3 +1,6 @@
+/**
+ * Claims decoded from a Google ID token.
+ */
 export interface GoogleData {
   iss: string;
   azp: string;
@@ -16,6 +19,9 @@ export interface GoogleData {
   jti?: string;
 }
 
+/**
+ * Response passed by Google Identity Services after an ID-token sign-in.
+ */
 export interface CredentialResponse {
   credential?: string;
   select_by?:
@@ -28,6 +34,9 @@ export interface CredentialResponse {
     | 'btn_confirm_2tap';
 }
 
+/**
+ * Configuration passed to `google.accounts.id.initialize`.
+ */
 export interface IdConfiguration {
   client_id: string;
   callback?: (response: CredentialResponse) => void;
@@ -46,6 +55,9 @@ export interface IdConfiguration {
   hd?: string;
 }
 
+/**
+ * OAuth implicit-flow access token response.
+ */
 export interface TokenResponse {
   access_token: string;
   expires_in: string; // Secs
@@ -59,6 +71,9 @@ export interface TokenResponse {
   error_uri?: string;
 }
 
+/**
+ * Configuration passed to Google's OAuth token client.
+ */
 export interface TokenClientConfig {
   client_id: string;
   scope: string;
@@ -72,6 +87,9 @@ export interface TokenClientConfig {
   include_granted_scopes?: boolean;
 }
 
+/**
+ * OAuth authorization-code response.
+ */
 export interface CodeResponse {
   code: string;
   scope: string;
@@ -81,6 +99,9 @@ export interface CodeResponse {
   error_uri?: string;
 }
 
+/**
+ * Configuration passed to Google's OAuth code client.
+ */
 export interface CodeClientConfig {
   client_id: string;
   scope: string;
@@ -96,10 +117,16 @@ export interface CodeClientConfig {
   include_granted_scopes?: boolean;
 }
 
+/**
+ * Non-OAuth popup or browser error from Google Identity Services.
+ */
 export interface NonOAuthError {
   type: 'popup_closed' | 'popup_blocked_by_browser' | 'unknown';
 }
 
+/**
+ * Options accepted by `createGoogleLogin`.
+ */
 export interface GoogleLoginOptions {
   flow?: 'implicit' | 'auth-code';
   scope?: string;
@@ -114,12 +141,18 @@ export interface GoogleLoginOptions {
   onNonOAuthError?: (error: NonOAuthError) => void;
 }
 
+/**
+ * Options that can override an implicit token request at login time.
+ */
 export interface OverridableTokenClientConfig {
   prompt?: 'none' | 'consent' | 'select_account';
   login_hint?: string;
   state?: string;
 }
 
+/**
+ * Notification object passed by Google One Tap prompt callbacks.
+ */
 export interface MomentNotification {
   isDisplayMoment: () => boolean;
   isDisplayed: () => boolean;

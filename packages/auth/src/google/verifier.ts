@@ -1,6 +1,9 @@
 import { decodeCredentials } from "./google.svelte.js";
 import type { GoogleData } from "./types.js";
 
+/**
+ * Inputs for server-side Google ID-token verification.
+ */
 export interface VerifyIdTokenOptions {
   /**
    * The credential string (JWT token) returned by Google Identity Services.
@@ -15,6 +18,14 @@ export interface VerifyIdTokenOptions {
 /**
  * Cryptographically verifies a Google ID token (credential) signature
  * and claims using the Web Crypto API. Does not require a Client Secret.
+ *
+ * Call this on the server before trusting a Google credential. It checks the
+ * JWT shape, signature, issuer, audience, and expiration.
+ *
+ * @example
+ * ```ts
+ * const profile = await verifyIdToken({ credential, clientId });
+ * ```
  */
 export async function verifyIdToken(options: VerifyIdTokenOptions): Promise<GoogleData> {
   const { credential, clientId } = options;

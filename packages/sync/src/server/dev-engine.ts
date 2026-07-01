@@ -13,16 +13,28 @@ type DevBrokerState = {
 let devBroker: SyncBroker | null = null;
 
 export type SyncDevAuthOptions<TAuth = unknown> = {
+  /**
+   * Resolves auth for a local dev websocket request.
+   *
+   * Return `null` or `undefined` for guests.
+   */
   auth?: (
     request: Request,
     platform: SyncPlatform,
   ) => Promise<TAuth | null | undefined> | TAuth | null | undefined;
+  /** Converts the auth object into the identity string used by `scope`. */
   identity?: (auth: TAuth) => string | number | bigint | null | undefined;
+  /** Whether unauthenticated local websocket clients may connect. */
   allowUnauthenticated?: boolean;
+  /** Platform object or resolver used by auth and handlers in dev. */
   platform?: SyncPlatform | (() => Promise<SyncPlatform> | SyncPlatform);
+  /** Optional Wrangler config path for `getPlatformProxy`. */
   wranglerConfigPath?: string;
 };
 
+/**
+ * Stores the dev broker on `globalThis` so Vite module reloads can reuse it.
+ */
 function setGlobalBroker(state: DevBrokerState) {
   const globalObject = globalThis as unknown as Record<
     string,
@@ -31,6 +43,9 @@ function setGlobalBroker(state: DevBrokerState) {
   globalObject[GLOBAL_BROKER_KEY] = state;
 }
 
+/**
+ * Reads the shared dev broker from `globalThis`.
+ */
 function getGlobalBroker() {
   const globalObject = globalThis as unknown as Record<
     string,
@@ -39,6 +54,12 @@ function getGlobalBroker() {
   return globalObject[GLOBAL_BROKER_KEY];
 }
 
+/**
+ * Creates or updates the in-memory dev broker handlers.
+ *
+ * Called by the Vite plugin when a websocket connects and after handlers are
+ * loaded through Vite SSR.
+ */
 export function setHandlers(handlers: SyncHandler[]) {
   const existing = getGlobalBroker();
   if (!existing) {
@@ -52,6 +73,9 @@ export function setHandlers(handlers: SyncHandler[]) {
   devBroker = existing.broker;
 }
 
+/**
+ * Returns the active dev broker or throws if the plugin has not initialized it.
+ */
 function getDevBroker(): SyncBroker {
   if (devBroker) return devBroker;
 
@@ -64,11 +88,17 @@ function getDevBroker(): SyncBroker {
   throw new Error("Sync dev broker not initialized. Call setHandlers first.");
 }
 
+/**
+ * Normalizes Node request header values to a single string.
+ */
 function getHeaderValue(value: string | string[] | undefined) {
   if (Array.isArray(value)) return value[0];
   return value;
 }
 
+/**
+ * Converts Node HTTP headers into a Fetch `Headers` object.
+ */
 function headersFromIncomingMessage(req: IncomingMessage) {
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
@@ -82,6 +112,9 @@ function headersFromIncomingMessage(req: IncomingMessage) {
   return headers;
 }
 
+/**
+ * Builds a Fetch `Request` from Vite's websocket upgrade request.
+ */
 function requestFromIncomingMessage(req: IncomingMessage) {
   const host = getHeaderValue(req.headers.host) ?? "localhost";
   const url = new URL(req.url ?? "", `http://${host}`);
@@ -90,6 +123,12 @@ function requestFromIncomingMessage(req: IncomingMessage) {
   });
 }
 
+/**
+ * Resolves the platform used in local dev auth and sync handlers.
+ *
+ * Prefer explicit `options.platform`, then a cached Wrangler platform proxy,
+ * then an empty env fallback when Wrangler is unavailable.
+ */
 async function resolvePlatform(options?: SyncDevAuthOptions) {
   if (options?.platform) {
     return typeof options.platform === "function"
@@ -121,6 +160,12 @@ async function resolvePlatform(options?: SyncDevAuthOptions) {
   }
 }
 
+/**
+ * Adds a Vite dev websocket client to the shared broker.
+ *
+ * The Vite plugin calls this after loading handlers. It resolves auth, creates
+ * an `ISyncConnection`, then wires websocket events into the broker.
+ */
 export async function addClient(
   ws: {
     send: (data: string) => void;
@@ -203,6 +248,9 @@ export async function addClient(
   return true;
 }
 
+/**
+ * Publishes one external row change through the dev broker.
+ */
 export async function broadcastExternalChange(
   channel: string,
   action: "create" | "update" | "delete",
@@ -214,6 +262,9 @@ export async function broadcastExternalChange(
   await broker.handleExternalChange(channel, action, key, data, platform);
 }
 
+/**
+ * Publishes multiple external row changes through the dev broker.
+ */
 export async function broadcastExternalBatchChange(
   channel: string,
   changes: Array<{
@@ -227,6 +278,9 @@ export async function broadcastExternalBatchChange(
   await broker.handleExternalBatchChange(channel, changes, platform);
 }
 
+/**
+ * Notifies dev clients that a channel should be resynced.
+ */
 export async function broadcastChannelChange(channel: string) {
   const broker = getDevBroker();
   await broker.handleExternalChannelChange(channel);

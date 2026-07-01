@@ -1,9 +1,24 @@
 import type { SyncPlatform } from "./index.js";
 
+/**
+ * Auth object returned by a sync websocket auth resolver.
+ *
+ * Return `null` or `undefined` for unauthenticated requests. If
+ * `allowUnauthenticated` is false, that will reject the websocket.
+ */
 export type SyncAuthResult<TAuth> = TAuth | null | undefined;
 
+/**
+ * Internal header used to forward trusted auth data to the Durable Object.
+ *
+ * Public request handlers delete this header before processing user requests so
+ * clients cannot spoof auth.
+ */
 export const INTERNAL_AUTH_HEADER = "x-sveltebase-sync-auth";
 
+/**
+ * Payload type expected by `publishEvent` for each mutation action.
+ */
 export type PublishEventData<
   TRecord,
   TAction extends "create" | "update" | "delete",
@@ -13,6 +28,12 @@ export type PublishEventData<
     ? Partial<TRecord>
     : Partial<TRecord> | undefined;
 
+/**
+ * Type-safe function for publishing one server-side row change.
+ *
+ * `channel` may include a suffix such as `"todos:team-1"` when the server
+ * handler uses prefix fallback or dynamic channel names.
+ */
 export type PublishFn<TSchema extends Record<string, unknown>> = <
   TChannel extends keyof TSchema & string,
   TAction extends "create" | "update" | "delete",
@@ -23,6 +44,9 @@ export type PublishFn<TSchema extends Record<string, unknown>> = <
   data: PublishEventData<TSchema[TChannel], TAction>,
 ) => Promise<void>;
 
+/**
+ * Type-safe function for publishing multiple row changes for one channel.
+ */
 export type BulkPublishFn<TSchema extends Record<string, unknown>> = <
   TChannel extends keyof TSchema & string,
 >(
@@ -34,12 +58,20 @@ export type BulkPublishFn<TSchema extends Record<string, unknown>> = <
   }>,
 ) => Promise<void>;
 
+/** Alias kept for older imports. */
 export type PublishEventFn<TSchema extends Record<string, unknown>> =
   PublishFn<TSchema>;
 
+/** Alias kept for older imports. */
 export type PublishBulkEventFn<TSchema extends Record<string, unknown>> =
   BulkPublishFn<TSchema>;
 
+/**
+ * Function for notifying clients that a channel should be resynced.
+ *
+ * Use this when server code knows something changed but does not have
+ * row-level payloads.
+ */
 export type PublishChangeEventFn<TSchema extends Record<string, unknown>> = <
   TChannel extends keyof TSchema & string,
 >(
@@ -54,11 +86,20 @@ type PublisherRuntime = {
   syncEngineBinding: string;
 };
 
+/**
+ * Checks whether the Vite dev broker has been installed on `globalThis`.
+ */
 function hasDevBroker() {
   const globalObject = globalThis as unknown as Record<string, unknown>;
   return Boolean(globalObject.__sveltebase_sync_dev_broker__);
 }
 
+/**
+ * Stores the production publish target for later `publishEvent` calls.
+ *
+ * Runtime adapters call this before handling requests so application code can
+ * publish to the configured Durable Object without passing `env` each time.
+ */
 export function configurePublisherPlatform(
   platform: SyncPlatform,
   syncEngineBinding = DEFAULT_SYNC_ENGINE_BINDING,
@@ -70,6 +111,9 @@ export function configurePublisherPlatform(
   globalObject[GLOBAL_PLATFORM_KEY] = { platform, syncEngineBinding };
 }
 
+/**
+ * Reads the publish runtime registered by the current adapter.
+ */
 function getPublisherRuntime() {
   const globalObject = globalThis as unknown as Record<
     string,
@@ -78,6 +122,9 @@ function getPublisherRuntime() {
   return globalObject[GLOBAL_PLATFORM_KEY];
 }
 
+/**
+ * Sends a publish payload to the configured Durable Object instance.
+ */
 async function publishToDurableObject(
   platform: SyncPlatform,
   syncEngineBinding: string,
@@ -106,6 +153,9 @@ async function publishToDurableObject(
   }
 }
 
+/**
+ * Sends a publish payload to the in-memory Vite dev broker.
+ */
 async function publishToDevBroker(
   pathname: "/broadcast" | "/broadcast-batch" | "/broadcast-change",
   body: any,
@@ -133,6 +183,9 @@ async function publishToDevBroker(
   );
 }
 
+/**
+ * Dispatches a publish payload to production Durable Object or dev broker.
+ */
 async function publish(
   pathname: "/broadcast" | "/broadcast-batch" | "/broadcast-change",
   body: unknown,
@@ -159,6 +212,15 @@ async function publish(
   );
 }
 
+/**
+ * Creates a typed publisher for single row changes.
+ *
+ * @example
+ * ```ts
+ * const publish = createPublisher<{ todos: Todo }>();
+ * await publish("todos", "update", todo.id, { title: todo.title });
+ * ```
+ */
 export function createPublisher<
   TSchema extends Record<string, unknown>,
 >(): PublishFn<TSchema>;
@@ -167,6 +229,12 @@ export function createPublisher() {
   return publishEvent;
 }
 
+/**
+ * Publishes one server-side row change to connected sync clients.
+ *
+ * This does not write to your database. Call it after your own server code has
+ * already created, updated, or deleted the row.
+ */
 export async function publishEvent<
   TSchema extends Record<string, unknown>,
   TChannel extends keyof TSchema & string,
@@ -192,6 +260,9 @@ export async function publishEvent(
   });
 }
 
+/**
+ * Creates a typed publisher for batch row changes.
+ */
 export function createBulkPublisher<
   TSchema extends Record<string, unknown>,
 >(): BulkPublishFn<TSchema>;
@@ -200,6 +271,12 @@ export function createBulkPublisher() {
   return publishBulkEvent;
 }
 
+/**
+ * Publishes multiple server-side row changes for one channel.
+ *
+ * If the server handler defines `scope`, each change is scoped independently by
+ * the broker before it is sent.
+ */
 export async function publishBulkEvent<
   TSchema extends Record<string, unknown>,
   TChannel extends keyof TSchema & string,
@@ -226,6 +303,9 @@ export async function publishBulkEvent(
   });
 }
 
+/**
+ * Creates a typed publisher that asks clients to resync a channel.
+ */
 export function createPublishChangeEvent<
   TSchema extends Record<string, unknown>,
 >(): PublishChangeEventFn<TSchema>;
@@ -234,6 +314,11 @@ export function createPublishChangeEvent() {
   return publishChangeEvent;
 }
 
+/**
+ * Notifies connected clients that a channel changed and should be resynced.
+ *
+ * Use this when publishing row-level payloads would be expensive or impossible.
+ */
 export async function publishChangeEvent<
   TSchema extends Record<string, unknown>,
   TChannel extends keyof TSchema & string,

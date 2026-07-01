@@ -1,6 +1,12 @@
 import { BROWSER, DEV } from "esm-env";
 import { SvelteMap } from "svelte/reactivity";
 
+/**
+ * Return shape consumed by `createAsync` and `tryCatch`.
+ *
+ * Returning `{ success }` shows a success toast. Returning `{ error }` shows an
+ * error toast. `null` and `void` complete silently.
+ */
 export type TryCatchReturn =
   | { success: string; error?: never }
   | { error: string; success?: never }
@@ -12,6 +18,9 @@ const GLOBAL_KEY = "__global__";
 type ToastModule = typeof import("svelte-sonner");
 let toastModulePromise: Promise<ToastModule | null> | null = null;
 
+/**
+ * Lazily imports `svelte-sonner` in the browser.
+ */
 async function getToastModule(): Promise<ToastModule | null> {
   if (!BROWSER) {
     return null;
@@ -32,22 +41,47 @@ async function getToastModule(): Promise<ToastModule | null> {
   return toastModulePromise;
 }
 
+/**
+ * Shows a success toast for async action results.
+ */
 async function toastSuccess(message: string) {
   const toastModule = await getToastModule();
   toastModule?.toast.success(message);
 }
 
+/**
+ * Shows an error toast for async action results.
+ */
 async function toastError(message: string, description?: string) {
   const toastModule = await getToastModule();
   toastModule?.toast.error(message, description ? { description } : undefined);
 }
 
+/**
+ * Wraps an async function with reactive loading and error state.
+ *
+ * Use `run` for one global loading flag, or `runWithKey` when one wrapped
+ * function has multiple independent buttons/actions.
+ *
+ * @example
+ * ```ts
+ * const save = createAsync(async (id: string) => {
+ *   await api.save(id);
+ *   return { success: "Saved" };
+ * });
+ *
+ * await save.runWithKey(id, id);
+ * ```
+ */
 export function createAsync<T extends (...args: any[]) => Promise<TryCatchReturn> | Promise<void>>(
   asyncFn: T
 ) {
   const loadingStates = $state(new SvelteMap<string, boolean>());
   let error = $state<Error | null>(null);
 
+  /**
+   * Runs the wrapped function and tracks loading under one key.
+   */
   async function execute(id: string, args: Parameters<T>) {
     try {
       loadingStates.set(id, true);
@@ -80,14 +114,14 @@ export function createAsync<T extends (...args: any[]) => Promise<TryCatchReturn
   }
 
   /**
-   * Execute using the global loading key.
+   * Executes using the global loading key.
    */
   async function run(...args: Parameters<T>) {
     return execute(GLOBAL_KEY, args);
   }
 
   /**
-   * Execute using an explicit loading key.
+   * Executes using an explicit loading key.
    */
   async function runWithKey(key: string, ...args: Parameters<T>) {
     return execute(key || GLOBAL_KEY, args);
@@ -95,7 +129,8 @@ export function createAsync<T extends (...args: any[]) => Promise<TryCatchReturn
 
   return {
     /**
-     * Check loading state.
+     * Checks loading state.
+     *
      * Pass a key for specific actions, or call without args for global actions.
      */
     isLoading(key?: string) {

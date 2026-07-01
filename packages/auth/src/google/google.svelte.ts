@@ -4,6 +4,17 @@ import type { GoogleLoginOptions, GoogleData } from './types.js';
 /**
  * Triggers the Google Identity Services OAuth2 flow (Token or Code client).
  * Returns an object containing the trigger function `login`, and the reactive state properties `loading` and `error`.
+ *
+ * Call `login()` from a click handler. The provider must already have loaded
+ * the Google script.
+ *
+ * @example
+ * ```ts
+ * const google = createGoogleLogin({
+ *   scope: "profile email",
+ *   onSuccess: (response) => auth.loginWithGoogle(response.credential)
+ * });
+ * ```
  */
 export function createGoogleLogin(options: GoogleLoginOptions = {}) {
   const ctx = getGoogleOAuthContext();
@@ -79,6 +90,9 @@ export function createGoogleLogin(options: GoogleLoginOptions = {}) {
 
 /**
  * Logs out the user from Google Identity Services session (disables auto-select).
+ *
+ * This does not delete your app session cookie; call your app logout flow for
+ * that.
  */
 export function googleLogout(): void {
   if (typeof window !== 'undefined' && window.google?.accounts?.id) {
@@ -89,6 +103,9 @@ export function googleLogout(): void {
 /**
  * Decodes the credential JWT returned by Google Identity Services.
  * Returns a typed `GoogleData` object.
+ *
+ * This only decodes the payload. Use `verifyIdToken` on the server when you need
+ * cryptographic signature and claim verification.
  */
 export function decodeCredentials<T = GoogleData>(credential: string): T {
   const parts = credential.split('.');

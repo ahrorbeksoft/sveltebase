@@ -1,6 +1,11 @@
 import { DEV } from "esm-env";
 
 
+/**
+ * Browser cookie options used by the `Cookies` helper.
+ *
+ * `expires` is measured in days and is converted to `max-age`.
+ */
 export interface CookieOptions {
   expires?: number;
   path?: string;
@@ -19,10 +24,18 @@ type ToastModule = {
 
 let toastModulePromise: Promise<ToastModule | null> | null = null;
 
+/**
+ * Returns true when DOM cookie and toast APIs can be used.
+ */
 function hasBrowser() {
   return typeof window !== "undefined" && typeof document !== "undefined";
 }
 
+/**
+ * Lazily imports `svelte-sonner` in the browser.
+ *
+ * Loading is memoized so repeated toast calls share the same import promise.
+ */
 async function getToast() {
   if (!hasBrowser()) {
     return null;
@@ -37,17 +50,35 @@ async function getToast() {
   return toastModulePromise;
 }
 
+/**
+ * Shows a success toast when the toast library is available.
+ */
 async function toastSuccess(message: string, options?: { description?: string }) {
   const toast = await getToast();
   toast?.toast.success(message, options);
 }
 
+/**
+ * Shows an error toast when the toast library is available.
+ */
 async function toastError(message: string, options?: { description?: string }) {
   const toast = await getToast();
   toast?.toast.error(message, options);
 }
 
+/**
+ * Small browser-only cookie helper.
+ *
+ * Methods no-op or return `null` during SSR.
+ */
 export const Cookies = {
+  /**
+   * Writes a cookie in the browser.
+   *
+   * @param name Cookie name.
+   * @param value Cookie value. It is URI-encoded before writing.
+   * @param options Cookie options. `expires` is days from now.
+   */
   set(name: string, value: string, options: CookieOptions = {}): void {
     if (!hasBrowser()) {
       return;
@@ -93,6 +124,11 @@ export const Cookies = {
     document.cookie = cookieString;
   },
 
+  /**
+   * Reads and decodes a browser cookie.
+   *
+   * Returns `null` during SSR or when the cookie is not present.
+   */
   get(name: string): string | null {
     if (!hasBrowser()) {
       return null;
@@ -105,11 +141,25 @@ export const Cookies = {
     return match ? decodeURIComponent(match[2]) : null;
   },
 
+  /**
+   * Deletes a browser cookie by writing it with a negative expiration.
+   */
   remove(name: string, options: Pick<CookieOptions, "path" | "domain"> = {}): void {
     this.set(name, "", { ...options, expires: -1 });
   }
 };
 
+/**
+ * Creates timestamp fields for create or update operations.
+ *
+ * @param updateOnly When true, only `updatedAt` is returned.
+ *
+ * @example
+ * ```ts
+ * const row = { ...timestamps(false), title: "Draft" };
+ * const patch = timestamps(true);
+ * ```
+ */
 export function timestamps<T extends boolean>(
   updateOnly: T
 ): T extends true ? { updatedAt: number } : { createdAt: number; updatedAt: number } {
@@ -121,6 +171,12 @@ export function timestamps<T extends boolean>(
 import type { TryCatchReturn } from "./async.svelte.js";
 export type { TryCatchReturn } from "./async.svelte.js";
 
+/**
+ * Executes a task and displays success or error toasts from its return value.
+ *
+ * In dev, thrown errors show the error name and message and are logged to the
+ * console. In production, thrown errors show a generic message.
+ */
 export async function tryCatch(task: () => Promise<TryCatchReturn> | TryCatchReturn) {
   try {
     const response = await task();
@@ -141,10 +197,19 @@ export async function tryCatch(task: () => Promise<TryCatchReturn> | TryCatchRet
   }
 }
 
+/**
+ * Resolves after the provided number of milliseconds.
+ */
 export const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export { createAsync } from "./async.svelte.js";
 
+/**
+ * Creates a UUID-like id.
+ *
+ * Uses `crypto.randomUUID` when available, falls back to
+ * `crypto.getRandomValues`, then to `Math.random`.
+ */
 export function createId(): string {
 	if (typeof globalThis !== "undefined" && globalThis.crypto?.randomUUID) {
 		return globalThis.crypto.randomUUID();
@@ -163,6 +228,14 @@ export function createId(): string {
 	});
 }
 
+/**
+ * Formats a count with singular/plural text.
+ *
+ * @param count Numeric count to render.
+ * @param options.zero Optional text for zero.
+ * @param options.one Singular noun used as `1 ${one}`.
+ * @param options.other Plural noun or custom formatter.
+ */
 export function pluralize(
   count: number,
   { zero, one, other }: { zero?: string; one?: string; other: string | ((count: number) => string) }
@@ -173,4 +246,3 @@ export function pluralize(
 
   return `${count} ${other}`;
 }
-

@@ -3,6 +3,19 @@ export type SerializedConnectionAuth = {
   identity: string | null;
 };
 
+/**
+ * Converts an auth object into the identity string used for scoped broadcasts.
+ *
+ * If an identity resolver is provided, its return value wins. Otherwise the
+ * helper falls back to common shapes: `auth.identity`, `auth.user.id`, then
+ * `auth.userId`.
+ *
+ * @example
+ * ```ts
+ * resolveIdentity({ user: { id: 42 } }); // "42"
+ * resolveIdentity(user, (u) => u.orgId); // "acme"
+ * ```
+ */
 export function resolveIdentity(
   auth: any,
   identity?: (auth: any) => string | number | bigint | null | undefined,
@@ -13,6 +26,12 @@ export function resolveIdentity(
   return value == null ? null : String(value);
 }
 
+/**
+ * Encodes websocket auth data into the internal header sent to the Durable Object.
+ *
+ * This is only used between trusted sync worker code and the sync engine. Client
+ * requests cannot set this header because public handlers strip it first.
+ */
 export function serializeConnectionAuth(
   auth: any,
   identity: string | null,
@@ -22,6 +41,12 @@ export function serializeConnectionAuth(
   );
 }
 
+/**
+ * Decodes forwarded auth from the sync worker.
+ *
+ * Returns `null` for missing or malformed values so the engine can treat the
+ * connection as unauthenticated instead of crashing during websocket setup.
+ */
 export function deserializeConnectionAuth(
   value: string | null,
 ): SerializedConnectionAuth | null {

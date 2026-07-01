@@ -1,3 +1,9 @@
+/**
+ * Wire messages exchanged between the browser sync client and the sync broker.
+ *
+ * The client sends `subscribe`, `unsubscribe`, `mutate`, and `ping`. The server
+ * answers with snapshots, acknowledgements, rejections, and broadcast changes.
+ */
 export type SyncMessage =
   | { type: "subscribe"; channel: string; since?: string }
   | { type: "unsubscribe"; channel: string }
@@ -33,6 +39,12 @@ export type SyncMessage =
     }
   | { type: "channel-change"; channel: string };
 
+/**
+ * Safely parses a websocket payload into a sync message.
+ *
+ * Malformed JSON or objects without a string `type` return `null` so callers can
+ * ignore bad frames without throwing from the websocket event handler.
+ */
 export function parseSyncMessage(data: string): SyncMessage | null {
   try {
     const parsed = JSON.parse(data);

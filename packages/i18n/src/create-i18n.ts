@@ -16,12 +16,21 @@ type MaybeGetter<T> = T | (() => T);
 type LocaleSchema<TLocale extends string> = StandardSchemaV1<unknown, TLocale>;
 type LocaleState<TLocale extends string> = PersistentState<LocaleSchema<TLocale>>;
 
+/**
+ * Union of locale codes from a language definition array.
+ */
 export type LocaleCode<TLanguages extends readonly LanguageDefinition[]> =
   TLanguages[number]["code"];
 
+/**
+ * Current language object type from a language definition array.
+ */
 export type CurrentLanguage<TLanguages extends readonly LanguageDefinition[]> =
   TLanguages[number];
 
+/**
+ * Values accepted by translated ICU messages.
+ */
 export type TranslationValues = Record<string, string | number | Date>;
 
 type Join<TKey extends string, TValue extends string> = `${TKey}.${TValue}`;
@@ -43,27 +52,53 @@ type AppConfigMessages =
     ? TMessages
     : never;
 
+/**
+ * Messages registered through `use-intl` app config augmentation.
+ */
 export type RegisteredMessages = AppConfigMessages;
 
+/**
+ * Dot-separated message key union when message types are registered.
+ *
+ * Falls back to `string` when no app message type augmentation is present.
+ */
 export type MessageKey =
   Extract<MessageKeys<RegisteredMessages>, string> extends never
     ? string
     : Extract<MessageKeys<RegisteredMessages>, string>;
 
+/**
+ * Translation function returned by `getTranslations`.
+ */
 export type Translate = <TKey extends MessageKey>(
   key: TKey,
   values?: TranslationValues
 ) => string;
 
+/**
+ * Date/time formatter returned by `getFormat`.
+ */
 export type Format = (
   value?: Date | number | string,
   options?: FormatOptions
 ) => string | undefined;
 
+/**
+ * Runtime i18n object returned by `createI18n`.
+ */
 export interface I18nInstance<TLanguages extends readonly LanguageDefinition[]> {
+  /** Configured languages and message catalogs. */
   readonly languages: TLanguages;
+  /** Current locale code. Assigning this updates persistent locale state. */
   locale: LocaleCode<TLanguages>;
+  /** Language definition for the current locale, with fallback handling. */
   readonly currentLanguage: CurrentLanguage<TLanguages>;
+  /**
+   * Initializes locale state from cookies and installs this instance in Svelte context.
+   *
+   * Call from a root layout/component before child components call
+   * `getTranslations` or `getFormat`.
+   */
   init(cookies?: MaybeGetter<Cookie[] | undefined>): void;
 }
 
@@ -85,6 +120,9 @@ let setI18nContextBase:
     ) => I18nInstance<readonly LanguageDefinition[]>)
   | null = null;
 
+/**
+ * Lazily creates the Svelte context pair used by i18n helpers.
+ */
 function ensureContext() {
   if (!getI18nContextBase || !setI18nContextBase) {
     [getI18nContextBase, setI18nContextBase] =
@@ -97,12 +135,18 @@ function ensureContext() {
   };
 }
 
+/**
+ * Returns locale codes from language definitions with literal types preserved.
+ */
 function getLocaleCodes<const TLanguages extends readonly LanguageDefinition[]>(
   languages: TLanguages
 ) {
   return languages.map((language) => language.code) as LocaleCode<TLanguages>[];
 }
 
+/**
+ * Returns the first configured locale or throws when no languages were provided.
+ */
 function getDefaultLocale<const TLanguages extends readonly LanguageDefinition[]>(
   languages: TLanguages
 ): LocaleCode<TLanguages> {
@@ -115,6 +159,9 @@ function getDefaultLocale<const TLanguages extends readonly LanguageDefinition[]
   return defaultLocale;
 }
 
+/**
+ * Reads private i18n internals associated with a public instance.
+ */
 function getI18nInternal<const TLanguages extends readonly LanguageDefinition[]>(
   i18n: I18nInstance<TLanguages>
 ) {
@@ -131,11 +178,19 @@ function getI18nInternal<const TLanguages extends readonly LanguageDefinition[]>
   };
 }
 
+/**
+ * Reads the active i18n instance from Svelte context.
+ */
 function getI18nFromContext<const TLanguages extends readonly LanguageDefinition[]>() {
   const { get } = ensureContext();
   return get() as I18nInstance<TLanguages>;
 }
 
+/**
+ * Returns a translation function bound to the current i18n context locale.
+ *
+ * Must be called under an initialized `I18nInstance`.
+ */
 export function getTranslations(): Translate {
   const i18n = getI18nFromContext<readonly LanguageDefinition[]>();
   const { languages, fallbackLocale } = getI18nInternal(i18n);
@@ -151,6 +206,11 @@ export function getTranslations(): Translate {
   }) as Translate;
 }
 
+/**
+ * Returns a date/time formatter bound to the current i18n context locale.
+ *
+ * Must be called under an initialized `I18nInstance`.
+ */
 export function getFormat(): Format {
   const i18n = getI18nFromContext<readonly LanguageDefinition[]>();
   const { languages, fallbackLocale } = getI18nInternal(i18n);
@@ -166,6 +226,20 @@ export function getFormat(): Format {
   };
 }
 
+/**
+ * Creates a Svelte i18n instance.
+ *
+ * The first language is used as fallback locale. Locale changes are persisted
+ * through `PersistentState` using the provided storage key.
+ *
+ * @example
+ * ```ts
+ * export const i18n = createI18n([
+ *   { code: "en", label: "English", messages: en },
+ *   { code: "uz", label: "O'zbek", messages: uz }
+ * ] as const);
+ * ```
+ */
 export function createI18n<const TLanguages extends readonly LanguageDefinition[]>(
   languages: TLanguages,
   localeStorageKey = DEFAULT_LOCALE_STORAGE_KEY
@@ -179,6 +253,9 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
     "~standard": {
       version: 1,
       vendor: "@sveltebase/i18n",
+      /**
+       * Validates a persisted locale value and falls back when it is missing.
+       */
       validate(value) {
         const nextLocale =
           value == null
@@ -251,5 +328,8 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
   return i18n;
 }
 
+/**
+ * Return type alias for `createI18n`.
+ */
 export type CreateI18nReturn<TLanguages extends readonly LanguageDefinition[]> =
   I18nInstance<TLanguages>;

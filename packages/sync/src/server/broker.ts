@@ -1,27 +1,61 @@
 import type { SyncHandler, SyncContext, SyncPlatform } from "./index.js";
 import { parseSyncMessage } from "../protocol.js";
 
+/**
+ * Transport-agnostic connection wrapper used by the sync broker.
+ *
+ * Cloudflare Durable Objects and the Vite dev websocket server both implement
+ * this interface so the broker can handle auth, subscriptions, and messages
+ * without caring which runtime owns the socket.
+ */
 export interface ISyncConnection {
+  /** Sends one already-serialized protocol message to the connected client. */
   send(data: string): void;
+  /** Closes the underlying websocket. */
   close(code?: number, reason?: string): void;
+  /** Returns the auth object resolved during websocket connection setup. */
   getAuth(): any;
+  /** Updates the auth object for this live connection. */
   setAuth(auth: any): void;
+  /** Returns the scoped broadcast identity for this connection. */
   getIdentity(): string | null;
+  /** Updates the scoped broadcast identity for this connection. */
   setIdentity(identity: string | null): void;
+  /** Returns the mutable set of channel names this client is subscribed to. */
   getSubscribedChannels(): Set<string>;
+  /** Original request headers used to rebuild handler context. */
   readonly headers: Headers;
+  /** Original request URL used to rebuild handler context. */
   readonly url: string;
 }
 
+/**
+ * Routes sync protocol messages between connected clients and channel handlers.
+ *
+ * The broker owns connection bookkeeping, authorization calls, validation, and
+ * scoped broadcasting. It is shared by Cloudflare production runtime and local
+ * Vite dev runtime.
+ */
 export class SyncBroker {
   private handlers = new Map<string, SyncHandler>();
   private dynamicHandlers: SyncHandler[] = [];
   private connections: Set<ISyncConnection> = new Set();
 
+  /**
+   * Creates a broker with the initial set of channel handlers.
+   *
+   * @param handlers Handlers returned by `defineSync`.
+   */
   constructor(handlers: SyncHandler[]) {
     this.setHandlers(handlers);
   }
 
+  /**
+   * Replaces the active handler registry.
+   *
+   * Called by the dev plugin on module reload so new handler code is used by
+   * existing websocket connections.
+   */
   public setHandlers(handlers: SyncHandler[]) {
     this.handlers.clear();
     this.dynamicHandlers = [];
@@ -35,14 +69,26 @@ export class SyncBroker {
     }
   }
 
+  /**
+   * Starts tracking a newly accepted websocket connection.
+   */
   public registerConnection(conn: ISyncConnection) {
     this.connections.add(conn);
   }
 
+  /**
+   * Stops tracking a websocket connection and prevents future broadcasts to it.
+   */
   public removeConnection(conn: ISyncConnection) {
     this.connections.delete(conn);
   }
 
+  /**
+   * Builds the handler context for a client-originated subscribe or mutation.
+   *
+   * Auth is read from the connection because the worker resolved it before the
+   * Durable Object received the socket.
+   */
   private createConnectionContext(
     conn: ISyncConnection,
     platform: SyncPlatform,
@@ -64,6 +110,12 @@ export class SyncBroker {
     };
   }
 
+  /**
+   * Builds a handler context for server-originated publish events.
+   *
+   * External events have no active client auth, but still receive platform and
+   * request data for database/env access inside `scope`.
+   */
   private createExternalContext(
     platform: SyncPlatform,
     request?: Request,
@@ -76,6 +128,12 @@ export class SyncBroker {
     };
   }
 
+  /**
+   * Finds the handler responsible for a channel.
+   *
+   * Matching tries exact static channels first, then dynamic channel resolvers,
+   * then a prefix fallback so `todos:123` can use a static `todos` handler.
+   */
   private findHandler(
     channel: string,
     ctx: SyncContext,
@@ -101,6 +159,13 @@ export class SyncBroker {
     return undefined;
   }
 
+  /**
+   * Finds a handler for an external publish event.
+   *
+   * Dynamic handlers may need a real connection context to resolve their
+   * channel, so subscribed connections are checked when the external context
+   * alone cannot identify a handler.
+   */
   private findExternalHandler(
     channel: string,
     platform: SyncPlatform,
@@ -121,6 +186,13 @@ export class SyncBroker {
     return undefined;
   }
 
+  /**
+   * Handles one parsed client websocket message.
+   *
+   * `subscribe` runs `authorize`, fetches a snapshot, and records the channel.
+   * `mutate` validates data, runs the configured write handler, acknowledges the
+   * sender, then broadcasts the change to scoped subscribers.
+   */
   public async handleMessage(
     conn: ISyncConnection,
     rawMessage: string,
@@ -257,6 +329,9 @@ export class SyncBroker {
     }
   }
 
+  /**
+   * Broadcasts one client mutation after resolving its target audience.
+   */
   private async broadcastChange(
     channel: string,
     action: "create" | "update" | "delete",
@@ -285,6 +360,12 @@ export class SyncBroker {
     this.sendToScopedSubscribers(channel, changeMsg, allowedUserIds);
   }
 
+  /**
+   * Runs a handler `scope` callback and normalizes failures to an empty audience.
+   *
+   * Returning `[]` on errors is important because leaking data to every
+   * subscriber would be worse than dropping one broadcast.
+   */
   private async resolveScope(
     handler: SyncHandler | undefined,
     ctx: SyncContext,
@@ -301,6 +382,11 @@ export class SyncBroker {
     }
   }
 
+  /**
+   * Sends a protocol message only to subscribers allowed by `scope`.
+   *
+   * `allowedUserIds` contains connection identities, not arbitrary user objects.
+   */
   private sendToScopedSubscribers(
     channel: string,
     message: string,
@@ -322,6 +408,9 @@ export class SyncBroker {
     }
   }
 
+  /**
+   * Sends a message to every subscriber on a channel without scope filtering.
+   */
   private sendToSubscribers(channel: string, message: string) {
     for (const conn of this.connections) {
       if (!conn.getSubscribedChannels().has(channel)) continue;
@@ -334,6 +423,12 @@ export class SyncBroker {
     }
   }
 
+  /**
+   * Notifies subscribers that a channel changed and should be resynced.
+   *
+   * This is used when external server code knows data changed but does not have
+   * row-level change payloads to publish.
+   */
   public async handleExternalChannelChange(channel: string) {
     const changeMsg = JSON.stringify({
       type: "channel-change",
@@ -343,6 +438,12 @@ export class SyncBroker {
     this.sendToSubscribers(channel, changeMsg);
   }
 
+  /**
+   * Broadcasts one server-originated row change to scoped subscribers.
+   *
+   * Called by `publishEvent` in production and by the dev broker during Vite
+   * development.
+   */
   public async handleExternalChange(
     channel: string,
     action: "create" | "update" | "delete",
@@ -371,6 +472,12 @@ export class SyncBroker {
     this.sendToScopedSubscribers(channel, changeMsg, allowedUserIds);
   }
 
+  /**
+   * Broadcasts a batch of server-originated row changes.
+   *
+   * If the handler has `scope`, each row is scoped independently to avoid
+   * leaking one row to users who should only receive another row in the batch.
+   */
   public async handleExternalBatchChange(
     channel: string,
     changes: Array<{ action: "create" | "update" | "delete"; key?: string; data?: any }>,

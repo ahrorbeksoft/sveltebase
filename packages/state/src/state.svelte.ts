@@ -1,7 +1,16 @@
 import { Cookies } from "@sveltebase/utils";
 
+/**
+ * Value or getter used when state must read reactive Svelte data lazily.
+ */
 export type MaybeGetter<T> = T | (() => T);
 
+/**
+ * Minimal Standard Schema v1 shape supported by `PersistentState`.
+ *
+ * Libraries such as Valibot or other Standard Schema-compatible validators can
+ * provide this shape. Validation must be synchronous for persistent state.
+ */
 export interface StandardSchemaV1<Input = unknown, Output = Input> {
   readonly "~standard": {
     readonly version: 1;
@@ -22,18 +31,42 @@ export interface StandardSchemaV1<Input = unknown, Output = Input> {
   };
 }
 
+/**
+ * Extracts the accepted input type from a Standard Schema.
+ */
 export type InferInput<TSchema extends StandardSchemaV1> =
   NonNullable<TSchema["~standard"]["types"]>["input"];
 
+/**
+ * Extracts the parsed output type from a Standard Schema.
+ */
 export type InferOutput<TSchema extends StandardSchemaV1> =
   NonNullable<TSchema["~standard"]["types"]>["output"];
 
+/**
+ * Svelte-reactive state that persists to a browser cookie.
+ *
+ * On the server it initializes from `undefined` until `init` is called with
+ * request cookies. In the browser it hydrates from `document.cookie` and writes
+ * every valid state change back to the cookie.
+ *
+ * @example
+ * ```ts
+ * const theme = new PersistentState("theme", themeSchema);
+ * theme.current = "dark";
+ * ```
+ */
 export class PersistentState<TSchema extends StandardSchemaV1> {
   #value = $state<InferOutput<TSchema>>();
 
   private storageKey: string;
   private schema: TSchema;
 
+  /**
+   * Creates persistent state for one cookie key.
+   *
+   * The schema validates both hydrated cookie data and values assigned later.
+   */
   constructor(key: string, schema: TSchema) {
     this.storageKey = key;
     this.schema = schema;
@@ -53,14 +86,26 @@ export class PersistentState<TSchema extends StandardSchemaV1> {
     });
   }
 
+  /**
+   * Current parsed state value.
+   */
   get current() {
     return this.#value as InferOutput<TSchema>;
   }
 
+  /**
+   * Replaces the current value after validating it with the schema.
+   */
   set current(newValue: InferOutput<TSchema>) {
     this.#value = parseSchema(this.schema, newValue);
   }
 
+  /**
+   * Initializes server-side state from request cookies.
+   *
+   * Call this during SSR with cookies from your framework so the first rendered
+   * value matches the browser cookie.
+   */
   public init(cookies: MaybeGetter<{ name: string; value: string }[]>) {
     if (hasWindow()) {
       return;
@@ -82,10 +127,18 @@ export class PersistentState<TSchema extends StandardSchemaV1> {
     }
   }
 
+  /**
+   * Updates the current value from a callback.
+   *
+   * Use this when the next value depends on the previous value.
+   */
   public set(fn: (value: InferOutput<TSchema>) => InferOutput<TSchema>) {
     this.#value = fn(this.#value as InferOutput<TSchema>);
   }
 
+  /**
+   * Reads and validates the initial value for a cookie key.
+   */
   private static hydrate<TSchema extends StandardSchemaV1>(
     key: string,
     schema: TSchema
@@ -108,30 +161,54 @@ export class PersistentState<TSchema extends StandardSchemaV1> {
   }
 }
 
+/**
+ * Small Svelte-reactive value holder.
+ *
+ * Useful when you want class-style state with a `current` getter/setter and an
+ * updater callback, without cookie persistence.
+ */
 export class State<T> {
   #internalState = $state<T>() as T;
 
+  /**
+   * Creates state with an initial value.
+   */
   constructor(initialValue: T) {
     this.#internalState = initialValue;
   }
 
+  /**
+   * Current reactive value.
+   */
   get current() {
     return this.#internalState;
   }
 
+  /**
+   * Replaces the current reactive value.
+   */
   set current(value: T) {
     this.#internalState = value;
   }
 
+  /**
+   * Updates the value from its previous value.
+   */
   set(fn: (value: T) => T) {
     this.#internalState = fn(this.#internalState);
   }
 }
 
+/**
+ * Evaluates a getter or returns a static value.
+ */
 function unwrap<T>(value: MaybeGetter<T>): T {
   return typeof value === "function" ? (value as () => T)() : value;
 }
 
+/**
+ * Parses a cookie value written as JSON, supporting encoded legacy values.
+ */
 function parseStoredCookieValue(value: string): unknown {
   try {
     return JSON.parse(value);
@@ -140,6 +217,12 @@ function parseStoredCookieValue(value: string): unknown {
   }
 }
 
+/**
+ * Runs a Standard Schema validator and returns its parsed value.
+ *
+ * Async validators are rejected because Svelte state initialization must be
+ * synchronous.
+ */
 function parseSchema<TSchema extends StandardSchemaV1>(
   schema: TSchema,
   value: unknown
@@ -159,6 +242,9 @@ function parseSchema<TSchema extends StandardSchemaV1>(
   return result.value as InferOutput<TSchema>;
 }
 
+/**
+ * Returns true when running in a browser environment.
+ */
 function hasWindow() {
   return typeof window !== "undefined";
 }

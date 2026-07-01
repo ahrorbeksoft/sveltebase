@@ -2,14 +2,23 @@ import { json, type Cookies, type RequestEvent, type RequestHandler } from "@sve
 import type { GoogleData } from "../google/types.js";
 import { verifyIdToken } from "../google/verifier.js";
 
+/**
+ * Server session helper shape expected by `createAuthRoutes`.
+ *
+ * `createServerAuth` returns an object with this interface.
+ */
 export type ServerAuth<User extends { id: string }> = {
+  /** Writes a signed session cookie for the user. */
   login(
     cookies: Cookies,
     user: User,
     options?: { maxAge?: number; expires?: Date },
   ): Promise<User>;
+  /** Deletes the signed session cookie. */
   logout(cookies: Cookies, options?: { path?: string; domain?: string }): void;
+  /** Reads and verifies the current session cookie. */
   getUser(cookies: Cookies): Promise<User | null>;
+  /** Rewrites the session cookie with a fresh user snapshot. */
   refresh(
     cookies: Cookies,
     user: User,
@@ -21,13 +30,35 @@ export type CreateAuthRoutesOptions<
   User extends { id: string },
   LoginBody = unknown,
 > = {
+  /** Session helpers, usually returned by `createServerAuth`. */
   auth: ServerAuth<User>;
+  /**
+   * App-specific credential login callback.
+   *
+   * Called by `POST /login` with the parsed JSON body.
+   */
   login?: (credentials: LoginBody, event: RequestEvent) => Promise<User> | User;
+  /**
+   * Looks up the latest user by session user id.
+   *
+   * Called by `POST /refresh` before rewriting the cookie.
+   */
   getUser?: (userId: string, event: RequestEvent) => Promise<User | null | undefined> | User | null | undefined;
+  /**
+   * Google ID-token login configuration for `POST /google`.
+   */
   google?: {
+    /** Google OAuth client id expected in the ID token audience claim. */
     clientId: string;
+    /** Maps the verified Google profile to an application user. */
     getUser: (profile: GoogleData, event: RequestEvent) => Promise<User> | User;
   };
+  /**
+   * Controls whether routes return the user JSON or `204 No Content`.
+   *
+   * Login returns the user by default. Refresh and Google default to 204 unless
+   * configured here.
+   */
   returnUser?: boolean | {
     login?: boolean;
     refresh?: boolean;
@@ -35,6 +66,9 @@ export type CreateAuthRoutesOptions<
   };
 };
 
+/**
+ * Resolves the per-route `returnUser` setting.
+ */
 function wantsUser(
   option: CreateAuthRoutesOptions<any, any>["returnUser"],
   route: "login" | "refresh" | "google",
@@ -44,6 +78,9 @@ function wantsUser(
   return option[route] ?? route === "login";
 }
 
+/**
+ * Parses a JSON request body and falls back to an empty object.
+ */
 async function parseJsonBody<T>(event: RequestEvent): Promise<T> {
   try {
     return await event.request.json() as T;
@@ -52,16 +89,39 @@ async function parseJsonBody<T>(event: RequestEvent): Promise<T> {
   }
 }
 
+/**
+ * Returns a 204 empty response.
+ */
 function empty() {
   return new Response(null, { status: 204 });
 }
 
+/**
+ * Extracts the auth action from SvelteKit route params.
+ *
+ * Supports both `[auth]` and `[...auth]` route layouts.
+ */
 function routeSegment(event: RequestEvent) {
   const params = event.params as Record<string, string | undefined>;
   const value = params.auth ?? params["...auth"] ?? "";
   return value.split("/").filter(Boolean)[0] ?? "";
 }
 
+/**
+ * Creates SvelteKit auth route handlers.
+ *
+ * Mount this from a route such as `src/routes/api/auth/[auth]/+server.ts` or a
+ * rest route. Supported POST actions are `login`, `logout`, `refresh`, and
+ * `google`.
+ *
+ * @example
+ * ```ts
+ * export const { GET, POST } = createAuthRoutes({
+ *   auth,
+ *   login: async (body) => users.verifyPassword(body)
+ * });
+ * ```
+ */
 export function createAuthRoutes<
   User extends { id: string },
   LoginBody = unknown,

@@ -14,11 +14,22 @@ interface WsWebSocketServer {
   ): void;
 }
 
+/**
+ * Options for the local Vite websocket sync plugin.
+ */
 export type SyncDevPluginOptions<TAuth = unknown> = SyncDevAuthOptions<TAuth> & {
+  /** Module path loaded by Vite SSR to get `handlers`. */
   handlersPath?: string;
+  /** Local websocket path. Defaults to `"/api/sync"`. */
   path?: string;
 };
 
+/**
+ * Vite dev plugin that serves sync websockets without Cloudflare Durable Objects.
+ *
+ * The plugin loads your handlers through Vite SSR on each websocket upgrade, so
+ * handler edits are reflected during development.
+ */
 export function syncDevPlugin<TAuth = unknown>(
   options?: SyncDevPluginOptions<TAuth>,
 ): Plugin {

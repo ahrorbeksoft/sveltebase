@@ -1,13 +1,24 @@
 import type { Cookies } from "@sveltejs/kit";
 
+/**
+ * Data stored inside the signed session cookie.
+ *
+ * `user` is the application user snapshot returned by your login code. `exp`
+ * is a Unix timestamp in seconds and is checked during verification.
+ */
 export type SessionPayload<User extends { id: string }> = {
   user: User;
   exp?: number;
 };
 
+/**
+ * Server auth configuration used by `createServerAuth`.
+ */
 export interface AuthConfig {
   /**
    * Secret key used to sign and verify session cookies.
+   *
+   * Use a stable, private value. Changing it invalidates existing sessions.
    */
   secret: string;
   /**
@@ -16,7 +27,7 @@ export interface AuthConfig {
    */
   cookieName?: string;
   /**
-   * Default cookie settings.
+   * Default cookie settings used when `login` or `refresh` writes the cookie.
    */
   cookieOptions?: {
     path?: string;
@@ -29,7 +40,12 @@ export interface AuthConfig {
   };
 }
 
-// Helper: Safe Base64URL encoding (Works in Edge / Node / Cloudflare Workers)
+/**
+ * Encodes bytes using Base64URL without padding.
+ *
+ * Used by JWT signing. It avoids Node-only APIs so it works in browsers, edge
+ * runtimes, and Cloudflare Workers.
+ */
 export function base64urlEncode(uint8Array: Uint8Array): string {
   let binary = "";
   const len = uint8Array.byteLength;
@@ -40,7 +56,11 @@ export function base64urlEncode(uint8Array: Uint8Array): string {
   return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-// Helper: Safe Base64URL decoding (Works in Edge / Node / Cloudflare Workers)
+/**
+ * Decodes a Base64URL string back into bytes.
+ *
+ * Accepts strings with or without padding.
+ */
 export function base64urlDecode(str: string): Uint8Array {
   let base64 = str.replace(/-/g, "+").replace(/_/g, "/");
   while (base64.length % 4) {
@@ -54,15 +74,23 @@ export function base64urlDecode(str: string): Uint8Array {
   return bytes;
 }
 
+/**
+ * Encodes a UTF-8 string as Base64URL.
+ */
 function stringToBase64url(str: string): string {
   return base64urlEncode(new TextEncoder().encode(str));
 }
 
+/**
+ * Decodes a Base64URL string into UTF-8 text.
+ */
 function base64urlToString(str: string): string {
   return new TextDecoder().decode(base64urlDecode(str));
 }
 
-// Import CryptoKey helper using Web Crypto API
+/**
+ * Imports the session secret as an HMAC-SHA256 Web Crypto key.
+ */
 async function getCryptoKey(secret: string): Promise<CryptoKey> {
   const encoder = new TextEncoder();
   const keyData = encoder.encode(secret);
@@ -77,6 +105,15 @@ async function getCryptoKey(secret: string): Promise<CryptoKey> {
 
 /**
  * Signs a payload into a JWT using HMAC-SHA256.
+ *
+ * @param payload JSON-serializable claims to place in the token body.
+ * @param secret HMAC secret used to sign the token.
+ * @param expiresAt Optional expiration time in milliseconds since epoch.
+ *
+ * @example
+ * ```ts
+ * const token = await signJWT({ user: { id: "u1" } }, secret);
+ * ```
  */
 export async function signJWT(payload: Record<string, any>, secret: string, expiresAt?: number): Promise<string> {
   const header = { alg: "HS256", typ: "JWT" };
@@ -98,6 +135,11 @@ export async function signJWT(payload: Record<string, any>, secret: string, expi
 
 /**
  * Verifies a JWT using HMAC-SHA256 and returns its payload.
+ *
+ * Throws when the token format, signature, or expiration is invalid.
+ *
+ * @param token JWT string produced by `signJWT`.
+ * @param secret Same secret used to sign the token.
  */
 export async function verifyJWT(token: string, secret: string): Promise<Record<string, any>> {
   const parts = token.split(".");
@@ -125,6 +167,8 @@ export async function verifyJWT(token: string, secret: string): Promise<Record<s
 
 /**
  * Signs a full session payload into an opaque cookie value.
+ *
+ * This is a thin wrapper around `signJWT` for session-shaped payloads.
  */
 export async function signSessionPayload<User extends { id: string }>(
   payload: SessionPayload<User>,
@@ -135,6 +179,9 @@ export async function signSessionPayload<User extends { id: string }>(
 
 /**
  * Verifies a signed session cookie value and returns the full session payload.
+ *
+ * Throws when the cookie cannot be verified or when it does not contain a
+ * `user.id` string.
  */
 export async function verifySessionPayload<User extends { id: string }>(
   cookieValue: string,
@@ -149,6 +196,8 @@ export async function verifySessionPayload<User extends { id: string }>(
 
 /**
  * Extracts and verifies the signed user session from SvelteKit cookies.
+ *
+ * Returns `null` instead of throwing for missing, expired, or invalid cookies.
  */
 export async function getUserFromCookie<User extends { id: string }>(
   cookies: Cookies,
@@ -168,6 +217,9 @@ export async function getUserFromCookie<User extends { id: string }>(
 
 /**
  * Parses a raw Cookie header string into key-value pairs.
+ *
+ * Used by request-based auth helpers where SvelteKit `cookies` are not
+ * available, such as sync websocket auth.
  */
 export function parseCookies(cookieHeader: string): Record<string, string> {
   const cookies: Record<string, string> = {};
@@ -183,6 +235,8 @@ export function parseCookies(cookieHeader: string): Record<string, string> {
 
 /**
  * Extracts and verifies the signed user session from standard Request headers.
+ *
+ * Returns `null` when the cookie header is missing or the session is invalid.
  */
 export async function getUserFromRequest<User extends { id: string }>(
   request: Request,
@@ -206,6 +260,8 @@ export async function getUserFromRequest<User extends { id: string }>(
 
 /**
  * Extracts and cryptographically verifies the user session from standard Request headers.
+ *
+ * Alias for `getUserFromRequest` kept for readability at sync auth call sites.
  */
 export async function getVerifiedUserFromRequest<User extends { id: string }>(
   request: Request,
@@ -217,6 +273,15 @@ export async function getVerifiedUserFromRequest<User extends { id: string }>(
 
 /**
  * Creates SvelteKit server-side session management helpers.
+ *
+ * The returned methods sign, verify, refresh, and delete the configured session
+ * cookie. Use these helpers in hooks and auth route handlers.
+ *
+ * @example
+ * ```ts
+ * const auth = createServerAuth<User>({ secret: env.JWT_SECRET });
+ * await auth.login(event.cookies, user, { maxAge: 60 * 60 * 24 });
+ * ```
  */
 export function createServerAuth<User extends { id: string }>(config: AuthConfig) {
   const cookieName = config.cookieName || "sf_session";
@@ -231,6 +296,9 @@ export function createServerAuth<User extends { id: string }>(config: AuthConfig
   return {
     /**
      * Signs the full session payload and writes it to the SvelteKit cookies.
+     *
+     * Called after your app has validated credentials and selected the user to
+     * store in the session.
      */
     async login(
       cookies: Cookies,
@@ -263,6 +331,9 @@ export function createServerAuth<User extends { id: string }>(config: AuthConfig
 
     /**
      * Verifies the signed session cookie and returns the stored user snapshot.
+     *
+     * Usually called from `hooks.server.ts` or route handlers to read the
+     * current session.
      */
     async getUser(cookies: Cookies): Promise<User | null> {
       return getUserFromCookie<User>(cookies, config.secret, cookieName);
@@ -270,6 +341,9 @@ export function createServerAuth<User extends { id: string }>(config: AuthConfig
 
     /**
      * Rewrites the signed session cookie with a fresh user object.
+     *
+     * Use this when user fields stored in the cookie changed and the browser
+     * should receive an updated session snapshot.
      */
     async refresh(
       cookies: Cookies,
@@ -281,6 +355,8 @@ export function createServerAuth<User extends { id: string }>(config: AuthConfig
 
     /**
      * Deletes the session cookie to clear the session.
+     *
+     * Called by logout routes and invalid-session handling.
      */
     logout(cookies: Cookies, options?: { path?: string; domain?: string }): void {
       cookies.delete(cookieName, {

@@ -1,8 +1,14 @@
 import type { SyncClient } from "@sveltebase/sync/client";
 import { liveQuery } from "dexie";
 
+/**
+ * Value or getter used to keep auth state connected to SvelteKit load data.
+ */
 export type MaybeGetter<T> = T | (() => T);
 
+/**
+ * Client-side auth state options.
+ */
 export interface AuthClientConfig {
   /**
    * The Svelteflare Sync client instance.
@@ -34,6 +40,12 @@ export interface AuthClientConfig {
   refreshWhenChanged?: boolean | ((sessionUser: any, syncedUser: any) => boolean);
 }
 
+/**
+ * Clears every local sync table after logout or invalid session detection.
+ *
+ * This prevents user-specific IndexedDB rows from remaining visible after the
+ * session cookie has become invalid.
+ */
 async function clearSyncData(sync: SyncClient<any>) {
   if (sync && typeof sync.tables !== "undefined") {
     try {
@@ -44,6 +56,12 @@ async function clearSyncData(sync: SyncClient<any>) {
   }
 }
 
+/**
+ * Svelte-reactive client auth state.
+ *
+ * It mirrors the server-provided user, supports login/logout routes, and can
+ * verify the session against a synced user table after SSR hydration.
+ */
 export class AuthClientState<User extends { id: string }> {
   #userGetter = $state<MaybeGetter<User | null>>(null);
   #localOverride = $state<User | null | undefined>(undefined);
@@ -57,6 +75,12 @@ export class AuthClientState<User extends { id: string }> {
   #isVerifying = false;
   #verificationReady = false;
 
+  /**
+   * Creates client auth state.
+   *
+   * Pass a `SyncClient` when the app should verify the cookie session against a
+   * synced user row and clear local data when that row disappears.
+   */
   constructor(config?: AuthClientConfig) {
     this.#syncClient = config?.syncClient;
     this.#verifyTable = config?.verifyTable ?? "users";
@@ -69,7 +93,10 @@ export class AuthClientState<User extends { id: string }> {
   }
 
   /**
-   * Gets the current reactive user object (evaluates getter if provided).
+   * Gets the current reactive user object.
+   *
+   * If `init` received a getter, the getter is evaluated so Svelte can track the
+   * same data value that came from the server load function.
    */
   get user(): User | null {
     if (this.#localOverride !== undefined) {
@@ -81,13 +108,16 @@ export class AuthClientState<User extends { id: string }> {
 
   /**
    * Overrides the current reactive user object.
+   *
+   * Login, refresh, logout, and invalid-session handling use this to reflect
+   * client-side changes before the next server load.
    */
   set user(value: User | null) {
     this.#localOverride = value;
   }
 
   /**
-   * Helper check to verify if user is authenticated.
+   * True when `user` is not `null`.
    */
   get isAuthenticated(): boolean {
     return this.user !== null;
@@ -96,6 +126,9 @@ export class AuthClientState<User extends { id: string }> {
   /**
    * Initializes the client-side user state.
    * Accepts a static user object or a getter function (e.g. `() => data.user`).
+   *
+   * Call this once from a root component or layout effect after receiving the
+   * server session user from SvelteKit load data.
    */
   init(user: MaybeGetter<User | null>) {
     this.#userGetter = user;
@@ -147,6 +180,13 @@ export class AuthClientState<User extends { id: string }> {
     }
   }
 
+  /**
+   * Resyncs the verification table and confirms the session user still exists.
+   *
+   * This is called after login, Google login, and refresh. If the synced user
+   * cannot be found, the client treats the cookie as invalid and clears local
+   * sync data.
+   */
   private async verifySyncedUser(
     user: User | null,
     options?: { reconnect?: boolean },
@@ -176,6 +216,9 @@ export class AuthClientState<User extends { id: string }> {
     }
   }
 
+  /**
+   * Marks the session invalid, runs the optional hook, and clears sync caches.
+   */
   private async handleInvalidSession() {
     this.#localOverride = null;
     const invalid = this.#onInvalidSession?.();
@@ -192,6 +235,11 @@ export class AuthClientState<User extends { id: string }> {
 
   /**
    * Calls the configured login route and stores the returned app user.
+   *
+   * After a successful response, the sync client is reconnected and the verify
+   * table is resynced so stale local data cannot keep an invalid session alive.
+   *
+   * @param body JSON body sent to `${routesBase}/login`.
    */
   async login<Body = unknown>(body: Body): Promise<User> {
     const response = await fetch(`${this.#routesBase}/login`, {
@@ -214,6 +262,8 @@ export class AuthClientState<User extends { id: string }> {
 
   /**
    * Calls the configured Google auth route with a Google credential.
+   *
+   * The credential is the ID token returned by Google Identity Services.
    */
   async loginWithGoogle(credential: string): Promise<User | null> {
     const response = await fetch(`${this.#routesBase}/google`, {
@@ -237,6 +287,9 @@ export class AuthClientState<User extends { id: string }> {
 
   /**
    * Verifies the current cookie server-side and rewrites it with a fresh user object.
+   *
+   * Called manually by apps and automatically when `refreshWhenChanged` decides
+   * the synced user row no longer matches the cookie snapshot.
    */
   async refresh(): Promise<User | null> {
     const response = await fetch(`${this.#routesBase}/refresh`, { method: "POST" });
@@ -260,6 +313,9 @@ export class AuthClientState<User extends { id: string }> {
 
   /**
    * Clears client state, calls the server logout endpoint to delete cookies, and wipes local IndexedDB caches.
+   *
+   * Network failures during the logout fetch are ignored because the local app
+   * should still leave the authenticated state immediately.
    */
   async logout() {
     this.#localOverride = null;
@@ -276,6 +332,12 @@ export class AuthClientState<User extends { id: string }> {
 
 /**
  * Creates client-side reactive auth state.
+ *
+ * @example
+ * ```ts
+ * export const auth = createAuth<User>({ syncClient: db });
+ * auth.init(() => data.user);
+ * ```
  */
 export function createAuth<User extends { id: string }>(config?: AuthClientConfig): AuthClientState<User> {
   return new AuthClientState<User>(config);

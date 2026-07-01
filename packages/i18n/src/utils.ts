@@ -2,14 +2,23 @@ import { createFormatter, createTranslator, type AppConfig } from "use-intl/core
 
 
 import { SvelteDate } from "svelte/reactivity";
+/**
+ * Returns a date set to local midnight.
+ */
 function startOfDay(value: Date): Date {
   return new SvelteDate(value.getFullYear(), value.getMonth(), value.getDate());
 }
 
+/**
+ * Whole-minute difference between two dates.
+ */
 function differenceInMinutes(later: Date, earlier: Date): number {
   return Math.floor((later.getTime() - earlier.getTime()) / 60_000);
 }
 
+/**
+ * Checks whether two dates share local year, month, and day.
+ */
 function isSameDay(left: Date, right: Date): boolean {
   return (
     left.getFullYear() === right.getFullYear() &&
@@ -18,10 +27,16 @@ function isSameDay(left: Date, right: Date): boolean {
   );
 }
 
+/**
+ * Checks whether a date is today in the local timezone.
+ */
 function isToday(value: Date): boolean {
   return isSameDay(value, new SvelteDate());
 }
 
+/**
+ * Checks whether a date is yesterday in the local timezone.
+ */
 function isYesterday(value: Date): boolean {
   const yesterday = startOfDay(new SvelteDate());
   yesterday.setDate(yesterday.getDate() - 1);
@@ -29,10 +44,19 @@ function isYesterday(value: Date): boolean {
   return isSameDay(value, yesterday);
 }
 
+/**
+ * Checks whether a date is in the current local year.
+ */
 function isThisYear(value: Date): boolean {
   return value.getFullYear() === new SvelteDate().getFullYear();
 }
 
+/**
+ * Checks whether a date falls inside the current local week.
+ *
+ * `weekStartsOn` follows `Date#getDay` numbering, where 0 is Sunday and 1 is
+ * Monday.
+ */
 function isThisWeek(value: Date, options?: { weekStartsOn?: number }): boolean {
   const weekStartsOn = options?.weekStartsOn ?? 0;
   const now = new SvelteDate();
@@ -46,6 +70,9 @@ function isThisWeek(value: Date, options?: { weekStartsOn?: number }): boolean {
   return value >= weekStart && value < weekEnd;
 }
 
+/**
+ * Minimal internal time formatter for the supported `HH:mm` pattern.
+ */
 function formatTimeWithDateFns(value: Date, format: string): string {
   if (format !== "HH:mm") {
     throw new Error(`Unsupported format: ${format}`);
@@ -57,12 +84,21 @@ function formatTimeWithDateFns(value: Date, format: string): string {
   return `${hours}:${minutes}`;
 }
 
+/**
+ * Nested translation message value.
+ */
 export type MessageValue = string | { [key: string]: MessageValue };
 
+/**
+ * Translation message tree.
+ */
 export type Messages = {
   [key: string]: MessageValue;
 };
 
+/**
+ * Formats a date as a relative phrase using translation keys.
+ */
 function formatRelativeDate(
   value: Date,
   t: (key: string, values?: Record<string, string | number | Date>) => string
@@ -122,6 +158,9 @@ function formatRelativeDate(
     : t("years-ago", { years: absYears });
 }
 
+/**
+ * One supported language and its message catalog.
+ */
 export type LanguageDefinition<
   TLocale extends string = string,
   TMessages extends Messages = Messages
@@ -131,6 +170,9 @@ export type LanguageDefinition<
   messages: TMessages;
 };
 
+/**
+ * Options accepted by locale date/time formatter helpers.
+ */
 export type FormatOptions = {
   preset?:
     | "default"
@@ -143,6 +185,9 @@ export type FormatOptions = {
   withTime?: boolean;
 };
 
+/**
+ * Uzbek weekday labels ordered by `Date#getDay`.
+ */
 export const UZ_WEEKDAYS = [
   "Yakshanba",
   "Dushanba",
@@ -153,6 +198,9 @@ export const UZ_WEEKDAYS = [
   "Shanba"
 ] as const;
 
+/**
+ * Uzbek month labels ordered by zero-based month index.
+ */
 export const UZ_MONTHS = [
   "Yanvar",
   "Fevral",
@@ -168,12 +216,18 @@ export const UZ_MONTHS = [
   "Dekabr"
 ] as const;
 
+/**
+ * Returns all locale codes from configured languages.
+ */
 export function getLocaleCodes<const TLanguages extends readonly LanguageDefinition[]>(
   languages: TLanguages
 ) {
   return languages.map((language) => language.code) as TLanguages[number]["code"][];
 }
 
+/**
+ * Finds a language by locale, then fallback locale, then first configured language.
+ */
 export function getLanguage<const TLanguages extends readonly LanguageDefinition[]>(
   languages: TLanguages,
   locale: TLanguages[number]["code"],
@@ -186,6 +240,9 @@ export function getLanguage<const TLanguages extends readonly LanguageDefinition
   );
 }
 
+/**
+ * Creates a `use-intl` translator for one locale.
+ */
 export function createLocaleTranslator<const TLanguages extends readonly LanguageDefinition[]>(
   languages: TLanguages,
   locale: TLanguages[number]["code"],
@@ -199,6 +256,9 @@ export function createLocaleTranslator<const TLanguages extends readonly Languag
   });
 }
 
+/**
+ * Creates a `use-intl` formatter for one locale and timezone.
+ */
 export function createLocaleFormatter<TLocale extends string>(locale: TLocale, timeZone = "Asia/Tashkent") {
   return createFormatter({
     locale,
@@ -207,14 +267,25 @@ export function createLocaleFormatter<TLocale extends string>(locale: TLocale, t
   });
 }
 
+/**
+ * Normalizes a `Date`, timestamp, or date string into a Date-like SvelteDate.
+ */
 export function toDate(value: Date | number | string): Date {
   return value instanceof Date ? value : new SvelteDate(value);
 }
 
+/**
+ * Formats a date as 24-hour `HH:mm`.
+ */
 export function formatTime(value: Date): string {
   return formatTimeWithDateFns(value, "HH:mm");
 }
 
+/**
+ * Formats a date with Uzbek month labels.
+ *
+ * `suffix` is appended only when `withTime` is enabled.
+ */
 export function formatUzDate(
   value: Date,
   withYear: boolean,
@@ -232,12 +303,21 @@ export function formatUzDate(
   return text;
 }
 
+/**
+ * Formats only month or month with year using Uzbek labels.
+ */
 export function formatUzMonth(value: Date, withYear: boolean): string {
   return withYear
     ? `${value.getFullYear()}-yil, ${UZ_MONTHS[value.getMonth()]}`
     : UZ_MONTHS[value.getMonth()];
 }
 
+/**
+ * Creates the high-level formatter used by `getFormat`.
+ *
+ * Supported presets include default date formatting, relative time, custom
+ * timeline labels, month-only labels, birthdays, time strings, and full dates.
+ */
 export function createFormatForLocale<const TLanguages extends readonly LanguageDefinition[]>(
   languages: TLanguages,
   locale: TLanguages[number]["code"],

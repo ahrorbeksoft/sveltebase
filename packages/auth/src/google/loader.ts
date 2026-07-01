@@ -1,5 +1,11 @@
 let scriptLoadingPromise: Promise<void> | null = null;
 
+/**
+ * Loads the Google Identity Services browser script once.
+ *
+ * Multiple callers share the same promise while loading. The promise rejects on
+ * the server because the script requires `window` and `document`.
+ */
 export function loadGoogleScript(): Promise<void> {
   if (typeof window === 'undefined') {
     return Promise.reject(new Error('Browser environment required to load Google Identity Services script'));
