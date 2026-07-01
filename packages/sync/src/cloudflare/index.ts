@@ -36,7 +36,8 @@ export function createSyncAppWorker<TAuth = unknown>(
       if (
         (url.pathname === websocketPath && request.method === "GET") ||
         ((url.pathname === "/broadcast" ||
-          url.pathname === "/broadcast-batch") &&
+          url.pathname === "/broadcast-batch" ||
+          url.pathname === "/broadcast-change") &&
           request.method === "POST")
       ) {
         return handleSyncRequest(
