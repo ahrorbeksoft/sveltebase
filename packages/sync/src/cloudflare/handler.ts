@@ -54,6 +54,7 @@ export type SyncWorkerOptions<TAuth = unknown> = {
 
 type SyncAuthResolverMetadata = {
   allowUnauthenticated?: boolean;
+  identity?: (auth: any) => string | number | bigint | null | undefined;
 };
 
 async function forwardToEngine(
@@ -160,10 +161,12 @@ export async function handleSyncRequest<TAuth = unknown>(
     options.allowUnauthenticated ??
     authMetadata?.allowUnauthenticated ??
     true;
+  const identity = options.identity ?? authMetadata?.identity;
 
   if (url.pathname === websocketPath && request.method === "GET") {
     return handleWebSocket(request, env, ctx, {
       ...options,
+      identity,
       syncEngineBinding,
       websocketPath,
       allowUnauthenticated,
@@ -176,7 +179,8 @@ export async function handleSyncRequest<TAuth = unknown>(
 
   if (
     (url.pathname === "/broadcast" ||
-      url.pathname === "/broadcast-batch") &&
+      url.pathname === "/broadcast-batch" ||
+      url.pathname === "/broadcast-change") &&
     request.method === "POST"
   ) {
     const headers = new Headers(request.headers);

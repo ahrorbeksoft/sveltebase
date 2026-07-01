@@ -2,6 +2,7 @@ import type { ZodSchema } from "zod";
 
 export type SyncConnectionAuth<TUser = unknown> = {
   user: TUser;
+  identity: string | null;
 };
 
 export type SyncPlatform<
@@ -20,7 +21,7 @@ export type SyncContext<
 > = {
   platform: SyncPlatform<TEnv>;
   request: Request;
-  auth: TAuth | null;
+  auth: SyncConnectionAuth<TAuth> | null;
   identity: string | null;
 };
 

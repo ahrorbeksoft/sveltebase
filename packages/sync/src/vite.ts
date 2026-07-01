@@ -67,13 +67,21 @@ export function syncDevPlugin<TAuth = unknown>(
 
               (client as any).off("message", onMessage);
 
+              const authMetadata = options?.auth as
+                | {
+                    identity?: (
+                      auth: TAuth,
+                    ) => string | number | bigint | null | undefined;
+                  }
+                | undefined;
+
               const connected = await (devEngine.addClient as (
                 ws: unknown,
                 req: IncomingMessage,
                 options?: SyncDevAuthOptions<TAuth>,
               ) => Promise<boolean>)(client, request, {
                 auth: options?.auth,
-                identity: options?.identity,
+                identity: options?.identity ?? authMetadata?.identity,
                 allowUnauthenticated: options?.allowUnauthenticated,
                 platform: options?.platform,
                 wranglerConfigPath: options?.wranglerConfigPath,

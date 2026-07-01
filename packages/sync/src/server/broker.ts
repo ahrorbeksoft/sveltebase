@@ -48,11 +48,19 @@ export class SyncBroker {
     platform: SyncPlatform,
     request?: Request,
   ): SyncContext {
+    const authUser = conn.getAuth();
+    const identity = conn.getIdentity();
+
     return {
       platform,
       request: request ?? new Request(conn.url, { headers: conn.headers }),
-      auth: conn.getAuth(),
-      identity: conn.getIdentity(),
+      auth: authUser
+        ? {
+            user: authUser,
+            identity,
+          }
+        : null,
+      identity,
     };
   }
 

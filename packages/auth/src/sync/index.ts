@@ -25,15 +25,11 @@ export function sessionCookieAuth<User extends { id: string }>(options?: {
 
     if (!user) return null;
 
-    const identityValue = options?.identity
-      ? options.identity(user)
-      : user.id;
-    const identity = identityValue == null ? null : String(identityValue);
-
-    return { user, identity };
+    return user;
   };
 
   return Object.assign(resolver, {
     allowUnauthenticated: false,
+    identity: options?.identity ?? ((user: User) => user.id),
   });
 }
