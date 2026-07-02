@@ -18,7 +18,7 @@ The production Worker wraps the official `@sveltejs/adapter-cloudflare` output a
 ## Imports
 
 ```ts
-import { SyncClient, createLiveQuery } from "@sveltebase/sync/client";
+import { SyncClient, createLiveQuery, createSyncClient } from "@sveltebase/sync/client";
 import { defineSync, publishChangeEvent, publishEvent } from "@sveltebase/sync/server";
 import { syncEngineRoute } from "@sveltebase/sync/sveltekit";
 import { createSyncAppWorker, SyncEngine } from "@sveltebase/sync/cloudflare";
@@ -42,6 +42,50 @@ export const sync = new SyncClient({
     },
   },
 });
+```
+
+For dynamic channels, derive the client options from app context and set that
+context from a Svelte getter. The inner WebSocket client is recreated only when
+the resolved context actually changes.
+
+```ts
+// src/lib/sync-client.svelte.ts
+import { createSyncClient } from "@sveltebase/sync/client";
+
+type SyncContext = { orgId: string };
+
+export const sync = createSyncClient<AppDatabaseSchema, SyncContext>((ctx) => ({
+  name: `app-sync-${ctx.orgId}`,
+  url: "/api/sync",
+  tables: {
+    todos: {
+      indexes: "id, completed, updatedAt",
+      channel: `org:${ctx.orgId}:todos`,
+      updatedAtField: "updatedAt",
+    },
+  },
+}));
+```
+
+```svelte
+<!-- src/routes/+layout.svelte -->
+<script lang="ts">
+  import { sync } from "$lib/sync-client.svelte";
+
+  let { data } = $props();
+
+  sync.setContext(() => ({ orgId: data.org.id }));
+</script>
+```
+
+When using `createLiveQuery` with a dynamic sync client, include
+`sync.client` as a dependency so the query resubscribes after context changes:
+
+```ts
+const todos = createLiveQuery(
+  () => sync.todos.toArray(),
+  () => [sync.client],
+);
 ```
 
 ## Sync Handlers

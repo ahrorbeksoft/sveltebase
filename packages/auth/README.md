@@ -73,3 +73,30 @@ export const handlers = [profileSync];
 ```
 
 Use `wrangler secret put JWT_SECRET --config wrangler.jsonc` for Wrangler/prod. Use `.env` for Vite dev when using `@sveltejs/adapter-cloudflare` platform proxy.
+
+## Client Sync Verification
+
+`syncClient` is optional when creating auth state. If the sync client is created
+after app data is available, attach it later with `auth.setClient(sync)`.
+
+```ts
+import { createAuth } from "@sveltebase/auth/client";
+import { sync } from "$lib/sync-client.svelte";
+
+export const auth = createAuth<User>({
+  verifyTable: "users",
+  routesBase: "/api/auth",
+});
+```
+
+```svelte
+<script lang="ts">
+  import { auth } from "$lib/auth-client";
+  import { sync } from "$lib/sync-client.svelte";
+
+  let { data } = $props();
+
+  sync.setContext(() => ({ orgId: data.org.id }));
+  auth.setClient(sync);
+</script>
+```
