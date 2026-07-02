@@ -1,8 +1,14 @@
 import Dexie, { type Table } from "dexie";
 import { parseSyncMessage, type SyncMessage } from "../protocol.js";
+import { createDynamicSyncClient } from "./dynamic-client.svelte.js";
+import type {
+  DynamicSyncClient,
+  DynamicSyncClientOptions,
+} from "./dynamic-client.svelte.js";
 import { ConnectionStatus } from "./status.svelte.js";
 
 export { createLiveQuery } from "./live-query.svelte.js";
+export type { DynamicSyncClient, DynamicSyncClientOptions, MaybeGetter } from "./dynamic-client.svelte.js";
 export type { LiveQueryState } from "./live-query.svelte.js";
 
 /**
@@ -21,7 +27,9 @@ export type TableConfig = {
 /**
  * Options for creating a sync client database.
  */
-export type SyncClientOptions = {
+export type SyncClientOptions<
+  TSchema extends Record<string, any> = Record<string, any>,
+> = {
   /** Dexie database name stored in the browser. */
   name: string;
   /**
@@ -32,7 +40,7 @@ export type SyncClientOptions = {
    */
   url: string | (() => string | Promise<string>);
   /** Dexie tables that should be kept in sync with server channels. */
-  tables: Record<string, TableConfig>;
+  tables: Record<keyof TSchema & string, TableConfig>;
 };
 
 type PendingMutation = {
@@ -900,3 +908,20 @@ export const SyncClient: new <
   url: string | (() => string | Promise<string>);
   tables: Record<keyof TSchema & string, TableConfig>;
 }) => SyncClient<TSchema> = SyncClientClass as any;
+
+/**
+ * Creates a sync client whose options are derived from reactive context.
+ *
+ * Call `sync.setContext(...)` or `sync.setData(...)` with a value or Svelte
+ * getter. When the resolved context changes structurally, the wrapper rebuilds
+ * the inner `SyncClient`, which reconnects with the new table/channel config.
+ */
+export function createSyncClient<
+  TSchema extends Record<string, any> = Record<string, any>,
+  TContext = unknown,
+>(
+  factory: (context: TContext) => SyncClientOptions<TSchema>,
+  options?: DynamicSyncClientOptions<TContext>,
+): DynamicSyncClient<TSchema, TContext> {
+  return createDynamicSyncClient(SyncClient, factory, options);
+}

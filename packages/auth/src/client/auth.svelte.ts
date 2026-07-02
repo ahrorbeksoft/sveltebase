@@ -67,6 +67,7 @@ export class AuthClientState<User extends { id: string }> {
   #localOverride = $state<User | null | undefined>(undefined);
   #syncClient?: SyncClient<any>;
   #verifySubscription?: { unsubscribe(): void };
+  #syncClientChangeUnsubscribe?: () => void;
   #verifyTable: string;
   #routesBase: string;
   #onInvalidSession?: () => void | Promise<void>;
@@ -74,6 +75,7 @@ export class AuthClientState<User extends { id: string }> {
   #verifyUser: (sessionUser: User, syncedUser: any) => boolean;
   #isVerifying = false;
   #verificationReady = false;
+  #initialized = false;
 
   /**
    * Creates client auth state.
@@ -82,7 +84,6 @@ export class AuthClientState<User extends { id: string }> {
    * synced user row and clear local data when that row disappears.
    */
   constructor(config?: AuthClientConfig) {
-    this.#syncClient = config?.syncClient;
     this.#verifyTable = config?.verifyTable ?? "users";
     this.#routesBase = config?.routesBase ?? "/api/auth";
     this.#onInvalidSession = config?.onInvalidSession;
@@ -90,6 +91,9 @@ export class AuthClientState<User extends { id: string }> {
     this.#verifyUser = config?.verifyUser ?? ((sessionUser, syncedUser) => {
       return String(sessionUser.id) === String(syncedUser?.id);
     });
+    if (config?.syncClient) {
+      this.setClient(config.syncClient);
+    }
   }
 
   /**
@@ -131,6 +135,7 @@ export class AuthClientState<User extends { id: string }> {
    * server session user from SvelteKit load data.
    */
   init(user: MaybeGetter<User | null>) {
+    this.#initialized = true;
     this.#userGetter = user;
     this.#localOverride = undefined; // Reset local override on new init
 
@@ -145,39 +150,81 @@ export class AuthClientState<User extends { id: string }> {
       this.#localOverride = undefined;
     });
 
-    // Set up the verification table subscription if syncClient is provided and not already initialized.
-    if (this.#syncClient && !this.#verifySubscription) {
-      const sync = this.#syncClient;
-      const observable = liveQuery(() => sync.table(this.#verifyTable).toArray());
-      this.#verifySubscription = observable.subscribe({
-        next: (rows) => {
-          const activeUser = this.user;
-          if (!activeUser || this.#isVerifying || !this.#verificationReady) return;
-          const syncedUser = rows.find((row: User) => this.#verifyUser(activeUser, row));
-          if (!syncedUser) {
-            this.handleInvalidSession();
-            return;
-          }
+    this.setupSyncVerification();
+  }
 
-          if (!this.#refreshWhenChanged) return;
+  /**
+   * Attaches or replaces the sync client used for session verification.
+   *
+   * This is useful when a dynamic sync client cannot be created until app data
+   * has been initialized.
+   */
+  setClient(syncClient?: SyncClient<any>): this {
+    if (this.#syncClient === syncClient) return this;
 
-          const shouldRefresh =
-            this.#refreshWhenChanged === true
-              ? JSON.stringify(activeUser) !== JSON.stringify(syncedUser)
-              : this.#refreshWhenChanged(activeUser, syncedUser);
-          if (shouldRefresh) {
-            this.refresh().catch((err) => {
-              console.warn("Failed to refresh auth session after sync change.", err);
-            });
-          }
-        },
-        error: (err) => {
-          console.warn("WebSocket session verification failed: logging out.", err);
-          this.handleInvalidSession();
-          clearSyncData(sync);
-        }
+    this.#verifySubscription?.unsubscribe();
+    this.#verifySubscription = undefined;
+    this.#syncClientChangeUnsubscribe?.();
+    this.#syncClientChangeUnsubscribe = undefined;
+    this.#verificationReady = false;
+    this.#syncClient = syncClient;
+
+    const onClientChange = (syncClient as any)?.onClientChange as
+      | ((callback: () => void) => () => void)
+      | undefined;
+    if (onClientChange) {
+      this.#syncClientChangeUnsubscribe = onClientChange(() => {
+        this.#verifySubscription?.unsubscribe();
+        this.#verifySubscription = undefined;
+        this.#verificationReady = false;
+        this.setupSyncVerification();
       });
     }
+
+    if (this.#initialized) {
+      this.setupSyncVerification();
+    }
+
+    return this;
+  }
+
+  private setupSyncVerification() {
+    if (!this.#syncClient || this.#verifySubscription) return;
+
+    const sync = this.#syncClient;
+    if ((sync as any).isDynamicSyncClient === true && !(sync as any).client) {
+      return;
+    }
+
+    const observable = liveQuery(() => sync.table(this.#verifyTable).toArray());
+    this.#verifySubscription = observable.subscribe({
+      next: (rows) => {
+        const activeUser = this.user;
+        if (!activeUser || this.#isVerifying || !this.#verificationReady) return;
+        const syncedUser = rows.find((row: User) => this.#verifyUser(activeUser, row));
+        if (!syncedUser) {
+          this.handleInvalidSession();
+          return;
+        }
+
+        if (!this.#refreshWhenChanged) return;
+
+        const shouldRefresh =
+          this.#refreshWhenChanged === true
+            ? JSON.stringify(activeUser) !== JSON.stringify(syncedUser)
+            : this.#refreshWhenChanged(activeUser, syncedUser);
+        if (shouldRefresh) {
+          this.refresh().catch((err) => {
+            console.warn("Failed to refresh auth session after sync change.", err);
+          });
+        }
+      },
+      error: (err) => {
+        console.warn("WebSocket session verification failed: logging out.", err);
+        this.handleInvalidSession();
+        clearSyncData(sync);
+      }
+    });
   }
 
   /**
