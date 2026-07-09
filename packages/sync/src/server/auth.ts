@@ -1,10 +1,11 @@
 export type SerializedConnectionAuth = {
   auth: any;
   identity: string | null;
+  topics?: string[];
 };
 
 /**
- * Converts an auth object into the identity string used for scoped broadcasts.
+ * Converts an auth object into the identity string used for the default user topic.
  *
  * If an identity resolver is provided, its return value wins. Otherwise the
  * helper falls back to common shapes: `auth.identity`, `auth.user.id`, then
@@ -35,9 +36,14 @@ export function resolveIdentity(
 export function serializeConnectionAuth(
   auth: any,
   identity: string | null,
+  topics: Iterable<string> = [],
 ): string {
   return btoa(
-    unescape(encodeURIComponent(JSON.stringify({ auth, identity }))),
+    unescape(
+      encodeURIComponent(
+        JSON.stringify({ auth, identity, topics: Array.from(topics) }),
+      ),
+    ),
   );
 }
 

@@ -11,6 +11,8 @@ export { createLiveQuery } from "./live-query.svelte.js";
 export type { DynamicSyncClient, DynamicSyncClientOptions, MaybeGetter } from "./dynamic-client.svelte.js";
 export type { LiveQueryState } from "./live-query.svelte.js";
 
+const SYNC_META_TABLE = "__sync_meta";
+
 /**
  * Local IndexedDB table configuration for one synced table.
  *
@@ -106,6 +108,7 @@ class SyncClientClass<
     for (const [tableName, config] of Object.entries(options.tables)) {
       schema[tableName] = config.indexes;
     }
+    schema[SYNC_META_TABLE] = "key";
     this.version(1).stores(schema);
 
     // Decorate tables to intercept native Dexie write operations
@@ -427,9 +430,35 @@ class SyncClientClass<
   /**
    * Reads a comparable timestamp from a row for last-write-wins checks.
    */
-  private getUpdatedAtValue(tableName: string, row: any): string | undefined {
+  private getUpdatedAtValue(tableName: string, row: any): number | undefined {
     const value = row?.[this.getUpdatedAtField(tableName)];
-    return value == null ? undefined : String(value);
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (value instanceof Date) return value.getTime();
+
+    return undefined;
+  }
+
+  private async getChannelViewVersion(
+    channel: string,
+  ): Promise<string | undefined> {
+    try {
+      const row = await this.table(SYNC_META_TABLE).get(`view:${channel}`);
+      return row?.value == null ? undefined : String(row.value);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async setChannelViewVersion(
+    channel: string,
+    viewVersion: string | null | undefined,
+  ) {
+    if (viewVersion === undefined) return;
+
+    const table = this.table(SYNC_META_TABLE);
+    const originalPut = (table as any)._originalMethods?.put
+      || table.put.bind(table);
+    await originalPut({ key: `view:${channel}`, value: viewVersion });
   }
 
   /**
@@ -445,7 +474,7 @@ class SyncClientClass<
     const socket = options?.socket ?? this.socket;
     if (socket && socket === this.socket && socket.readyState === WebSocket.OPEN) {
       const tableName = this.findTableByChannel(channel);
-      let since: string | undefined;
+      let since: number | undefined;
       if (tableName && !options?.forceFull) {
         try {
           const table = this.table(tableName);
@@ -458,8 +487,11 @@ class SyncClientClass<
           // Ignore if query fails or table is empty
         }
       }
+      const viewVersion = await this.getChannelViewVersion(channel);
       if (socket !== this.socket || socket.readyState !== WebSocket.OPEN) return;
-      socket.send(JSON.stringify({ type: "subscribe", channel, since }));
+      socket.send(
+        JSON.stringify({ type: "subscribe", channel, since, viewVersion }),
+      );
       this.activeChannels.add(channel);
     }
   }
@@ -606,10 +638,8 @@ class SyncClientClass<
     const existing = await table.get(data.id);
     const existingUpdatedAt = this.getUpdatedAtValue(tableName, existing);
     const incomingUpdatedAt = this.getUpdatedAtValue(tableName, data);
-    if (existingUpdatedAt && incomingUpdatedAt) {
-      const existingTime = new Date(existingUpdatedAt).getTime();
-      const incomingTime = new Date(incomingUpdatedAt).getTime();
-      if (incomingTime < existingTime) {
+    if (existingUpdatedAt != null && incomingUpdatedAt != null) {
+      if (incomingUpdatedAt < existingUpdatedAt) {
         // Ignore older update (Last-Write-Wins)
         return;
       }
@@ -627,16 +657,14 @@ class SyncClientClass<
   private async safeDeleteRow(
     tableName: string,
     key: string,
-    incomingTimeStr?: string,
+    incomingTime?: number,
   ) {
     const table = this.table(tableName);
-    if (incomingTimeStr) {
+    if (incomingTime != null) {
       const existing = await table.get(key);
       const existingUpdatedAt = this.getUpdatedAtValue(tableName, existing);
-      if (existingUpdatedAt) {
-        const existingTime = new Date(existingUpdatedAt).getTime();
-        const incomingTime = new Date(incomingTimeStr).getTime();
-        if (incomingTime < existingTime) {
+      if (existingUpdatedAt != null) {
+        if (incomingTime < existingUpdatedAt) {
           // Ignore older delete
           return;
         }
@@ -673,6 +701,7 @@ class SyncClientClass<
               }
             });
           }
+          await this.setChannelViewVersion(msg.channel, msg.viewVersion);
         }
         const pending = this.pendingSnapshots.get(msg.channel);
         if (pending?.length) {
@@ -736,8 +765,8 @@ class SyncClientClass<
         if (msg.action === "create" || msg.action === "update") {
           await this.safePutRow(tableName, msg.data);
         } else if (msg.action === "delete" && msg.key) {
-          const incomingTimeStr = this.getUpdatedAtValue(tableName, msg.data);
-          await this.safeDeleteRow(tableName, msg.key, incomingTimeStr);
+          const incomingTime = this.getUpdatedAtValue(tableName, msg.data);
+          await this.safeDeleteRow(tableName, msg.key, incomingTime);
         }
         break;
       }
@@ -751,11 +780,11 @@ class SyncClientClass<
             if (change.action === "create" || change.action === "update") {
               await this.safePutRow(tableName, change.data);
             } else if (change.action === "delete" && change.key) {
-              const incomingTimeStr = this.getUpdatedAtValue(
+              const incomingTime = this.getUpdatedAtValue(
                 tableName,
                 change.data,
               );
-              await this.safeDeleteRow(tableName, change.key, incomingTimeStr);
+              await this.safeDeleteRow(tableName, change.key, incomingTime);
             }
           }
         });
@@ -763,6 +792,10 @@ class SyncClientClass<
       }
       case "channel-change": {
         this.scheduleChannelResync(msg.channel);
+        break;
+      }
+      case "channel-reset": {
+        this.scheduleChannelResync(msg.channel, { forceFull: true });
         break;
       }
     }
@@ -774,7 +807,10 @@ class SyncClientClass<
    * Multiple external change notifications in the same burst result in one
    * resync.
    */
-  private scheduleChannelResync(channel: string) {
+  private scheduleChannelResync(
+    channel: string,
+    options?: { forceFull?: boolean },
+  ) {
     const existing = this.changeTimers.get(channel);
     if (existing) clearTimeout(existing);
 
@@ -787,7 +823,7 @@ class SyncClientClass<
       ) {
         return;
       }
-      void this.subscribeToChannel(channel);
+      void this.subscribeToChannel(channel, { forceFull: options?.forceFull });
     }, 50);
 
     this.changeTimers.set(channel, timer);

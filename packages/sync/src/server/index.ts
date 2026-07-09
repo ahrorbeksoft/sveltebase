@@ -3,8 +3,8 @@ import type { ZodSchema } from "zod";
 /**
  * Auth data attached to a live sync connection after the websocket auth step.
  *
- * `user` is whatever your `auth` resolver returned. `identity` is the stable
- * string used by `scope` filtering, usually the user id.
+ * `user` is whatever your `auth` resolver returned. `identity` is usually the
+ * user id. `topics` are used for live row-payload routing.
  *
  * @example
  * ```ts
@@ -15,6 +15,7 @@ import type { ZodSchema } from "zod";
 export type SyncConnectionAuth<TUser = unknown> = {
   user: TUser;
   identity: string | null;
+  topics: string[];
 };
 
 /**
@@ -49,7 +50,19 @@ export type SyncContext<
   request: Request;
   auth: SyncConnectionAuth<TAuth> | null;
   identity: string | null;
+  topics: Set<string>;
 };
+
+/**
+ * Resolves the broadcast topics attached to one websocket connection.
+ *
+ * Row broadcasts are delivered only when a connection topic intersects the
+ * changed row's `broadcastTopics`. Keep topics coarse and derived from the
+ * authenticated user's current visibility graph.
+ */
+export type ResolveTopics<TAuth = unknown> = (
+  ctx: SyncContext<TAuth>,
+) => Promise<string[]> | string[];
 
 /**
  * Server-side behavior for one sync channel.
@@ -58,9 +71,8 @@ export type SyncContext<
  * and `delete` are called for client-side Dexie writes. `authorize` runs before
  * subscribing and before every mutation; throw to reject the operation.
  *
- * `scope` controls who receives broadcast changes. Return `"all"` to notify
- * every subscriber on the channel, or return identity strings to notify only
- * matching connections.
+ * Row broadcasts are an optimization, not the authorization boundary. `fetch`
+ * must return only the rows the current connection may hold locally.
  *
  * @example
  * ```ts
@@ -70,7 +82,7 @@ export type SyncContext<
  *     if (!auth) throw new Error("Login required");
  *   },
  *   fetch: async ({ auth }, since) => db.todos.list(auth!.identity, since),
- *   scope: (_ctx, _action, todo) => [todo.userId]
+ *   broadcastTopics: (_ctx, _action, todo) => [`user:${todo.userId}`]
  * });
  * ```
  */
@@ -85,15 +97,15 @@ export type SyncHandlerConfig<TRow = any, TAuth = any> = {
   /**
    * Returns rows for a subscription snapshot.
    *
-   * `since` is sent by the client when it has a local `updatedAt` value, so
-   * handlers can return only changed rows for delta sync.
+   * `since` is sent by the client when it has a local `updatedAt` value in UTC
+   * milliseconds, so handlers can return only changed rows for delta sync.
    */
-  fetch: (ctx: SyncContext<TAuth>, since?: string) => Promise<TRow[]>;
+  fetch: (ctx: SyncContext<TAuth>, since?: number) => Promise<TRow[]>;
   /**
    * Handles a client-created row after optional validation.
    *
-   * The returned row is acknowledged to the sender and broadcast to other
-   * scoped subscribers.
+   * The returned row is acknowledged to the sender and broadcast to matching
+   * subscribers when `broadcastTopics` allows it.
    */
   create?: (ctx: SyncContext<TAuth>, data: TRow) => Promise<TRow>;
   /**
@@ -129,17 +141,34 @@ export type SyncHandlerConfig<TRow = any, TAuth = any> = {
     update?: ZodSchema<any>;
   };
   /**
-   * Determines which identities receive a broadcast change.
+   * Controls whether row payloads are broadcast after writes.
    *
-   * Called after local mutations and external publish events. Return `"all"` for
-   * every subscriber, `[]` for nobody, or user identity strings for targeted
-   * delivery.
+   * Defaults to `"scoped"`, which requires `broadcastTopics`. Use `"public"`
+   * only for channels where every subscriber may receive every row payload.
+   * Use `"none"` for channels that should only update through resync/reset.
    */
-  scope?: (
+  broadcast?: "public" | "scoped" | "none";
+  /**
+   * Tags describing which connection topics may receive this row change.
+   *
+   * Called after local mutations and external publish events. Return `"all"`
+   * only for public row payloads. Missing topics default to no delivery.
+   * Prefer deriving tags from row columns; do not use this as authorization.
+   */
+  broadcastTopics?: (
     ctx: SyncContext<TAuth>,
     action: "create" | "update" | "delete",
     data: TRow,
   ) => Promise<string[] | "all"> | string[] | "all";
+  /**
+   * Current version of this connection's visible view for the channel.
+   *
+   * When the client sends a stale `viewVersion`, the broker ignores `since` and
+   * returns a full snapshot so local rows that are no longer visible are removed.
+   */
+  viewVersion?: (
+    ctx: SyncContext<TAuth>,
+  ) => Promise<string | number | null | undefined> | string | number | null | undefined;
 };
 
 /**
@@ -188,11 +217,13 @@ export function defineSync<TRow = any, TAuth = any>(
 export {
   createBulkPublisher,
   createPublishChangeEvent,
+  createPublishResetEvent,
   createPublisher,
   INTERNAL_AUTH_HEADER,
   publishBulkEvent,
   publishChangeEvent,
   publishEvent,
+  publishResetEvent,
 } from "./handler.js";
 export type {
   BulkPublishFn,
@@ -201,5 +232,6 @@ export type {
   PublishEventData,
   PublishEventFn,
   PublishFn,
+  PublishResetEventFn,
   SyncAuthResult,
 } from "./handler.js";

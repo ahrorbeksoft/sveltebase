@@ -1,7 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import { resolveIdentity } from "./auth.js";
 import { SyncBroker, type ISyncConnection } from "./broker.js";
-import type { SyncHandler, SyncPlatform } from "./index.js";
+import type { ResolveTopics, SyncHandler, SyncPlatform } from "./index.js";
 
 const GLOBAL_BROKER_KEY = "__sveltebase_sync_dev_broker__";
 const GLOBAL_PLATFORM_KEY = "__sveltebase_sync_dev_platform__";
@@ -22,8 +22,10 @@ export type SyncDevAuthOptions<TAuth = unknown> = {
     request: Request,
     platform: SyncPlatform,
   ) => Promise<TAuth | null | undefined> | TAuth | null | undefined;
-  /** Converts the auth object into the identity string used by `scope`. */
+  /** Converts the auth object into the identity used for the default user topic. */
   identity?: (auth: TAuth) => string | number | bigint | null | undefined;
+  /** Resolves connection topics used for live row-payload routing. */
+  topics?: ResolveTopics<TAuth>;
   /** Whether unauthenticated local websocket clients may connect. */
   allowUnauthenticated?: boolean;
   /** Platform object or resolver used by auth and handlers in dev. */
@@ -181,6 +183,7 @@ export async function addClient(
   const subscribedChannels = new Set<string>();
   let auth: any = null;
   let identity: string | null = null;
+  let topics: string[] = [];
 
   try {
     if (options?.auth) {
@@ -194,6 +197,30 @@ export async function addClient(
       if (auth) {
         identity = resolveIdentity(auth, options.identity);
       }
+    }
+
+    if (identity) {
+      topics.push(`user:${identity}`);
+    }
+
+    if (options?.topics) {
+      const baseTopics = topics;
+      const topicCtx = {
+        platform,
+        request,
+        auth: auth
+          ? {
+              user: auth,
+              identity,
+              topics,
+            }
+          : null,
+        identity,
+        topics: new Set(baseTopics),
+      };
+      topics = Array.from(
+        new Set([...baseTopics, ...(await options.topics(topicCtx))]),
+      );
     }
   } catch {
     ws.close(1011, "Internal server error");
@@ -218,6 +245,12 @@ export async function addClient(
     },
     setIdentity(newIdentity) {
       identity = newIdentity;
+    },
+    getTopics() {
+      return new Set(topics);
+    },
+    setTopics(newTopics) {
+      topics = Array.from(newTopics);
     },
     getSubscribedChannels() {
       return subscribedChannels;
@@ -284,4 +317,15 @@ export async function broadcastExternalBatchChange(
 export async function broadcastChannelChange(channel: string) {
   const broker = getDevBroker();
   await broker.handleExternalChannelChange(channel);
+}
+
+/**
+ * Notifies dev clients that a channel should be fully replaced.
+ */
+export async function broadcastChannelReset(
+  channel: string,
+  topics: string[] | "all" = "all",
+) {
+  const broker = getDevBroker();
+  await broker.handleExternalChannelReset(channel, topics);
 }

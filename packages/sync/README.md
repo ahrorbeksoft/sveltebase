@@ -44,6 +44,10 @@ export const sync = new SyncClient({
 });
 ```
 
+`updatedAtField` should contain a numeric UTC timestamp such as `Date.now()` or
+`new Date().getTime()`. The client sends that value as `since` during delta
+sync and uses it for last-write-wins conflict handling.
+
 For dynamic channels, derive the client options from app context and set that
 context from a Svelte getter. The inner WebSocket client is recreated only when
 the resolved context actually changes.
@@ -101,6 +105,7 @@ export const todoSync = defineSync({
 
   fetch: async (ctx, since) => {
     const db = ctx.platform.env.DB;
+    // `since` is a UTC millisecond timestamp when the client has local data.
     return [];
   },
 

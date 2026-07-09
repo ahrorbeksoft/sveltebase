@@ -78,6 +78,16 @@ export type PublishChangeEventFn<TSchema extends Record<string, unknown>> = <
   channel: TChannel | `${TChannel}:${string}`,
 ) => Promise<void>;
 
+/**
+ * Function for notifying clients that a channel must be fully refetched.
+ */
+export type PublishResetEventFn<TSchema extends Record<string, unknown>> = <
+  TChannel extends keyof TSchema & string,
+>(
+  channel: TChannel | `${TChannel}:${string}`,
+  topics?: string[] | "all",
+) => Promise<void>;
+
 const GLOBAL_PLATFORM_KEY = "__sveltebase_sync_platform__";
 const DEFAULT_SYNC_ENGINE_BINDING = "SYNC_ENGINE";
 
@@ -128,7 +138,11 @@ function getPublisherRuntime() {
 async function publishToDurableObject(
   platform: SyncPlatform,
   syncEngineBinding: string,
-  pathname: "/broadcast" | "/broadcast-batch" | "/broadcast-change",
+  pathname:
+    | "/broadcast"
+    | "/broadcast-batch"
+    | "/broadcast-change"
+    | "/broadcast-reset",
   body: unknown,
 ) {
   const namespace = platform.env[syncEngineBinding] as
@@ -157,10 +171,22 @@ async function publishToDurableObject(
  * Sends a publish payload to the in-memory Vite dev broker.
  */
 async function publishToDevBroker(
-  pathname: "/broadcast" | "/broadcast-batch" | "/broadcast-change",
+  pathname:
+    | "/broadcast"
+    | "/broadcast-batch"
+    | "/broadcast-change"
+    | "/broadcast-reset",
   body: any,
 ) {
   const devEngine = await import("./dev-engine.js");
+
+  if (pathname === "/broadcast-reset") {
+    await devEngine.broadcastChannelReset(
+      String(body.channel),
+      Array.isArray(body.topics) ? body.topics.map(String) : "all",
+    );
+    return;
+  }
 
   if (pathname === "/broadcast-change") {
     await devEngine.broadcastChannelChange(String(body.channel));
@@ -187,7 +213,11 @@ async function publishToDevBroker(
  * Dispatches a publish payload to production Durable Object or dev broker.
  */
 async function publish(
-  pathname: "/broadcast" | "/broadcast-batch" | "/broadcast-change",
+  pathname:
+    | "/broadcast"
+    | "/broadcast-batch"
+    | "/broadcast-change"
+    | "/broadcast-reset",
   body: unknown,
 ) {
   const runtime = getPublisherRuntime();
@@ -274,8 +304,8 @@ export function createBulkPublisher() {
 /**
  * Publishes multiple server-side row changes for one channel.
  *
- * If the server handler defines `scope`, each change is scoped independently by
- * the broker before it is sent.
+ * If the server handler defines `broadcastTopics`, each change is routed
+ * independently by the broker before it is sent.
  */
 export async function publishBulkEvent<
   TSchema extends Record<string, unknown>,
@@ -327,5 +357,40 @@ export async function publishChangeEvent<
 export async function publishChangeEvent(channel: string): Promise<void> {
   await publish("/broadcast-change", {
     channel: String(channel),
+  });
+}
+
+/**
+ * Creates a typed publisher that asks clients to fully replace a channel.
+ */
+export function createPublishResetEvent<
+  TSchema extends Record<string, unknown>,
+>(): PublishResetEventFn<TSchema>;
+
+export function createPublishResetEvent() {
+  return publishResetEvent;
+}
+
+/**
+ * Notifies connected clients that a channel's visible set changed.
+ *
+ * Clients fetch without `since` and replace the local table. Pass `topics` to
+ * target only affected live connections; omit it to reset every subscriber.
+ */
+export async function publishResetEvent<
+  TSchema extends Record<string, unknown>,
+  TChannel extends keyof TSchema & string,
+>(
+  channel: TChannel | `${TChannel}:${string}`,
+  topics?: string[] | "all",
+): Promise<void>;
+
+export async function publishResetEvent(
+  channel: string,
+  topics: string[] | "all" = "all",
+): Promise<void> {
+  await publish("/broadcast-reset", {
+    channel: String(channel),
+    topics,
   });
 }

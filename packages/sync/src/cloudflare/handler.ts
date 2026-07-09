@@ -4,7 +4,7 @@ import {
   type SyncAuthResult,
 } from "../server/handler.js";
 import { resolveIdentity, serializeConnectionAuth } from "../server/auth.js";
-import type { SyncHandler, SyncPlatform } from "../server/index.js";
+import type { ResolveTopics, SyncHandler, SyncPlatform } from "../server/index.js";
 
 let activeHandlers: SyncHandler[] = [];
 
@@ -78,10 +78,10 @@ export type SyncWorkerOptions<TAuth = unknown> = {
     request: Request,
     platform: SyncPlatform,
   ) => Promise<SyncAuthResult<TAuth>> | SyncAuthResult<TAuth>;
-  /**
-   * Converts the auth object into the identity string used by `scope`.
-   */
+  /** Converts the auth object into the identity used for the default user topic. */
   identity?: (auth: TAuth) => string | number | bigint | null | undefined;
+  /** Resolves connection topics used for live row-payload routing. */
+  topics?: ResolveTopics<TAuth>;
   /**
    * Whether clients without auth may connect.
    *
@@ -134,7 +134,7 @@ async function handleWebSocket<TAuth>(
       "syncEngineBinding" | "websocketPath" | "allowUnauthenticated"
     >
   > &
-    Pick<SyncWorkerOptions<TAuth>, "auth" | "identity" | "handlers">,
+    Pick<SyncWorkerOptions<TAuth>, "auth" | "identity" | "topics" | "handlers">,
 ) {
   if (!isWebSocketRequest(request)) {
     return new Response("Expected Upgrade: websocket", { status: 426 });
@@ -150,6 +150,7 @@ async function handleWebSocket<TAuth>(
 
   let resolvedAuth: TAuth | null = null;
   let identity: string | null = null;
+  let topics: string[] = [];
 
   if (options.auth) {
     resolvedAuth = (await options.auth(publicRequest, platform)) ?? null;
@@ -165,12 +166,36 @@ async function handleWebSocket<TAuth>(
     return new Response("Unauthorized", { status: 401 });
   }
 
+  if (identity) {
+    topics.push(`user:${identity}`);
+  }
+
+  if (options.topics) {
+    const baseTopics = topics;
+    const topicCtx = {
+      platform,
+      request: publicRequest,
+      auth: resolvedAuth
+        ? {
+            user: resolvedAuth,
+            identity,
+            topics,
+          }
+        : null,
+      identity,
+      topics: new Set(baseTopics),
+    };
+    topics = Array.from(
+      new Set([...baseTopics, ...(await options.topics(topicCtx))]),
+    );
+  }
+
   const forwardedHeaders = new Headers(publicRequest.headers);
   forwardedHeaders.delete(INTERNAL_AUTH_HEADER);
-  if (resolvedAuth) {
+  if (resolvedAuth || topics.length > 0) {
     forwardedHeaders.set(
       INTERNAL_AUTH_HEADER,
-      serializeConnectionAuth(resolvedAuth, identity),
+      serializeConnectionAuth(resolvedAuth, identity, topics),
     );
   }
 
@@ -235,7 +260,8 @@ export async function handleSyncRequest<TAuth = unknown>(
   if (
     (url.pathname === "/broadcast" ||
       url.pathname === "/broadcast-batch" ||
-      url.pathname === "/broadcast-change") &&
+      url.pathname === "/broadcast-change" ||
+      url.pathname === "/broadcast-reset") &&
     request.method === "POST"
   ) {
     const headers = new Headers(request.headers);

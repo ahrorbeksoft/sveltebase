@@ -5,7 +5,17 @@ export type {
   LiveQueryState,
   MaybeGetter,
 } from "./client/index.js";
-export { defineSync } from "./server/index.js";
+export {
+  createBulkPublisher,
+  createPublishChangeEvent,
+  createPublishResetEvent,
+  createPublisher,
+  defineSync,
+  publishBulkEvent,
+  publishChangeEvent,
+  publishEvent,
+  publishResetEvent,
+} from "./server/index.js";
 export type {
   BulkPublishFn,
   PublishChangeEventFn,
@@ -13,10 +23,13 @@ export type {
   PublishEventData,
   PublishEventFn,
   PublishFn,
+  PublishResetEventFn,
+  ResolveTopics,
   SyncAuthResult,
   SyncConnectionAuth,
   SyncContext,
   SyncHandler,
+  SyncHandlerConfig,
   SyncPlatform,
 } from "./server/index.js";
 export type { SyncMessage } from "./protocol.js";

@@ -73,9 +73,13 @@ export class AuthClientState<User extends { id: string }> {
   #onInvalidSession?: () => void | Promise<void>;
   #refreshWhenChanged?: boolean | ((sessionUser: User, syncedUser: User) => boolean);
   #verifyUser: (sessionUser: User, syncedUser: any) => boolean;
-  #isVerifying = false;
+  #isVerifying = $state(false);
+  #isReady = $state(false);
   #verificationReady = false;
-  #initialized = false;
+  #initialized = $state(false);
+  #lastResolvedUserId: string | null | undefined;
+  #ranNoSyncInitVerification = false;
+  #noSyncInitVerificationPromise?: Promise<void>;
 
   /**
    * Creates client auth state.
@@ -121,10 +125,24 @@ export class AuthClientState<User extends { id: string }> {
   }
 
   /**
-   * True when `user` is not `null`.
+   * True once auth state is initialized and any required startup verification completed.
+   */
+  get isReady(): boolean {
+    return this.#isReady;
+  }
+
+  /**
+   * True while auth is actively verifying the current session.
+   */
+  get isVerifying(): boolean {
+    return this.#isVerifying;
+  }
+
+  /**
+   * True when auth is ready and `user` is not `null`.
    */
   get isAuthenticated(): boolean {
-    return this.user !== null;
+    return this.#isReady && this.user !== null;
   }
 
   /**
@@ -137,6 +155,7 @@ export class AuthClientState<User extends { id: string }> {
   init(user: MaybeGetter<User | null>) {
     this.#initialized = true;
     this.#userGetter = user;
+    this.#isReady = false;
     this.#localOverride = undefined; // Reset local override on new init
 
     // Reactive effect to reset local override whenever the server's user getter updates
@@ -146,11 +165,23 @@ export class AuthClientState<User extends { id: string }> {
         ? (this.#userGetter as () => User | null)()
         : this.#userGetter;
 
+      const resolvedUserId = serverUser ? String(serverUser.id) : null;
+      if (this.#lastResolvedUserId !== resolvedUserId) {
+        this.#lastResolvedUserId = resolvedUserId;
+        this.#verificationReady = false;
+        this.#ranNoSyncInitVerification = false;
+        this.#noSyncInitVerificationPromise = undefined;
+        this.#isReady = false;
+      }
+
       // Clear any local override (like query error overrides) whenever the server session changes
       this.#localOverride = undefined;
+
+      void this.ensureReady();
     });
 
     this.setupSyncVerification();
+    void this.ensureReady();
   }
 
   /**
@@ -178,11 +209,13 @@ export class AuthClientState<User extends { id: string }> {
         this.#verifySubscription = undefined;
         this.#verificationReady = false;
         this.setupSyncVerification();
+        void this.ensureReady();
       });
     }
 
     if (this.#initialized) {
       this.setupSyncVerification();
+      void this.ensureReady();
     }
 
     return this;
@@ -227,6 +260,48 @@ export class AuthClientState<User extends { id: string }> {
     });
   }
 
+  private hasUsableSyncClient(syncClient = this.#syncClient): syncClient is SyncClient<any> {
+    if (!syncClient) return false;
+    return (syncClient as any).isDynamicSyncClient !== true || Boolean((syncClient as any).client);
+  }
+
+  private async ensureReady() {
+    if (!this.#initialized) return;
+
+    const activeUser = this.user;
+    if (!activeUser) {
+      this.#isReady = true;
+      this.#ranNoSyncInitVerification = true;
+      return;
+    }
+
+    if (this.hasUsableSyncClient()) {
+      this.setupSyncVerification();
+      this.#isReady = true;
+      return;
+    }
+
+    if (this.#ranNoSyncInitVerification || this.#noSyncInitVerificationPromise) {
+      return;
+    }
+
+    this.#isVerifying = true;
+    this.#noSyncInitVerificationPromise = (async () => {
+      try {
+        await this.refresh();
+        this.#ranNoSyncInitVerification = true;
+        this.#isReady = true;
+      } catch (err) {
+        console.warn("Initial auth refresh verification failed.", err);
+      } finally {
+        this.#isVerifying = false;
+        this.#noSyncInitVerificationPromise = undefined;
+      }
+    })();
+
+    await this.#noSyncInitVerificationPromise;
+  }
+
   /**
    * Resyncs the verification table and confirms the session user still exists.
    *
@@ -257,6 +332,7 @@ export class AuthClientState<User extends { id: string }> {
         return null;
       }
       this.#verificationReady = true;
+      this.#isReady = true;
       return syncedUser as User;
     } finally {
       this.#isVerifying = false;
@@ -275,6 +351,8 @@ export class AuthClientState<User extends { id: string }> {
       });
     }
     this.#verificationReady = false;
+    this.#isReady = true;
+    this.#ranNoSyncInitVerification = true;
     if (this.#syncClient) {
       await clearSyncData(this.#syncClient);
     }
@@ -304,6 +382,8 @@ export class AuthClientState<User extends { id: string }> {
     if (!verifiedUser) {
       throw new Error("Invalid session");
     }
+    this.#isReady = true;
+    this.#ranNoSyncInitVerification = true;
     return verifiedUser;
   }
 
@@ -324,12 +404,17 @@ export class AuthClientState<User extends { id: string }> {
 
     if (response.status === 204) {
       await this.refresh();
+      this.#isReady = true;
+      this.#ranNoSyncInitVerification = true;
       return this.user;
     }
 
     const user = await response.json() as User;
     this.#localOverride = user;
-    return await this.verifySyncedUser(user, { reconnect: true });
+    const verifiedUser = await this.verifySyncedUser(user, { reconnect: true });
+    this.#isReady = true;
+    this.#ranNoSyncInitVerification = true;
+    return verifiedUser;
   }
 
   /**
@@ -343,6 +428,8 @@ export class AuthClientState<User extends { id: string }> {
     if (response.status === 401) {
       this.#localOverride = null;
       await this.#onInvalidSession?.();
+      this.#isReady = true;
+      this.#ranNoSyncInitVerification = true;
       return null;
     }
     if (!response.ok) {
@@ -350,12 +437,17 @@ export class AuthClientState<User extends { id: string }> {
     }
 
     if (response.status === 204) {
+      this.#isReady = true;
+      this.#ranNoSyncInitVerification = true;
       return this.user;
     }
 
     const user = await response.json() as User;
     this.#localOverride = user;
-    return await this.verifySyncedUser(user);
+    const verifiedUser = await this.verifySyncedUser(user);
+    this.#isReady = true;
+    this.#ranNoSyncInitVerification = true;
+    return verifiedUser;
   }
 
   /**
@@ -366,6 +458,8 @@ export class AuthClientState<User extends { id: string }> {
    */
   async logout() {
     this.#localOverride = null;
+    this.#isReady = true;
+    this.#ranNoSyncInitVerification = true;
     try {
       await fetch(`${this.#routesBase}/logout`, { method: "POST" });
     } catch {

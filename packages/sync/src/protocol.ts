@@ -5,7 +5,12 @@
  * answers with snapshots, acknowledgements, rejections, and broadcast changes.
  */
 export type SyncMessage =
-  | { type: "subscribe"; channel: string; since?: string }
+  | {
+      type: "subscribe";
+      channel: string;
+      since?: number;
+      viewVersion?: string | number | null;
+    }
   | { type: "unsubscribe"; channel: string }
   | {
       type: "mutate";
@@ -17,7 +22,13 @@ export type SyncMessage =
     }
   | { type: "ping" }
   | { type: "pong" }
-  | { type: "snapshot"; channel: string; data: any[]; isDelta?: boolean }
+  | {
+      type: "snapshot";
+      channel: string;
+      data: any[];
+      isDelta?: boolean;
+      viewVersion?: string | null;
+    }
   | { type: "ack"; id: string; data?: any }
   | { type: "reject"; id: string; error: string }
   | {
@@ -37,7 +48,8 @@ export type SyncMessage =
         data?: any;
       }>;
     }
-  | { type: "channel-change"; channel: string };
+  | { type: "channel-change"; channel: string }
+  | { type: "channel-reset"; channel: string };
 
 /**
  * Safely parses a websocket payload into a sync message.

@@ -16,6 +16,7 @@ class CloudflareSyncConnection implements ISyncConnection {
   private ws: WebSocket;
   private auth: any = null;
   private identity: string | null = null;
+  private topics = new Set<string>();
   private subscribedChannels = new Set<string>();
   public readonly headers: Headers;
   public readonly url: string;
@@ -57,14 +58,24 @@ class CloudflareSyncConnection implements ISyncConnection {
     this.auth = newAuth;
   }
 
-  /** Returns the identity used by scoped broadcasts. */
+  /** Returns the legacy identity for this connection. */
   getIdentity() {
     return this.identity;
   }
 
-  /** Updates the identity used by scoped broadcasts. */
+  /** Updates the legacy identity for this connection. */
   setIdentity(identity: string | null) {
     this.identity = identity;
+  }
+
+  /** Returns topics used for live broadcast routing. */
+  getTopics() {
+    return this.topics;
+  }
+
+  /** Replaces topics used for live broadcast routing. */
+  setTopics(topics: Iterable<string>) {
+    this.topics = new Set(topics);
   }
 
   /** Returns the mutable set of channels this connection subscribed to. */
@@ -160,6 +171,22 @@ export class SyncEngineBase extends DurableObject<SyncEngineEnv> {
       }
     }
 
+    if (url.pathname === "/broadcast-reset" && request.method === "POST") {
+      try {
+        const body = (await request.json()) as any;
+        const { channel, topics } = body;
+        await this.broker.handleExternalChannelReset(
+          String(channel),
+          Array.isArray(topics) ? topics.map(String) : "all",
+        );
+        return new Response(null, { status: 204 });
+      } catch (err: any) {
+        return new Response(err.message || "Error processing reset broadcast", {
+          status: 400,
+        });
+      }
+    }
+
     return new Response("Not found", { status: 404 });
   }
 
@@ -186,6 +213,7 @@ export class SyncEngineBase extends DurableObject<SyncEngineEnv> {
     if (forwardedAuth) {
       conn.setAuth(forwardedAuth.auth);
       conn.setIdentity(forwardedAuth.identity);
+      conn.setTopics(forwardedAuth.topics ?? []);
     }
 
     this.connMap.set(server, conn);

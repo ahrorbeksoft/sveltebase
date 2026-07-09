@@ -79,6 +79,16 @@ Use `wrangler secret put JWT_SECRET --config wrangler.jsonc` for Wrangler/prod. 
 `syncClient` is optional when creating auth state. If the sync client is created
 after app data is available, attach it later with `auth.setClient(sync)`.
 
+`auth.init(() => data.user)` now drives readiness state:
+
+- `auth.isReady`: auth can be trusted for route/UI decisions
+- `auth.isAuthenticated`: shorthand for `auth.isReady && auth.user !== null`
+- `auth.isVerifying`: startup or sync-backed verification is still running
+
+When no usable sync client is attached and the initialized user is non-null,
+the auth client calls `POST /refresh` once after `init()` to verify the session
+server-side before marking itself ready.
+
 ```ts
 import { createAuth } from "@sveltebase/auth/client";
 import { sync } from "$lib/sync-client.svelte";
