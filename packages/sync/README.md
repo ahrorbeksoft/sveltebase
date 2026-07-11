@@ -106,7 +106,7 @@ export class TranslatedError extends SerializableError {
   static readonly code = "TranslatedError";
 
   constructor(message: string) {
-    super(TranslatedError.code, message);
+    super(message);
   }
 }
 ```
