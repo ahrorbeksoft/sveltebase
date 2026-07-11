@@ -15,12 +15,13 @@ export type SyncErrorInput = SyncErrorPayload | string;
  * Base class for errors that should preserve their code across sync requests.
  */
 export class SerializableError extends Error {
-  constructor(
-    public readonly code: string,
-    message: string,
-  ) {
+  static readonly code = "SerializableError";
+  public readonly code: string;
+
+  constructor(message: string, code?: string) {
     super(message);
-    this.name = code;
+    this.code = code ?? (new.target as typeof SerializableError).code;
+    this.name = this.code;
   }
 }
 
@@ -109,13 +110,13 @@ export function createErrorCodec(
       const ErrorClass = constructorsByCode.get(payload.code);
 
       if (!ErrorClass) {
-        return new SerializableError(payload.code, payload.message);
+        return new SerializableError(payload.message, payload.code);
       }
 
       try {
         return new ErrorClass(payload.message);
       } catch {
-        return new SerializableError(payload.code, payload.message);
+        return new SerializableError(payload.message, payload.code);
       }
     },
   };
