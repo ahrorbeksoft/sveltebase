@@ -1,10 +1,16 @@
 export { SyncClient, createLiveQuery, createSyncClient } from "./client/index.js";
+export { SerializableError } from "./errors.js";
 export type {
   DynamicSyncClient,
   DynamicSyncClientOptions,
   LiveQueryState,
   MaybeGetter,
 } from "./client/index.js";
+export type {
+  SerializableErrorConstructor,
+  SyncErrorInput,
+  SyncErrorPayload,
+} from "./errors.js";
 export {
   createBulkPublisher,
   createPublishChangeEvent,

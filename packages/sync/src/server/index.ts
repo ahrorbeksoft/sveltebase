@@ -1,5 +1,12 @@
 import type { ZodSchema } from "zod";
 
+export { SerializableError } from "../errors.js";
+export type {
+  SerializableErrorConstructor,
+  SyncErrorInput,
+  SyncErrorPayload,
+} from "../errors.js";
+
 /**
  * Auth data attached to a live sync connection after the websocket auth step.
  *

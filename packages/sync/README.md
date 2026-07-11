@@ -92,6 +92,55 @@ const todos = createLiveQuery(
 );
 ```
 
+## Serialized errors
+
+Server handlers can throw `SerializableError` subclasses. The sync transport
+sends only `code` and `message`, so the application can keep any additional
+formatting inside the message.
+
+```ts
+// src/lib/shared/errors.ts
+import { SerializableError } from "@sveltebase/sync";
+
+export class TranslatedError extends SerializableError {
+  static readonly code = "TranslatedError";
+
+  constructor(message: string) {
+    super(TranslatedError.code, message);
+  }
+}
+```
+
+Register error classes on the client to restore their prototypes after a
+server rejection. Unknown error codes become `SerializableError` instances.
+
+```ts
+import { SyncClient } from "@sveltebase/sync/client";
+import { TranslatedError } from "$lib/shared/errors";
+
+export const db = new SyncClient({
+  name: "app-sync",
+  url: "/api/sync",
+  errorClasses: [TranslatedError],
+  tables: {
+    todos: {
+      indexes: "id, completed, updatedAt",
+      channel: "todos",
+    },
+  },
+});
+```
+
+```ts
+try {
+  await db.todos.update(todoId, changes);
+} catch (error) {
+  if (error instanceof TranslatedError) {
+    toast(i18n(error.message));
+  }
+}
+```
+
 ## Sync Handlers
 
 Handlers run in the sync engine. Use `ctx.platform.env` for Cloudflare bindings, `ctx.auth` for verified auth data, and `ctx.identity` for ownership/scoped fanout.

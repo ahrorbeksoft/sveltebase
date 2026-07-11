@@ -1,6 +1,6 @@
 {
   "name": "@sveltebase/utils",
-  "version": "1.4.6",
+  "version": "1.6.2",
   "type": "module",
   "publishConfig": {
     "access": "public"

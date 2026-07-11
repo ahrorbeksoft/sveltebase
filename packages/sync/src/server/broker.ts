@@ -1,4 +1,5 @@
 import type { SyncHandler, SyncContext, SyncPlatform } from "./index.js";
+import { serializeSyncError } from "../errors.js";
 import { parseSyncMessage } from "../protocol.js";
 
 /**
@@ -52,6 +53,20 @@ export class SyncBroker {
    */
   constructor(handlers: SyncHandler[]) {
     this.setHandlers(handlers);
+  }
+
+  private sendReject(
+    conn: ISyncConnection,
+    id: string,
+    error: unknown,
+  ) {
+    conn.send(
+      JSON.stringify({
+        type: "reject",
+        id,
+        error: serializeSyncError(error),
+      }),
+    );
   }
 
   /**
@@ -221,12 +236,10 @@ export class SyncBroker {
         case "subscribe": {
           const handler = this.findHandler(msg.channel, ctx);
           if (!handler) {
-            conn.send(
-              JSON.stringify({
-                type: "reject",
-                id: "subscribe",
-                error: `No handler registered for channel: ${msg.channel}`,
-              }),
+            this.sendReject(
+              conn,
+              "subscribe",
+              new Error(`No handler registered for channel: ${msg.channel}`),
             );
             return;
           }
@@ -270,12 +283,10 @@ export class SyncBroker {
         case "mutate": {
           const handler = this.findHandler(msg.channel, ctx);
           if (!handler) {
-            conn.send(
-              JSON.stringify({
-                type: "reject",
-                id: msg.id,
-                error: `No handler for channel: ${msg.channel}`,
-              }),
+            this.sendReject(
+              conn,
+              msg.id,
+              new Error(`No handler for channel: ${msg.channel}`),
             );
             return;
           }
@@ -338,13 +349,7 @@ export class SyncBroker {
         err,
       );
       if (msg.type === "mutate") {
-        conn.send(
-          JSON.stringify({
-            type: "reject",
-            id: msg.id,
-            error: err.message || "Server error",
-          }),
-        );
+        this.sendReject(conn, msg.id, err);
       }
     }
   }

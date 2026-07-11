@@ -1,4 +1,9 @@
 import Dexie, { type Table } from "dexie";
+import {
+  createErrorCodec,
+  type ErrorCodec,
+  type SerializableErrorConstructor,
+} from "../errors.js";
 import { parseSyncMessage, type SyncMessage } from "../protocol.js";
 import { createDynamicSyncClient } from "./dynamic-client.svelte.js";
 import type {
@@ -8,6 +13,12 @@ import type {
 import { ConnectionStatus } from "./status.svelte.js";
 
 export { createLiveQuery } from "./live-query.svelte.js";
+export { SerializableError } from "../errors.js";
+export type {
+  SerializableErrorConstructor,
+  SyncErrorInput,
+  SyncErrorPayload,
+} from "../errors.js";
 export type { DynamicSyncClient, DynamicSyncClientOptions, MaybeGetter } from "./dynamic-client.svelte.js";
 export type { LiveQueryState } from "./live-query.svelte.js";
 
@@ -43,6 +54,8 @@ export type SyncClientOptions<
   url: string | (() => string | Promise<string>);
   /** Dexie tables that should be kept in sync with server channels. */
   tables: Record<keyof TSchema & string, TableConfig>;
+  /** Error classes to restore from rejected server mutations. */
+  errorClasses?: readonly SerializableErrorConstructor[];
 };
 
 type PendingMutation = {
@@ -67,6 +80,7 @@ class SyncClientClass<
   private wsUrl: string | (() => string | Promise<string>);
   private socket: WebSocket | undefined;
   private tableConfigs: Record<string, TableConfig>;
+  private errorCodec: ErrorCodec;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private pingInterval: ReturnType<typeof setInterval> | undefined;
   private closedByClient = false;
@@ -94,14 +108,11 @@ class SyncClientClass<
    * The constructor also decorates configured tables so normal Dexie writes
    * become optimistic sync mutations.
    */
-  constructor(options: {
-    name: string;
-    url: string | (() => string | Promise<string>);
-    tables: Record<keyof TSchema & string, TableConfig>;
-  }) {
+  constructor(options: SyncClientOptions<TSchema>) {
     super(options.name);
     this.wsUrl = options.url;
     this.tableConfigs = options.tables;
+    this.errorCodec = createErrorCodec(options.errorClasses);
 
     // Initialize Dexie database
     const schema: Record<string, string> = {};
@@ -731,7 +742,7 @@ class SyncClientClass<
         if (msg.id === "subscribe") {
           for (const pending of this.pendingSnapshots.values()) {
             for (const waiter of pending) {
-              waiter.reject(new Error(msg.error));
+              waiter.reject(this.errorCodec.deserialize(msg.error));
             }
           }
           this.pendingSnapshots.clear();
@@ -740,15 +751,10 @@ class SyncClientClass<
 
         const pending = this.pendingMutations.get(msg.id);
         if (pending) {
-          console.warn(`Mutation ${msg.id} rejected by server: ${msg.error}`);
+          console.warn(`Mutation ${msg.id} rejected by server`, msg.error);
           await pending.rollback();
-          
-          const errorObj = new Error(msg.error);
-          if ((msg as any).validationErrors) {
-            (errorObj as any).validationErrors = (msg as any).validationErrors;
-          }
-          
-          pending.reject(errorObj);
+
+          pending.reject(this.errorCodec.deserialize(msg.error));
           this.pendingMutations.delete(msg.id);
         }
         break;
@@ -939,11 +945,7 @@ export type SyncClient<TSchema extends Record<string, any> = Record<string, any>
  */
 export const SyncClient: new <
   TSchema extends Record<string, any> = Record<string, any>,
->(options: {
-  name: string;
-  url: string | (() => string | Promise<string>);
-  tables: Record<keyof TSchema & string, TableConfig>;
-}) => SyncClient<TSchema> = SyncClientClass as any;
+>(options: SyncClientOptions<TSchema>) => SyncClient<TSchema> = SyncClientClass as any;
 
 /**
  * Creates a sync client whose options are derived from reactive context.

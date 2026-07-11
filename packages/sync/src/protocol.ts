@@ -1,3 +1,5 @@
+import type { SyncErrorPayload } from "./errors.js";
+
 /**
  * Wire messages exchanged between the browser sync client and the sync broker.
  *
@@ -30,7 +32,7 @@ export type SyncMessage =
       viewVersion?: string | null;
     }
   | { type: "ack"; id: string; data?: any }
-  | { type: "reject"; id: string; error: string }
+  | { type: "reject"; id: string; error: SyncErrorPayload | string }
   | {
       type: "change";
       channel: string;
