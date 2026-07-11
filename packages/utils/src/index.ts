@@ -171,13 +171,34 @@ export function timestamps<T extends boolean>(
 import type { TryCatchReturn } from "./async.svelte.js";
 export type { TryCatchReturn } from "./async.svelte.js";
 
+/** A custom error toast returned from `TryCatchOptions.onError`. */
+export type TryCatchErrorToast =
+  | string
+  | {
+      message: string;
+      description?: string;
+    };
+
+/** Options for customizing `tryCatch` error handling. */
+export interface TryCatchOptions {
+  /**
+   * Maps a thrown error to a custom toast. Return nothing to use the default
+   * development or production error toast.
+   */
+  onError?: (error: Error) => TryCatchErrorToast | null | undefined | Promise<TryCatchErrorToast | null | undefined>;
+}
+
 /**
  * Executes a task and displays success or error toasts from its return value.
  *
  * In dev, thrown errors show the error name and message and are logged to the
- * console. In production, thrown errors show a generic message.
+ * console. In production, thrown errors show a generic message. Use
+ * `options.onError` to show a custom message for a specific error type.
  */
-export async function tryCatch(task: () => Promise<TryCatchReturn> | TryCatchReturn) {
+export async function tryCatch(
+  task: () => Promise<TryCatchReturn> | TryCatchReturn,
+  options: TryCatchOptions = {}
+) {
   try {
     const response = await task();
 
@@ -189,8 +210,18 @@ export async function tryCatch(task: () => Promise<TryCatchReturn> | TryCatchRet
   } catch (err) {
     if (DEV) {
       const error = err instanceof Error ? err : new Error(String(err));
-      await toastError(error.name, { description: error.message });
       console.error("[Dev Error]:", error);
+    }
+
+    const error = err instanceof Error ? err : new Error(String(err));
+    const customToast = await options.onError?.(error);
+
+    if (typeof customToast === "string") {
+      await toastError(customToast);
+    } else if (customToast) {
+      await toastError(customToast.message, { description: customToast.description });
+    } else if (DEV) {
+      await toastError(error.name, { description: error.message });
     } else {
       await toastError("Something went wrong");
     }

@@ -210,6 +210,37 @@ await tryCatch(async () => {
 });
 ```
 
+### Custom messages by error type
+
+Pass an `onError` handler to replace the default thrown-error toast for errors
+you recognize. Return nothing to preserve the default behavior.
+
+```ts
+class SessionExpiredError extends Error {}
+
+await tryCatch(
+  async () => {
+    const response = await fetch("/api/private");
+
+    if (response.status === 401) {
+      throw new SessionExpiredError();
+    }
+
+    return { success: "Loaded" };
+  },
+  {
+    onError(error) {
+      if (error instanceof SessionExpiredError) {
+        return {
+          message: "Your session has expired",
+          description: "Please sign in again to continue."
+        };
+      }
+    }
+  }
+);
+```
+
 ---
 
 ## `timestamps`
