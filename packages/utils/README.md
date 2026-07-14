@@ -1,31 +1,21 @@
-# `@sveltebase/utils`
+# @sveltebase/utils
 
-Utility helpers for Svelte 5 apps, with small primitives for cookies, async actions, timestamps, waiting, and toast-friendly error handling.
+Small runtime helpers for Svelte 5 applications. The package contains browser
+cookie utilities, reactive async action state, toast-aware error handling,
+timestamps, delays, ids, and simple plural formatting.
 
 ## Install
-
-With Bun:
 
 ```bash
 bun add @sveltebase/utils
 ```
 
-If you want toast notifications from `createAsync` or `tryCatch`, also install `svelte-sonner`:
+`svelte` is a peer dependency. Install `svelte-sonner` when you want the async
+helpers to display toast notifications:
 
 ```bash
 bun add svelte-sonner
 ```
-
-> `svelte` is a peer dependency and should already exist in your app.
-
-- `Cookies` — browser cookie helpers
-- `createAsync` — wraps async functions with loading and error state
-- `tryCatch` — run a task with built-in toast/error handling
-- `timestamps` — generate `createdAt` / `updatedAt` values
-- `wait` — simple promise-based delay helper
-- `createId` — generate random UUIDs with fallback support
-- `pluralize` — format counts using custom zero, one, and other rules
-- `TryCatchReturn` — shared return type for async helpers
 
 ## Exports
 
@@ -38,326 +28,78 @@ import {
   timestamps,
   tryCatch,
   wait,
+  type CookieOptions,
+  type TryCatchErrorToast,
+  type TryCatchOptions,
   type TryCatchReturn
 } from "@sveltebase/utils";
 ```
 
----
-
 ## `Cookies`
 
-A small browser-only cookie helper with `set`, `get`, and `remove`.
-
-### Example
+`Cookies` is a browser-only helper around `document.cookie`.
 
 ```ts
-import { Cookies } from "@sveltebase/utils";
-
 Cookies.set("theme", "dark", {
+  expires: 30,
   path: "/",
-  sameSite: "Lax",
-  expires: 30
+  sameSite: "Lax"
 });
 
-const theme = Cookies.get("theme");
-
+const theme = Cookies.get("theme"); // string | null
 Cookies.remove("theme");
 ```
 
-### API
-
-#### `Cookies.set(name, value, options?)`
-
-Sets a cookie.
-
-Options:
-
-- `expires?: number` — number of days
-- `path?: string`
-- `domain?: string`
-- `secure?: boolean`
-- `sameSite?: "Lax" | "Strict" | "None"`
-- `partitioned?: boolean`
-
-#### `Cookies.get(name)`
-
-Returns the cookie value as `string | null`.
-
-#### `Cookies.remove(name, options?)`
-
-Removes a cookie by setting an expired value.
-
----
-
-## `createAsync`
-
-Wraps an async function and gives you:
-
-- loading state
-- last thrown error
-- optional success/error toasts
-
-Your async function can return:
-
-- `{ success: string }`
-- `{ error: string }`
-- `null`
-- `void`
-
-### Example
+### `CookieOptions`
 
 ```ts
-import { createAsync } from "@sveltebase/utils";
-
-const saveProfile = createAsync(async (name: string) => {
-  const response = await fetch("/api/profile", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ name })
-  });
-
-  if (!response.ok) {
-    return { error: "Failed to save profile" };
-  }
-
-  return { success: "Profile saved" };
-});
-
-await saveProfile.run("Ahror");
-
-console.log(saveProfile.isLoading());
-console.log(saveProfile.error);
-```
-
-### Keyed loading states
-
-Use `runWithKey` when you want separate loading states for multiple actions.
-
-```ts
-import { createAsync } from "@sveltebase/utils";
-
-const removeItem = createAsync(async (id: string) => {
-  const response = await fetch(`/api/items/${id}`, {
-    method: "DELETE"
-  });
-
-  if (!response.ok) {
-    return { error: "Delete failed" };
-  }
-
-  return { success: "Item removed" };
-});
-
-await removeItem.runWithKey("item-42", "42");
-
-const isDeleting = removeItem.isLoading("item-42");
-```
-
-### API
-
-```ts
-const task = createAsync(asyncFn);
-
-task.run(...args);
-task.runWithKey(key, ...args);
-task.isLoading(key?);
-task.error;
-```
-
-### Notes
-
-- Toasts are shown with `svelte-sonner` when available in the browser.
-- In development, thrown errors are also logged to the console.
-- On the server, toast behavior is skipped safely.
-
----
-
-## `tryCatch`
-
-Runs a task and handles success/error messages in a consistent way.
-
-### Example
-
-```ts
-import { tryCatch } from "@sveltebase/utils";
-
-await tryCatch(async () => {
-  const response = await fetch("/api/invite", { method: "POST" });
-
-  if (!response.ok) {
-    return { error: "Could not send invite" };
-  }
-
-  return { success: "Invite sent" };
-});
-```
-
-### Throwing errors
-
-```ts
-import { tryCatch } from "@sveltebase/utils";
-
-await tryCatch(async () => {
-  const response = await fetch("/api/private");
-
-  if (response.status === 401) {
-    throw new Error("Unauthorized");
-  }
-
-  return { success: "Loaded" };
-});
-```
-
-### Custom messages by error type
-
-Pass an `onError` handler to replace the default thrown-error toast for errors
-you recognize. Return nothing to preserve the default behavior.
-
-```ts
-class SessionExpiredError extends Error {}
-
-await tryCatch(
-  async () => {
-    const response = await fetch("/api/private");
-
-    if (response.status === 401) {
-      throw new SessionExpiredError();
-    }
-
-    return { success: "Loaded" };
-  },
-  {
-    onError(error) {
-      if (error instanceof SessionExpiredError) {
-        return {
-          message: "Your session has expired",
-          description: "Please sign in again to continue."
-        };
-      }
-    }
-  }
-);
-```
-
----
-
-## `timestamps`
-
-Creates timestamp objects using `Date.now()`.
-
-### Example
-
-```ts
-import { timestamps } from "@sveltebase/utils";
-
-const created = timestamps(false);
-// { createdAt: 1712345678901, updatedAt: 1712345678901 }
-
-const updated = timestamps(true);
-// { updatedAt: 1712345678901 }
-```
-
-### Common usage
-
-```ts
-import { timestamps } from "@sveltebase/utils";
-
-const post = {
-  id: crypto.randomUUID(),
-  title: "Hello",
-  ...timestamps(false)
-};
-```
-
----
-
-## `wait`
-
-Returns a promise that resolves after the given number of milliseconds.
-
-### Example
-
-```ts
-import { wait } from "@sveltebase/utils";
-
-await wait(500);
-console.log("Done");
-```
-
-Useful for:
-
-- delaying UI transitions
-- retry flows
-- testing async behavior
-
----
-
-## `createId`
-
-Generates a version 4 UUID compliant string. It uses `globalThis.crypto.randomUUID()` when available in modern environments, falls back to `globalThis.crypto.getRandomValues()` if available (e.g. in most serverless/edge environments), and has a pure JS `Math.random` fallback for absolute compatibility.
-
-### Example
-
-```ts
-import { createId } from "@sveltebase/utils";
-
-const id = createId(); // "e3b0c442-98fc-1c14-9afb-f4c8996fb924"
-```
-
-Useful for:
-
-- generating unique client-side element IDs
-- local database key creation (e.g. Dexie/IndexedDB)
-- generating temp keys for list items
-
----
-
-## `pluralize`
-
-A helper for formatting counts into readable strings using custom rules for zero, one, and multiple items.
-
-### Example
-
-```ts
-import { pluralize } from "@sveltebase/utils";
-
-// 1. Basic usage
-pluralize(0, { other: "items" }); // "0 items"
-pluralize(1, { one: "item", other: "items" }); // "1 item"
-pluralize(5, { one: "item", other: "items" }); // "5 items"
-
-// 2. Custom zero text
-pluralize(0, { zero: "No items", one: "item", other: "items" }); // "No items"
-
-// 3. Callback formatting for complex pluralizations
-pluralize(3, {
-  other: (count) => `${count} matches found`
-}); // "3 matches found"
-```
-
-Useful for:
-
-- localized text formatting
-- user-facing list item counts (e.g., "1 item", "No items", "4 items")
-- dynamic messaging depending on numeric results
-
----
-
-## `TryCatchReturn`
-
-A shared type for functions used with `createAsync` and `tryCatch`.
-
-```ts
-import type { TryCatchReturn } from "@sveltebase/utils";
-
-async function submitForm(): Promise<TryCatchReturn> {
-  return { success: "Submitted" };
+interface CookieOptions {
+  expires?: number;
+  path?: string;
+  domain?: string;
+  secure?: boolean;
+  sameSite?: "Lax" | "Strict" | "None";
+  partitioned?: boolean;
 }
 ```
 
-Possible values:
+`expires` is a number of days from now. It is written as a `max-age` value.
+When omitted, `set` uses `path: "/"`, `sameSite: "Lax"`, and sets `secure`
+automatically when the current page uses HTTPS. `sameSite: "None"` always
+forces the `secure` attribute. Cookie names and values are URI-encoded.
+
+### `Cookies.set(name, value, options?)`
+
+Writes a cookie and returns `void`.
+
+```ts
+Cookies.set("session_hint", "account@example.com", {
+  path: "/login",
+  domain: "example.com",
+  expires: 7,
+  secure: true,
+  sameSite: "Strict",
+  partitioned: true
+});
+```
+
+On the server, this method is a no-op.
+
+### `Cookies.get(name)`
+
+Returns the decoded cookie value, or `null` when it does not exist. It also
+returns `null` during SSR.
+
+### `Cookies.remove(name, options?)`
+
+Deletes a cookie by writing an empty value with a negative expiration. The
+optional object accepts only `path` and `domain`; use the same path and domain
+that were used when the cookie was created.
+
+## `createAsync`
+
+Wraps an async function with reactive loading state and an error value. The
+wrapped function may return `TryCatchReturn` values:
 
 ```ts
 type TryCatchReturn =
@@ -367,49 +109,188 @@ type TryCatchReturn =
   | void;
 ```
 
----
+Returning `{ success }` or `{ error }` displays the corresponding toast when
+`svelte-sonner` is available in the browser. `null` and `void` finish silently.
 
-## Svelte example
-
-```svelte
-<script lang="ts">
-  import { createAsync } from "@sveltebase/utils";
-
-  let name = $state("");
-
-  const save = createAsync(async (value: string) => {
-    const response = await fetch("/api/profile", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ name: value })
-    });
-
-    if (!response.ok) {
-      return { error: "Could not save profile" };
-    }
-
-    return { success: "Profile saved" };
+```ts
+const save = createAsync(async (name: string) => {
+  const response = await fetch("/api/profile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name })
   });
-</script>
 
-<input bind:value={name} placeholder="Your name" />
+  return response.ok
+    ? { success: "Profile saved" }
+    : { error: "Could not save profile" };
+});
 
-<button onclick={() => save.run(name)} disabled={save.isLoading()}>
-  {save.isLoading() ? "Saving..." : "Save"}
-</button>
-
-{#if save.error}
-  <p>{save.error.message}</p>
-{/if}
+await save.run("Ahror");
+save.isLoading(); // global action state
+save.error; // Error | null
 ```
 
-## Notes
+The returned object has this API:
 
-- `Cookies` works only in the browser.
-- `createAsync` and `tryCatch` integrate with `svelte-sonner` if it is installed.
-- The package is designed for Svelte 5 projects.
+```ts
+const action = createAsync(asyncFn);
+
+action.run(...args);
+action.runWithKey(key, ...args);
+action.isLoading(key?);
+action.error;
+```
+
+- `run(...args)` uses one global loading key.
+- `runWithKey(key, ...args)` tracks an independent loading state for each key.
+- `isLoading()` reads the global key; `isLoading("row-1")` reads a keyed state.
+- An empty `runWithKey` key uses the global key.
+- `error` contains the last thrown `Error`, or `null` until a task throws.
+- A returned `{ error }` does not set `error` and does not reject the promise.
+- A thrown error is stored, shown as a toast, and rethrown to the caller.
+- Loading is reset to `false` when the task resolves or rejects.
+
+Thrown errors show the error name and message in development and a generic
+`Something went wrong` message in production. Toast loading is lazy and is
+skipped safely during SSR.
+
+## `tryCatch`
+
+Runs one task and handles `TryCatchReturn` messages with the same toast rules as
+`createAsync`.
+
+```ts
+await tryCatch(async () => {
+  const response = await fetch("/api/invite", { method: "POST" });
+  return response.ok
+    ? { success: "Invite sent" }
+    : { error: "Could not send invite" };
+});
+```
+
+`tryCatch` catches thrown errors and does not rethrow them. Its signature is:
+
+```ts
+tryCatch(
+  task: () => Promise<TryCatchReturn> | TryCatchReturn,
+  options?: TryCatchOptions
+): Promise<void>;
+```
+
+### `TryCatchOptions`
+
+```ts
+interface TryCatchOptions {
+  onError?: (
+    error: Error
+  ) => TryCatchErrorToast | null | undefined | Promise<TryCatchErrorToast | null | undefined>;
+}
+
+type TryCatchErrorToast =
+  | string
+  | { message: string; description?: string };
+```
+
+`onError` runs only for thrown errors. Return a string or object for a custom
+error toast. Return `undefined` or `null` to use the default development or
+production message.
+
+```ts
+class SessionExpiredError extends Error {}
+
+await tryCatch(
+  () => loadPrivateData(),
+  {
+    onError(error) {
+      if (error instanceof SessionExpiredError) {
+        return {
+          message: "Your session has expired",
+          description: "Sign in again to continue."
+        };
+      }
+    }
+  }
+);
+```
+
+## `timestamps(updateOnly)`
+
+Returns millisecond timestamps from one `Date.now()` call:
+
+```ts
+const created = timestamps(false);
+// { createdAt: number, updatedAt: number }
+
+const updated = timestamps(true);
+// { updatedAt: number }
+```
+
+The two fields returned for `timestamps(false)` are always equal.
+
+## `wait(ms)`
+
+Returns a promise that resolves after `ms` milliseconds.
+
+```ts
+await wait(250);
+```
+
+## `createId()`
+
+Returns a UUID-like version 4 id. It uses `crypto.randomUUID()` first, then
+`crypto.getRandomValues()`, and finally a `Math.random()` fallback when no Web
+Crypto API is available.
+
+```ts
+const id = createId();
+```
+
+The fallback is useful for compatibility, but use a cryptographically secure
+runtime when ids are security-sensitive.
+
+## `pluralize(count, options)`
+
+Formats a count using explicit zero, one, and other rules.
+
+```ts
+pluralize(0, { zero: "No items", one: "item", other: "items" });
+// "No items"
+
+pluralize(1, { one: "item", other: "items" });
+// "1 item"
+
+pluralize(4, { one: "item", other: "items" });
+// "4 items"
+
+pluralize(3, {
+  other: (value) => `${value} matches found`
+});
+// "3 matches found"
+```
+
+```ts
+pluralize(
+  count: number,
+  options: {
+    zero?: string;
+    one?: string;
+    other: string | ((count: number) => string);
+  }
+): string;
+```
+
+`zero` is used only for `count === 0`. `one` is used only for `count === 1`
+and is prefixed with `1 `. Every other count uses `other`, either as a noun or
+as a callback result.
+
+## SSR and toast behavior
+
+- `Cookies.set` and `Cookies.remove` do nothing during SSR.
+- `Cookies.get` returns `null` during SSR.
+- `createAsync` and `tryCatch` still run their tasks during SSR, but toast
+  notifications are skipped because they require a browser.
+- `svelte-sonner` is imported lazily, so importing this package does not require
+  a mounted `<Toaster />` or a browser at module-evaluation time.
 
 ## License
 

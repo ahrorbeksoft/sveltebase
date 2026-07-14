@@ -1,35 +1,58 @@
-# `@sveltebase/i18n`
+# @sveltebase/i18n
 
-Simple i18n utilities for Svelte 5 apps.
-
-`@sveltebase/i18n` gives you a small API for:
-
-- defining your supported languages
-- storing the active locale
-- reading translations in components
-- formatting dates and times for the current locale
-
-It is designed to stay lightweight and work nicely with Svelte 5 runes.
+Small, typed internationalization helpers for Svelte 5. The package stores the
+active locale, restores it from cookies, translates messages through
+use-intl, and provides date, time, month, birthday, and relative-time
+formatting.
 
 ## Install
 
-Install the package with Bun:
-
-```bash
+~~~bash
 bun add @sveltebase/i18n
-```
+~~~
 
-## What it exports
+The package depends on @sveltebase/state and use-intl. svelte is a peer
+dependency.
 
-- `createI18n`
-- `getTranslations`
-- `getFormat`
+## Exports
+
+Runtime exports:
+
+~~~ts
+import {
+  createI18n,
+  getFormat,
+  getTranslations
+} from "@sveltebase/i18n";
+~~~
+
+Public types:
+
+~~~ts
+import type {
+  CreateI18nReturn,
+  CurrentLanguage,
+  Format,
+  FormatOptions,
+  I18nInstance,
+  LanguageDefinition,
+  MaybeGetter,
+  MessageKey,
+  MessageValue,
+  Messages,
+  RegisteredMessages,
+  Translate,
+  TranslationValues
+} from "@sveltebase/i18n";
+~~~
 
 ## Quick start
 
-Create a shared i18n module:
+Define the languages in one shared module. Keep the array as const so locale
+codes and current-language types are inferred as literals.
 
-```ts
+~~~ts
+// src/lib/i18n.ts
 import { createI18n } from "@sveltebase/i18n";
 
 export const languages = [
@@ -39,50 +62,42 @@ export const languages = [
     messages: {
       "app-title": "My app",
       "welcome": "Welcome, {name}",
-
       "just-now": "Just now",
-
       "minutes-ago": "{minutes} minutes ago",
       "hours-ago": "{hours} hours ago",
       "days-ago": "{days} days ago",
       "weeks-ago": "{weeks} weeks ago",
       "months-ago": "{months} months ago",
       "years-ago": "{years} years ago",
-
       "in-minutes": "in {minutes} minutes",
       "in-hours": "in {hours} hours",
       "in-days": "in {days} days",
       "in-weeks": "in {weeks} weeks",
       "in-months": "in {months} months",
       "in-years": "in {years} years",
-
       "today-at": "Today at {time}",
       "yesterday-at": "Yesterday at {time}"
     }
   },
   {
     code: "uz",
-    label: "O‘zbekcha",
+    label: "O'zbek",
     messages: {
       "app-title": "Mening ilovam",
       "welcome": "Xush kelibsiz, {name}",
-
       "just-now": "Hozirgina",
-
       "minutes-ago": "{minutes} daqiqa oldin",
       "hours-ago": "{hours} soat oldin",
       "days-ago": "{days} kun oldin",
       "weeks-ago": "{weeks} hafta oldin",
       "months-ago": "{months} oy oldin",
       "years-ago": "{years} yil oldin",
-
       "in-minutes": "{minutes} daqiqadan keyin",
       "in-hours": "{hours} soatdan keyin",
       "in-days": "{days} kundan keyin",
       "in-weeks": "{weeks} haftadan keyin",
       "in-months": "{months} oydan keyin",
       "in-years": "{years} yildan keyin",
-
       "today-at": "Bugun {time} da",
       "yesterday-at": "Kecha {time} da"
     }
@@ -90,363 +105,364 @@ export const languages = [
 ] as const;
 
 export const i18n = createI18n(languages, "locale");
-```
+~~~
 
-Then initialize it before using translations or formatters.
+The first language is the fallback locale. localeStorageKey is optional and
+defaults to locale, the cookie key used to persist the selected locale.
 
-In SvelteKit, the recommended quick start is to load all cookies in `+layout.server.ts`, pass them to `+layout.svelte`, and initialize i18n there. That lets the package restore the saved locale before your UI reads translations, so the correct language loads right away instead of first rendering with the fallback locale and switching later.
+## SvelteKit initialization
 
-In `+layout.server.ts`:
+Call i18n.init in a root component before descendants call getTranslations or
+getFormat. In SvelteKit, pass request cookies from a server layout so SSR
+starts with the saved locale:
 
-```ts
+src/routes/+layout.server.ts
+
+~~~ts
 export function load({ cookies }) {
-  return {
-    cookies: cookies.getAll()
-  };
+  return { cookies: cookies.getAll() };
 }
-```
+~~~
 
-Then in `+layout.svelte`:
+src/routes/+layout.svelte
 
-```svelte
+~~~svelte
 <script lang="ts">
-  import { i18n } from "./i18n";
+  import { i18n } from "$lib/i18n";
 
   let { data } = $props();
-
   i18n.init(() => data.cookies);
 </script>
-```
 
-## Basic usage in a Svelte component
+<slot />
+~~~
 
-```svelte
+The getter must return objects shaped like:
+
+~~~ts
+type Cookie = {
+  name: string;
+  value: string;
+};
+~~~
+
+Without server cookies, initialize normally with i18n.init(). Initialization
+restores the persisted locale and installs the instance in Svelte context.
+Calling the context helpers before initialization throws.
+
+## Translation usage
+
+~~~svelte
 <script lang="ts">
-  import { getTranslations, getFormat } from "@sveltebase/i18n";
+  import { getTranslations } from "@sveltebase/i18n";
   import { i18n } from "$lib/i18n";
 
   const t = getTranslations();
-  const format = getFormat();
 
-  function switchLocale(locale: string) {
+  function switchLocale(locale: "en" | "uz") {
     i18n.locale = locale;
   }
 </script>
 
 <h1>{t("app-title")}</h1>
 <p>{t("welcome", { name: "Jane" })}</p>
-<p>{format(new Date(), { preset: "full", withTime: true })}</p>
 
 <button onclick={() => switchLocale("en")}>English</button>
-<button onclick={() => switchLocale("uz")}>O‘zbekcha</button>
-```
+<button onclick={() => switchLocale("uz")}>O'zbek</button>
+~~~
 
-## Creating your language list
+### getTranslations()
 
-Each language should have:
+Returns a translator bound to the initialized i18n instance. The translator
+reads the current locale whenever it is called.
 
-- `code`: locale code
-- `label`: readable language name
-- `messages`: translation dictionary
+~~~ts
+type Translate = <TKey extends MessageKey>(
+  key: TKey,
+  values?: TranslationValues
+) => string;
 
-Example:
+type TranslationValues = Record<string, string | number | Date>;
+~~~
 
-```ts
-const languages = [
-  {
-    code: "en",
-    label: "English",
-    messages: {
-      "app-title": "My app",
-      "nav.home": "Home",
-      "nav.settings": "Settings"
-    }
-  },
-  {
-    code: "uz",
-    label: "O‘zbekcha",
-    messages: {
-      "app-title": "Mening ilovam",
-      "nav.home": "Bosh sahifa",
-      "nav.settings": "Sozlamalar"
-    }
+Values use the ICU message behavior provided by use-intl. A message such as
+"Welcome, {name}" can receive { name: "Jane" }.
+
+MessageKey is a dot-separated key union when message types are registered with
+use-intl. Without message augmentation it falls back to string.
+
+### Optional message type registration
+
+When the app wants compile-time message-key checking, register the message
+catalog with use-intl/core:
+
+~~~ts
+// src/app.d.ts
+import type { languages } from "$lib/i18n";
+
+type AppMessages = (typeof languages)[number]["messages"];
+
+declare module "use-intl/core" {
+  interface AppConfig {
+    Messages: AppMessages;
   }
-] as const;
-```
-
-You can also import messages from JSON or split them across files if that fits your app better.
-
-## Initialization
-
-Call `init()` before using `getTranslations()` or `getFormat()`.
-
-### Without cookies
-
-If you do not have cookies available yet, you can initialize normally:
-
-```ts
-import { i18n } from "$lib/i18n";
-
-i18n.init();
-```
-
-### With cookies in SvelteKit for faster first render
-
-In SvelteKit, the recommended approach is to load all cookies in `+layout.server.ts`, return them from `load`, and then pass that data to `i18n.init(() => data.cookies)` in `+layout.svelte`.
-
-This lets `@sveltebase/i18n` restore the saved locale before your UI reads translations, so the correct language is available immediately and you avoid rendering the fallback language first.
-
-In `+layout.server.ts`:
-
-```ts
-export function load({ cookies }) {
-  return {
-    cookies: cookies.getAll()
-  };
 }
-```
+~~~
 
-Then in `+layout.svelte`:
+Nested message objects become dot-separated keys such as
+settings.account.title.
 
-```svelte
-<script lang="ts">
-  import { i18n } from "$lib/i18n";
+## createI18n(languages, localeStorageKey?)
 
-  let { data } = $props();
+Creates an I18nInstance.
 
-  i18n.init(() => data.cookies);
-</script>
+~~~ts
+function createI18n<
+  const TLanguages extends readonly LanguageDefinition[]
+>(
+  languages: TLanguages,
+  localeStorageKey?: string
+): I18nInstance<TLanguages>;
+~~~
 
-<slot />
-```
+### Language definition
 
-The function passed to `i18n.init(...)` should return an array of cookie objects in this shape:
-
-```ts
-type Cookie = {
-  name: string;
-  value: string;
+~~~ts
+type LanguageDefinition<
+  TLocale extends string = string,
+  TMessages extends Messages = Messages
+> = {
+  code: TLocale;
+  label: string;
+  messages: TMessages;
 };
-```
 
-## API
+type MessageValue = string | { [key: string]: MessageValue };
 
-## `createI18n(languages, localeStorageKey?)`
+type Messages = {
+  [key: string]: MessageValue;
+};
+~~~
 
-Creates an i18n instance.
+- code is the locale passed to Intl and used for persistence.
+- label is the application-facing language name.
+- messages is the use-intl message catalog.
+- Every language should use the same message keys if the UI can switch between
+  them.
 
-### Parameters
+### localeStorageKey
 
-- `languages`: an array of language definitions
-- `localeStorageKey?`: the key used to persist the locale, defaults to `"locale"`
+Defaults to locale. It is the cookie name used by the underlying
+PersistentState. A different key is useful when multiple independent i18n
+instances exist.
 
-### Returns
+### Returned I18nInstance
 
-An object with:
+~~~ts
+interface I18nInstance<TLanguages extends readonly LanguageDefinition[]> {
+  readonly languages: TLanguages;
+  locale: LocaleCode<TLanguages>;
+  readonly currentLanguage: CurrentLanguage<TLanguages>;
+  init(cookies?: MaybeGetter<Cookie[] | undefined>): void;
+}
+~~~
 
-- `languages`
-- `locale`
-- `currentLanguage`
-- `init(cookies?)`
+- languages returns the original language array.
+- locale gets or sets the active locale. Assignment persists the locale in a
+  cookie and is validated against configured language codes.
+- currentLanguage returns the selected language definition. Missing or invalid
+  persisted values fall back to the first language.
+- init optionally reads cookies and installs the instance into Svelte context.
 
-### Example
+An empty language array throws when createI18n is called.
 
-```ts
-import { createI18n } from "@sveltebase/i18n";
+## getFormat()
 
-const languages = [
-  {
-    code: "en",
-    label: "English",
-    messages: {
-      hello: "Hello"
-    }
-  },
-  {
-    code: "uz",
-    label: "O‘zbekcha",
-    messages: {
-      hello: "Salom"
-    }
-  }
-] as const;
+Returns a formatter bound to the current i18n context:
 
-const i18n = createI18n(languages, "locale");
-```
+~~~ts
+type Format = (
+  value?: Date | number | string,
+  options?: FormatOptions
+) => string | undefined;
+~~~
 
-## `getTranslations()`
+value may be a Date, a millisecond timestamp, or a date string accepted by the
+JavaScript Date constructor. The high-level formatter uses the Asia/Tashkent
+time zone for its Intl-based output.
 
-Returns a translation function for the current locale.
+A falsy value such as undefined, an empty string, or 0 returns undefined.
 
-### Example
+## Formatting options
 
-```ts
-import { getTranslations } from "@sveltebase/i18n";
+~~~ts
+type FormatOptions = {
+  preset?:
+    | "default"
+    | "custom"
+    | "birthday"
+    | "month"
+    | "timestring"
+    | "full"
+    | "relative";
+  withTime?: boolean;
+};
+~~~
 
-const t = getTranslations();
+### default
 
-t("hello");
-t("welcome", { name: "Jane" });
-```
+The default preset uses a short date style:
 
-## `getFormat()`
+- dates in the current year omit the year;
+- older dates include the year;
+- withTime: true appends the localized hour and minute.
 
-Returns a formatter function for locale-aware display.
+~~~ts
+format(new Date());
+format(new Date(), { withTime: true });
+~~~
 
-### Example
+### custom
 
-```ts
-import { getFormat } from "@sveltebase/i18n";
+Creates a timeline-style label for past dates:
 
-const format = getFormat();
+- less than one minute: just-now;
+- less than one hour: minutes-ago;
+- today: today-at;
+- yesterday: yesterday-at;
+- another date in the current week: weekday and time;
+- another date in the current year: month and day;
+- older dates: year, month, and day.
 
-format(new Date(), { preset: "full" });
-format(new Date(), { preset: "custom", withTime: true });
-format(Date.now() - 1000 * 60 * 5, { preset: "relative" });
-format("13:45:00", { preset: "timestring" });
-```
+The relative labels use the current locale's messages. Uzbek output uses the
+package's Uzbek month and weekday names.
 
-## Locale switching
+~~~ts
+format(date, { preset: "custom" });
+format(date, { preset: "custom", withTime: true });
+~~~
 
-You can switch the active locale by assigning to `i18n.locale`:
+### relative
 
-```ts
-i18n.locale = "en";
-```
+Always returns a relative phrase. It compares the input with now using whole
+minute, hour, day, week, month, and year thresholds:
 
-You can also read the current language object:
+- under one minute: just-now;
+- under one hour: minutes;
+- under one day: hours;
+- under seven days: days;
+- under thirty days: weeks;
+- under 365 days: months;
+- otherwise: years.
 
-```ts
-console.log(i18n.currentLanguage.label);
-```
+Future values use the in-* message keys. Past values use the *-ago keys.
 
-## Formatting presets
+~~~ts
+format(Date.now() - 5 * 60 * 1000, { preset: "relative" });
+format(Date.now() + 2 * 60 * 60 * 1000, { preset: "relative" });
+~~~
 
-`getFormat()` supports these presets:
+### birthday
 
-- `default`
-- `custom`
-- `relative`
-- `birthday`
-- `month`
-- `timestring`
-- `full`
+Formats a complete date with year, month, and day. It does not include a time.
 
-### Preset notes
+~~~ts
+format(birthday, { preset: "birthday" });
+~~~
 
-- `relative` always returns relative text for both past and future values. It does not fall back to an absolute date.
-- `custom` can still mix relative labels such as `just-now` or `today-at` with locale-aware absolute dates for older values.
-- `full` returns a full locale-aware date and optionally time.
-- `timestring` is for time-only string values such as `"08:30:00"`.
+### month
 
-### Example
+Formats only the month for dates in the current year. Dates in another year
+include both month and year.
 
-```ts
-const format = getFormat();
+~~~ts
+format(date, { preset: "month" });
+~~~
 
-format(new Date(), { preset: "month" });
-format(new Date(), { preset: "birthday" });
-format(new Date(), { preset: "full", withTime: true });
-format(Date.now() - 1000 * 60 * 5, { preset: "relative" });
+### timestring
+
+Accepts a time-only string such as "08:30:00" and formats its hour and minute
+using the current locale.
+
+~~~ts
 format("08:30:00", { preset: "timestring" });
-```
+~~~
 
-## Required locale strings for relative formatting
+### full
 
-If you use `preset: "relative"`, make sure every locale provides these message keys:
+Formats a complete localized date. Add withTime: true for the hour and minute.
 
-- `just-now`
-- `minutes-ago`
-- `hours-ago`
-- `days-ago`
-- `weeks-ago`
-- `months-ago`
-- `years-ago`
-- `in-minutes`
-- `in-hours`
-- `in-days`
-- `in-weeks`
-- `in-months`
-- `in-years`
+~~~ts
+format(date, { preset: "full" });
+format(date, { preset: "full", withTime: true });
+~~~
+
+## Required messages
+
+For preset relative, every language must provide these keys:
+
+~~~text
+just-now
+minutes-ago
+hours-ago
+days-ago
+weeks-ago
+months-ago
+years-ago
+in-minutes
+in-hours
+in-days
+in-weeks
+in-months
+in-years
+~~~
+
+The corresponding values receive minutes, hours, days, weeks, months, or years
+as appropriate. For preset custom, provide today-at and yesterday-at as well.
 
 Example:
 
-```ts
-const languages = [
-  {
-    code: "en",
-    label: "English",
-    messages: {
-      "just-now": "Just now",
-      "minutes-ago": "{minutes} minutes ago",
-      "hours-ago": "{hours} hours ago",
-      "days-ago": "{days} days ago",
-      "weeks-ago": "{weeks} weeks ago",
-      "months-ago": "{months} months ago",
-      "years-ago": "{years} years ago",
-      "in-minutes": "in {minutes} minutes",
-      "in-hours": "in {hours} hours",
-      "in-days": "in {days} days",
-      "in-weeks": "in {weeks} weeks",
-      "in-months": "in {months} months",
-      "in-years": "in {years} years"
-    }
-  },
-  {
-    code: "uz",
-    label: "O‘zbekcha",
-    messages: {
-      "just-now": "Hozirgina",
-      "minutes-ago": "{minutes} daqiqa oldin",
-      "hours-ago": "{hours} soat oldin",
-      "days-ago": "{days} kun oldin",
-      "weeks-ago": "{weeks} hafta oldin",
-      "months-ago": "{months} oy oldin",
-      "years-ago": "{years} yil oldin",
-      "in-minutes": "{minutes} daqiqadan keyin",
-      "in-hours": "{hours} soatdan keyin",
-      "in-days": "{days} kundan keyin",
-      "in-weeks": "{weeks} haftadan keyin",
-      "in-months": "{months} oydan keyin",
-      "in-years": "{years} yildan keyin"
-    }
-  }
-] as const;
-```
+~~~ts
+const messages = {
+  "just-now": "Just now",
+  "minutes-ago": "{minutes} minutes ago",
+  "hours-ago": "{hours} hours ago",
+  "days-ago": "{days} days ago",
+  "weeks-ago": "{weeks} weeks ago",
+  "months-ago": "{months} months ago",
+  "years-ago": "{years} years ago",
+  "in-minutes": "in {minutes} minutes",
+  "in-hours": "in {hours} hours",
+  "in-days": "in {days} days",
+  "in-weeks": "in {weeks} weeks",
+  "in-months": "in {months} months",
+  "in-years": "in {years} years",
+  "today-at": "Today at {time}",
+  "yesterday-at": "Yesterday at {time}"
+};
+~~~
 
-## Type safety
+## Type aliases
 
-When your language array is declared with `as const`, locale codes are inferred automatically.
+- LocaleCode<TLanguages> is the union of configured language codes.
+- CurrentLanguage<TLanguages> is the union of configured language objects.
+- RegisteredMessages is the message type found in use-intl/core app
+  configuration.
+- MessageKey is the nested dot-separated message-key union or string.
+- Translate is the function type returned by getTranslations.
+- Format is the function type returned by getFormat.
+- CreateI18nReturn<TLanguages> is an alias for I18nInstance<TLanguages>.
+- MaybeGetter<T> is re-exported from @sveltebase/state.
 
-```ts
-const languages = [
-  {
-    code: "en",
-    label: "English",
-    messages: { hello: "Hello" }
-  },
-  {
-    code: "uz",
-    label: "O‘zbekcha",
-    messages: { hello: "Salom" }
-  }
-] as const;
-```
+## Runtime notes
 
-That improves typing for values like:
-
-- `i18n.locale`
-- `i18n.currentLanguage`
-- language code parameters in your own functions
-
-## Notes
-
-- Call `init()` before using `getTranslations()` or `getFormat()`.
-- Passing cookies into `init(cookies)` during the initial render helps the correct locale load faster and avoids rendering the fallback language first.
-- The first language in the array is used as the fallback locale.
-- Locale state is persisted using `@sveltebase/state`.
-- Date formatting includes locale-specific behavior for Uzbek.
-- This package is intended for Svelte 5 apps.
+- Initialize before calling getTranslations or getFormat.
+- The first configured language is always the fallback.
+- Locale changes are persisted through @sveltebase/state.
+- Cookie initialization avoids a fallback-language flash during SSR and
+  hydration.
+- Message translation and Intl formatting are delegated to use-intl.
+- The high-level API is designed for Svelte 5 context and runes.
 
 ## License
 
