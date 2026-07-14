@@ -110,3 +110,58 @@ export const auth = createAuth<User>({
   auth.setClient(sync);
 </script>
 ```
+
+## Auth Errors
+
+Auth route failures use the same `code` and `message` error contract as sync.
+Throw a `SerializableError` from `login` or the Google `getUser` callback and
+register the error class on the client to restore its prototype.
+
+```ts
+// src/lib/shared/errors.ts
+import { SerializableError } from "@sveltebase/auth";
+
+export class TranslatedError extends SerializableError {
+  static readonly code = "TranslatedError";
+
+  constructor(message: string) {
+    super(message);
+  }
+}
+```
+
+```ts
+// src/lib/auth-client.ts
+import { createAuth } from "@sveltebase/auth/client";
+import { TranslatedError } from "$lib/shared/errors";
+
+export const auth = createAuth<User>({
+  routesBase: "/api/auth",
+  errorClasses: [TranslatedError],
+});
+```
+
+```ts
+// src/lib/server/auth-routes.ts
+import { createAuthRoutes } from "@sveltebase/auth/sveltekit";
+import { TranslatedError } from "$lib/shared/errors";
+
+export const routes = createAuthRoutes({
+  auth,
+  login: async (credentials) => {
+    const user = await verifyCredentials(credentials);
+    if (!user) throw new TranslatedError("auth.invalid_credentials");
+    return user;
+  },
+});
+```
+
+The same works for `loginWithGoogle` and errors thrown by the Google `getUser`
+callback. The client receives the restored error class:
+
+```ts
+await tryCatch(
+  () => auth.login(credentials),
+  showTranslatedErrors(t),
+);
+```

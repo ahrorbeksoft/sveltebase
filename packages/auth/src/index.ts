@@ -1,5 +1,12 @@
 import type { Cookies } from "@sveltejs/kit";
 
+export { SerializableError } from "./errors.js";
+export type {
+  AuthErrorInput,
+  AuthErrorPayload,
+  SerializableErrorConstructor,
+} from "./errors.js";
+
 /**
  * Data stored inside the signed session cookie.
  *

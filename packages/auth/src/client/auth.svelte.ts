@@ -1,5 +1,11 @@
 import type { SyncClient } from "@sveltebase/sync/client";
 import { liveQuery } from "dexie";
+import {
+  createAuthErrorCodec,
+  type AuthErrorCodec,
+  type AuthErrorInput,
+  type SerializableErrorConstructor,
+} from "../errors.js";
 
 /**
  * Value or getter used to keep auth state connected to SvelteKit load data.
@@ -30,6 +36,8 @@ export interface AuthClientConfig {
    * @default "/api/auth"
    */
   routesBase?: string;
+  /** Error classes to restore from failed auth route responses. */
+  errorClasses?: readonly SerializableErrorConstructor[];
   /**
    * Called when the verification table subscription fails.
    */
@@ -56,6 +64,26 @@ async function clearSyncData(sync: SyncClient<any>) {
   }
 }
 
+async function readAuthError(
+  response: Response,
+  codec: AuthErrorCodec,
+) {
+  const text = await response.text();
+
+  if (!text) {
+    return codec.deserialize({
+      code: "HttpError",
+      message: `Auth request failed with status ${response.status}`,
+    });
+  }
+
+  try {
+    return codec.deserialize(JSON.parse(text) as AuthErrorInput);
+  } catch {
+    return codec.deserialize(text);
+  }
+}
+
 /**
  * Svelte-reactive client auth state.
  *
@@ -70,6 +98,7 @@ export class AuthClientState<User extends { id: string }> {
   #syncClientChangeUnsubscribe?: () => void;
   #verifyTable: string;
   #routesBase: string;
+  #errorCodec: AuthErrorCodec;
   #onInvalidSession?: () => void | Promise<void>;
   #refreshWhenChanged?: boolean | ((sessionUser: User, syncedUser: User) => boolean);
   #verifyUser: (sessionUser: User, syncedUser: any) => boolean;
@@ -90,6 +119,7 @@ export class AuthClientState<User extends { id: string }> {
   constructor(config?: AuthClientConfig) {
     this.#verifyTable = config?.verifyTable ?? "users";
     this.#routesBase = config?.routesBase ?? "/api/auth";
+    this.#errorCodec = createAuthErrorCodec(config?.errorClasses);
     this.#onInvalidSession = config?.onInvalidSession;
     this.#refreshWhenChanged = config?.refreshWhenChanged;
     this.#verifyUser = config?.verifyUser ?? ((sessionUser, syncedUser) => {
@@ -373,7 +403,7 @@ export class AuthClientState<User extends { id: string }> {
       headers: { "Content-Type": "application/json" },
     });
     if (!response.ok) {
-      throw new Error(await response.text());
+      throw await readAuthError(response, this.#errorCodec);
     }
 
     const user = await response.json() as User;
@@ -399,14 +429,7 @@ export class AuthClientState<User extends { id: string }> {
       headers: { "Content-Type": "application/json" },
     });
     if (!response.ok) {
-      throw new Error(await response.text());
-    }
-
-    if (response.status === 204) {
-      await this.refresh();
-      this.#isReady = true;
-      this.#ranNoSyncInitVerification = true;
-      return this.user;
+      throw await readAuthError(response, this.#errorCodec);
     }
 
     const user = await response.json() as User;
@@ -433,13 +456,7 @@ export class AuthClientState<User extends { id: string }> {
       return null;
     }
     if (!response.ok) {
-      throw new Error(await response.text());
-    }
-
-    if (response.status === 204) {
-      this.#isReady = true;
-      this.#ranNoSyncInitVerification = true;
-      return this.user;
+      throw await readAuthError(response, this.#errorCodec);
     }
 
     const user = await response.json() as User;

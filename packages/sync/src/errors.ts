@@ -15,7 +15,7 @@ export type SyncErrorInput = SyncErrorPayload | string;
  * Base class for errors that should preserve their code across sync requests.
  */
 export class SerializableError extends Error {
-  static readonly code = "SerializableError";
+  static readonly code: string = "SerializableError";
   public readonly code: string;
 
   constructor(message: string, code?: string) {

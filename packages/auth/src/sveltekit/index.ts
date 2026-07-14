@@ -1,6 +1,14 @@
-import { json, type Cookies, type RequestEvent, type RequestHandler } from "@sveltejs/kit";
+import {
+  isHttpError,
+  isRedirect,
+  json,
+  type Cookies,
+  type RequestEvent,
+  type RequestHandler,
+} from "@sveltejs/kit";
 import type { GoogleData } from "../google/types.js";
 import { verifyIdToken } from "../google/verifier.js";
+import { serializeAuthError, SerializableError } from "../errors.js";
 
 /**
  * Server session helper shape expected by `createAuthRoutes`.
@@ -53,30 +61,7 @@ export type CreateAuthRoutesOptions<
     /** Maps the verified Google profile to an application user. */
     getUser: (profile: GoogleData, event: RequestEvent) => Promise<User> | User;
   };
-  /**
-   * Controls whether routes return the user JSON or `204 No Content`.
-   *
-   * Login returns the user by default. Refresh and Google default to 204 unless
-   * configured here.
-   */
-  returnUser?: boolean | {
-    login?: boolean;
-    refresh?: boolean;
-    google?: boolean;
-  };
 };
-
-/**
- * Resolves the per-route `returnUser` setting.
- */
-function wantsUser(
-  option: CreateAuthRoutesOptions<any, any>["returnUser"],
-  route: "login" | "refresh" | "google",
-) {
-  if (option === undefined) return route === "login";
-  if (typeof option === "boolean") return option;
-  return option[route] ?? route === "login";
-}
 
 /**
  * Parses a JSON request body and falls back to an empty object.
@@ -94,6 +79,25 @@ async function parseJsonBody<T>(event: RequestEvent): Promise<T> {
  */
 function empty() {
   return new Response(null, { status: 204 });
+}
+
+function authErrorResponse(error: unknown) {
+  if (isHttpError(error)) {
+    const body = error.body as { code?: unknown; message?: unknown };
+    return json(
+      {
+        code: typeof body.code === "string" ? body.code : "HttpError",
+        message: typeof body.message === "string"
+          ? body.message
+          : "Authentication request failed",
+      },
+      { status: error.status },
+    );
+  }
+
+  return json(serializeAuthError(error), {
+    status: error instanceof SerializableError ? 400 : 500,
+  });
 }
 
 /**
@@ -130,6 +134,18 @@ export function createAuthRoutes<
   POST: RequestHandler;
 } {
   const handlePost: RequestHandler = async (event) => {
+    try {
+      return await handlePostRequest(event);
+    } catch (error) {
+      if (isRedirect(error)) {
+        throw error;
+      }
+
+      return authErrorResponse(error);
+    }
+  };
+
+  const handlePostRequest: RequestHandler = async (event) => {
     const route = routeSegment(event);
 
     if (route === "login") {
@@ -166,7 +182,7 @@ export function createAuthRoutes<
       }
 
       await options.auth.refresh(event.cookies, user);
-      return wantsUser(options.returnUser, "refresh") ? json(user) : empty();
+      return json(user);
     }
 
     if (route === "google") {
@@ -187,7 +203,7 @@ export function createAuthRoutes<
       const user = await options.google.getUser(profile, event);
       await options.auth.login(event.cookies, user);
 
-      return wantsUser(options.returnUser, "google") ? json(user) : empty();
+      return json(user);
     }
 
     return new Response("Not found", { status: 404 });
