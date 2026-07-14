@@ -1,8 +1,6 @@
 # @sveltebase/state
 
-Small Svelte 5 rune-based state primitives. The package provides an in-memory
-reactive value and a cookie-backed reactive value with Standard Schema
-validation.
+Reactive state for Svelte 5 — plain values in memory, or values that stick around in a cookie.
 
 ## Install
 
@@ -10,199 +8,55 @@ validation.
 bun add @sveltebase/state svelte
 ```
 
-`PersistentState` accepts any validator that implements the synchronous part of
-Standard Schema v1. For example:
+For cookie-backed state you’ll also want a schema library (Zod, Valibot, etc.):
 
 ```bash
 bun add zod
 ```
 
-## Exports
+## In-memory state
 
 ```ts
-import {
-  PersistentState,
-  State,
-  type InferInput,
-  type InferOutput,
-  type MaybeGetter,
-  type StandardSchemaV1
-} from "@sveltebase/state";
-```
+import { State } from "@sveltebase/state";
 
-## `MaybeGetter<T>`
-
-```ts
-type MaybeGetter<T> = T | (() => T);
-```
-
-Methods that accept `MaybeGetter` can receive a value directly or a getter that
-is evaluated when the method runs. Passing a Svelte getter is useful when the
-value comes from layout data.
-
-## `State<T>`
-
-`State` is a reactive in-memory value holder.
-
-```ts
 const count = new State(0);
 
-count.current = 1;
-count.set((value) => value + 1);
-
-console.log(count.current); // 2
+count.current;      // 0
+count.current = 1;  // set directly
+count.set((n) => n + 1); // or update from the previous value
 ```
 
-### API
+That’s it. `current` is reactive, so Svelte will re-render when it changes.
 
-#### `new State(initialValue)`
+## Cookie-backed state
 
-Creates a state value with `initialValue`.
-
-#### `state.current`
-
-Reactive getter and setter for the current value.
-
-```ts
-const name = new State("Ada");
-name.current = "Grace";
-const value: string = name.current;
-```
-
-#### `state.set(updater)`
-
-Replaces the value with the result of an updater callback.
-
-```ts
-count.set((previous) => previous + 1);
-```
-
-The updater receives the current value and must return the next value.
-
-## `StandardSchemaV1`
-
-`PersistentState` uses this minimal Standard Schema shape:
-
-```ts
-interface StandardSchemaV1<Input = unknown, Output = Input> {
-  readonly "~standard": {
-    readonly version: 1;
-    readonly vendor: string;
-    readonly validate: (
-      value: unknown
-    ) =>
-      | { readonly value: Output; readonly issues?: undefined }
-      | { readonly issues: ReadonlyArray<{ readonly message: string }> }
-      | Promise<
-          | { readonly value: Output; readonly issues?: undefined }
-          | { readonly issues: ReadonlyArray<{ readonly message: string }> }
-        >;
-    readonly types?: {
-      readonly input: Input;
-      readonly output: Output;
-    };
-  };
-}
-```
-
-The runtime validator must be synchronous. If `validate` returns a promise,
-`PersistentState` throws because cookie hydration and Svelte state updates are
-synchronous.
-
-### `InferInput<TSchema>` and `InferOutput<TSchema>`
-
-These helpers extract the input and parsed output types from a schema:
-
-```ts
-type InferInput<TSchema extends StandardSchemaV1> = ...;
-type InferOutput<TSchema extends StandardSchemaV1> = ...;
-```
-
-Use `InferOutput` when declaring values read from `current` and `InferInput`
-when a schema library distinguishes accepted input from parsed output.
-
-## `PersistentState<TSchema>`
-
-`PersistentState` stores JSON in a browser cookie and validates values with a
-Standard Schema-compatible schema.
+`PersistentState` keeps a value in a cookie and validates it with any [Standard Schema](https://standardschema.dev/) library (Zod works out of the box).
 
 ```ts
 import { z } from "zod";
 import { PersistentState } from "@sveltebase/state";
 
-const themeSchema = z.enum(["light", "dark"]).default("light");
-export const theme = new PersistentState("theme", themeSchema);
+const theme = new PersistentState(
+  "theme",
+  z.enum(["light", "dark"]).default("light")
+);
 
+theme.current; // "light" | "dark"
 theme.current = "dark";
-theme.set((value) => (value === "dark" ? "light" : "dark"));
+theme.set((t) => (t === "dark" ? "light" : "dark"));
 ```
 
-### `new PersistentState(key, schema)`
+- The first argument is the cookie name.
+- The schema defines the shape and the default (via `.default(...)`).
+- Invalid values are rejected; the previous value stays put.
 
-- `key` is the browser cookie name.
-- `schema` validates hydrated cookie data and values assigned through
-  `current`.
-- The initial value is produced by validating `undefined`, so schemas with
-  defaults are the usual way to define a fallback.
+In the browser the cookie is read on construction and written on every change. Cookies use `path: "/"`, `sameSite: "Lax"`, a one-year lifetime, and `secure` on HTTPS.
 
-In the browser, the constructor reads the existing cookie immediately. Missing
-or invalid cookie data falls back to the schema result for `undefined`.
+## SvelteKit setup
 
-### `persistentState.current`
+So SSR and the browser start with the same value, pass request cookies into `init`.
 
-Gets the parsed `InferOutput<TSchema>` value.
-
-Assigning to `current` validates and parses the new value before storing it:
-
-```ts
-theme.current = "dark";
-```
-
-If validation returns issues, the assignment throws and the old value remains.
-
-### `persistentState.set(updater)`
-
-Passes the current parsed value to an updater and stores the returned value:
-
-```ts
-theme.set((current) => (current === "dark" ? "light" : "dark"));
-```
-
-The updater result is assigned directly. Use `current = ...` when the result
-must go through schema parsing explicitly.
-
-### `persistentState.init(cookies)`
-
-Initializes the state from server-provided cookies during SSR.
-
-```ts
-type Cookie = { name: string; value: string };
-
-state.init(cookies: Cookie[] | (() => Cookie[]));
-```
-
-`init` is a no-op in the browser. It searches for the configured cookie name,
-decodes its JSON value, validates it, and updates the state. If the cookie is
-missing, it validates `undefined`. A getter is evaluated lazily, which makes
-this pattern work with SvelteKit load data:
-
-```svelte
-<script lang="ts">
-  import { locale } from "$lib/state";
-
-  let { data } = $props();
-  locale.init(() => data.cookies);
-</script>
-
-<slot />
-```
-
-## SvelteKit SSR setup
-
-Return cookies from a server layout so the first SSR render uses the same value
-that the browser will hydrate:
-
-`src/routes/+layout.server.ts`
+**`src/routes/+layout.server.ts`**
 
 ```ts
 export function load({ cookies }) {
@@ -210,17 +64,19 @@ export function load({ cookies }) {
 }
 ```
 
-`src/lib/state.ts`
+**`src/lib/state.ts`**
 
 ```ts
 import { z } from "zod";
 import { PersistentState } from "@sveltebase/state";
 
-const localeSchema = z.enum(["en", "uz"]).default("en");
-export const locale = new PersistentState("locale", localeSchema);
+export const locale = new PersistentState(
+  "locale",
+  z.enum(["en", "uz"]).default("en")
+);
 ```
 
-`src/routes/+layout.svelte`
+**`src/routes/+layout.svelte`**
 
 ```svelte
 <script lang="ts">
@@ -230,24 +86,24 @@ export const locale = new PersistentState("locale", localeSchema);
   locale.init(() => data.cookies);
 </script>
 
-<slot />
+{@render children()}
 ```
 
-The browser writes every reactive value change back to the cookie with JSON,
-`path: "/"`, `sameSite: "Lax"`, and a one-year `max-age`. The cookie helper
-adds `secure` automatically on HTTPS.
+You can pass the cookie list directly or as a function — use a function when the data comes from reactive load props.
 
-## Cookie and runtime behavior
+`init` does nothing in the browser. On the server it finds the matching cookie, parses the JSON, validates it, and sets the value. Missing or invalid cookies fall back to the schema default.
 
-- SSR construction validates `undefined` until `init` receives request cookies.
-- Browser construction hydrates from `document.cookie`.
-- Stored values are JSON. URI-encoded JSON from older cookie writers is also
-  accepted.
-- Invalid browser cookie data is discarded and replaced with the schema result
-  for `undefined`.
-- Failed SSR initialization logs a warning and keeps the current value.
-- Async schemas are not supported at runtime.
-- State is reactive because the classes use Svelte 5 runes internally.
+## How cookies behave
+
+| Situation | What happens |
+| --- | --- |
+| Browser, cookie present | Hydrates from `document.cookie` |
+| Browser, cookie missing/invalid | Uses the schema default |
+| Server, before `init` | Uses the schema default |
+| Server, after `init` | Uses the request cookie (or default if missing) |
+| Invalid write via `current` | Throws; old value is kept |
+
+Values are stored as JSON. Older URI-encoded cookies are still accepted.
 
 ## License
 
