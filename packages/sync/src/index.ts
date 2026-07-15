@@ -3,6 +3,7 @@ export { SerializableError } from "./errors.js";
 export type {
   DynamicSyncClient,
   DynamicSyncClientOptions,
+  DynamicSyncContextInput,
   LiveQueryState,
   MaybeGetter,
 } from "./client/index.js";

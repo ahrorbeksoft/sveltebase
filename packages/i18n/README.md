@@ -101,20 +101,41 @@ Call `i18n.init()` (with or without cookies) before any child uses `getTranslati
 
 ## Translating text
 
+Prefer the instance methods — they work anywhere (components, `<script module>`, utils):
+
+```ts
+import { i18n } from "$lib/i18n";
+
+i18n.t("app-title");
+i18n.t("welcome", { name: "Jane" });
+i18n.format(new Date());
+i18n.format(createdAt, { preset: "relative" });
+```
+
 ```svelte
 <script lang="ts">
-  import { getTranslations } from "@sveltebase/i18n";
   import { i18n } from "$lib/i18n";
-
-  const t = getTranslations();
 </script>
 
-<h1>{t("app-title")}</h1>
-<p>{t("welcome", { name: "Jane" })}</p>
+<h1>{i18n.t("app-title")}</h1>
+<p>{i18n.t("welcome", { name: "Jane" })}</p>
 
 <button onclick={() => (i18n.locale = "en")}>English</button>
 <button onclick={() => (i18n.locale = "uz")}>O'zbek</button>
 ```
+
+In components you can still use context helpers after `i18n.init(...)`:
+
+```svelte
+<script lang="ts">
+  import { getTranslations, getFormat } from "@sveltebase/i18n";
+
+  const t = getTranslations();
+  const format = getFormat();
+</script>
+```
+
+Those must run during component initialization — not in `<script module>`. Use `i18n.t` / `i18n.format` there instead.
 
 Messages support ICU placeholders via use-intl (`"Welcome, {name}"` → `{ name: "Jane" }`).
 
@@ -143,6 +164,8 @@ Nested message objects become dot-separated keys (`settings.account.title`).
 i18n.languages;        // your language array
 i18n.locale;           // get/set active locale (persisted to cookie)
 i18n.currentLanguage;  // full definition of the active language
+i18n.t(key, values?);  // translate (no context needed)
+i18n.format(value, options?); // format dates (no context needed)
 i18n.init(cookies?);   // set up context (+ optional SSR cookies)
 ```
 
@@ -150,16 +173,10 @@ Setting `locale` to an unknown code falls back to the first language.
 
 ## Formatting dates
 
-```svelte
-<script lang="ts">
-  import { getFormat } from "@sveltebase/i18n";
-
-  const format = getFormat();
-</script>
-
-<p>{format(new Date())}</p>
-<p>{format(createdAt, { withTime: true })}</p>
-<p>{format(createdAt, { preset: "relative" })}</p>
+```ts
+i18n.format(new Date());
+i18n.format(createdAt, { withTime: true });
+i18n.format(createdAt, { preset: "relative" });
 ```
 
 Pass a `Date`, a millisecond timestamp, or a date string. Falsy values (`undefined`, `""`, `0`) return `undefined`.

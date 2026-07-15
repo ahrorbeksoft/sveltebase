@@ -48,6 +48,10 @@ export interface AuthClientConfig {
   refreshWhenChanged?: boolean | ((sessionUser: any, syncedUser: any) => boolean);
 }
 
+function isBrowser() {
+  return typeof window !== "undefined";
+}
+
 /**
  * Clears every local sync table after logout or invalid session detection.
  *
@@ -252,7 +256,8 @@ export class AuthClientState<User extends { id: string }> {
   }
 
   private setupSyncVerification() {
-    if (!this.#syncClient || this.#verifySubscription) return;
+    // liveQuery / IndexedDB are browser-only.
+    if (!isBrowser() || !this.#syncClient || this.#verifySubscription) return;
 
     const sync = this.#syncClient;
     if ((sync as any).isDynamicSyncClient === true && !(sync as any).client) {
@@ -307,6 +312,14 @@ export class AuthClientState<User extends { id: string }> {
 
     if (this.hasUsableSyncClient()) {
       this.setupSyncVerification();
+      this.#isReady = true;
+      return;
+    }
+
+    // During SSR, trust the server-provided user. Relative fetch to
+    // /api/auth/refresh is not allowed during SSR in SvelteKit, and the
+    // browser will re-run ensureReady after hydration to verify the cookie.
+    if (!isBrowser()) {
       this.#isReady = true;
       return;
     }

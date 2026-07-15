@@ -94,10 +94,24 @@ export interface I18nInstance<TLanguages extends readonly LanguageDefinition[]> 
   /** Language definition for the current locale, with fallback handling. */
   readonly currentLanguage: CurrentLanguage<TLanguages>;
   /**
+   * Translate a message key for the current locale.
+   *
+   * Safe anywhere — no Svelte context required (module scripts, utils, server).
+   * Locale is read when called, so it stays up to date after `locale` changes.
+   */
+  t: Translate;
+  /**
+   * Format a date/time for the current locale.
+   *
+   * Safe anywhere — no Svelte context required.
+   */
+  format: Format;
+  /**
    * Initializes locale state from cookies and installs this instance in Svelte context.
    *
    * Call from a root layout/component before child components call
-   * `getTranslations` or `getFormat`.
+   * `getTranslations` or `getFormat`. Prefer `i18n.t` / `i18n.format` when you
+   * already hold the instance (e.g. module scripts).
    */
   init(cookies?: MaybeGetter<Cookie[] | undefined>): void;
 }
@@ -187,43 +201,51 @@ function getI18nFromContext<const TLanguages extends readonly LanguageDefinition
 }
 
 /**
- * Returns a translation function bound to the current i18n context locale.
- *
- * Must be called under an initialized `I18nInstance`.
+ * Builds instance-bound translate / format helpers (no Svelte context).
  */
-export function getTranslations(): Translate {
-  const i18n = getI18nFromContext<readonly LanguageDefinition[]>();
-  const { languages, fallbackLocale } = getI18nInternal(i18n);
-
-  return ((key: MessageKey, values?: TranslationValues) => {
+function createInstanceHelpers(
+  languages: readonly LanguageDefinition[],
+  getLocale: () => string,
+  fallbackLocale: string
+): { t: Translate; format: Format } {
+  const t = ((key: MessageKey, values?: TranslationValues) => {
     const translate = createLocaleTranslator(
       languages,
-      i18n.locale,
+      getLocale(),
       fallbackLocale
     ) as (key: string, values?: TranslationValues) => string;
 
     return translate(key, values);
   }) as Translate;
+
+  const format: Format = (value, options) => {
+    return createFormatForLocale(languages, getLocale(), fallbackLocale)(
+      value,
+      options
+    );
+  };
+
+  return { t, format };
 }
 
 /**
- * Returns a date/time formatter bound to the current i18n context locale.
+ * Returns a translation function for the i18n instance in Svelte context.
  *
- * Must be called under an initialized `I18nInstance`.
+ * Must run during component initialization (after `i18n.init`). Prefer
+ * `i18n.t(...)` when you already have the instance.
+ */
+export function getTranslations(): Translate {
+  return getI18nFromContext().t;
+}
+
+/**
+ * Returns a date/time formatter for the i18n instance in Svelte context.
+ *
+ * Must run during component initialization (after `i18n.init`). Prefer
+ * `i18n.format(...)` when you already have the instance.
  */
 export function getFormat(): Format {
-  const i18n = getI18nFromContext<readonly LanguageDefinition[]>();
-  const { languages, fallbackLocale } = getI18nInternal(i18n);
-
-  return (value, options) => {
-    const format = createFormatForLocale(
-      languages,
-      i18n.locale,
-      fallbackLocale
-    );
-
-    return format(value, options);
-  };
+  return getI18nFromContext().format;
 }
 
 /**
@@ -280,7 +302,11 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
     localeSchema
   ) as LocaleState<LocaleCode<TLanguages>>;
 
-  let initialized = false;
+  const { t, format } = createInstanceHelpers(
+    languages,
+    () => localeState.current,
+    fallbackLocale
+  );
 
   const i18n: I18nInstance<TLanguages> = {
     get languages() {
@@ -303,16 +329,18 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
       ) as CurrentLanguage<TLanguages>;
     },
 
+    t,
+    format,
+
     init(cookies?: MaybeGetter<Cookie[] | undefined>) {
-        const resolvedCookies =
-          typeof cookies === "function"
-            ? (cookies as () => Cookie[] | undefined)()
-            : cookies;
+      const resolvedCookies =
+        typeof cookies === "function"
+          ? (cookies as () => Cookie[] | undefined)()
+          : cookies;
 
-        if (resolvedCookies) {
-          localeState.init(resolvedCookies);
-        }
-
+      if (resolvedCookies) {
+        localeState.init(resolvedCookies);
+      }
 
       const { set } = ensureContext();
       set(i18n as I18nInstance<readonly LanguageDefinition[]>);

@@ -3,11 +3,25 @@ import type { SyncClientOptions, SyncClient as SyncClientType } from "./index.js
 export type MaybeGetter<T> = T | (() => T);
 export type SyncConnectionStatus = "connecting" | "connected" | "disconnected";
 
+/**
+ * Context value or getter for a dynamic sync client.
+ *
+ * Return `null` or `undefined` from a getter to tear down / skip creating the
+ * inner client until all required inputs are ready.
+ */
+export type DynamicSyncContextInput<TContext> =
+  | TContext
+  | null
+  | undefined
+  | (() => TContext | null | undefined);
+
 export type DynamicSyncClientOptions<TContext> = {
   /**
    * Initial context used to create the first inner `SyncClient`.
+   * Omit this (or pass a getter that returns null/undefined) to wait until
+   * `setContext` provides a real value.
    */
-  context?: MaybeGetter<TContext>;
+  context?: DynamicSyncContextInput<TContext>;
   /**
    * Custom equality check for deciding whether a context update should rebuild
    * the inner client. Defaults to stable structural comparison.
@@ -23,8 +37,16 @@ export type DynamicSyncClient<
   readonly client: SyncClientType<TSchema> | undefined;
   readonly context: TContext | undefined;
   readonly status: SyncConnectionStatus;
-  setContext(context: MaybeGetter<TContext>): SyncClientType<TSchema> | undefined;
-  setData(data: MaybeGetter<TContext>): SyncClientType<TSchema> | undefined;
+  /** True while mutations or snapshot fetches are in flight. */
+  readonly isSyncing: boolean;
+  readonly pendingMutationCount: number;
+  readonly pendingFetchCount: number;
+  setContext(
+    context: DynamicSyncContextInput<TContext>,
+  ): SyncClientType<TSchema> | undefined;
+  setData(
+    data: DynamicSyncContextInput<TContext>,
+  ): SyncClientType<TSchema> | undefined;
   reconnect(): void;
   disconnect(): void;
   onClientChange(
@@ -97,7 +119,7 @@ class DynamicSyncClientController<
     this.#equals = options?.equals ?? defaultEquals;
 
     if ("context" in (options ?? {})) {
-      this.setContext(options!.context as MaybeGetter<TContext>);
+      this.setContext(options!.context as DynamicSyncContextInput<TContext>);
     }
   }
 
@@ -113,7 +135,21 @@ class DynamicSyncClientController<
     return this.#client?.status ?? "disconnected";
   }
 
-  setContext(context: MaybeGetter<TContext>): SyncClientType<TSchema> | undefined {
+  get isSyncing(): boolean {
+    return this.#client?.isSyncing ?? false;
+  }
+
+  get pendingMutationCount(): number {
+    return this.#client?.pendingMutationCount ?? 0;
+  }
+
+  get pendingFetchCount(): number {
+    return this.#client?.pendingFetchCount ?? 0;
+  }
+
+  setContext(
+    context: DynamicSyncContextInput<TContext>,
+  ): SyncClientType<TSchema> | undefined {
     this.#effectCleanup?.();
     this.#effectCleanup = undefined;
 
@@ -122,7 +158,7 @@ class DynamicSyncClientController<
       return this.#client;
     }
 
-    const getter = context as () => TContext;
+    const getter = context as () => TContext | null | undefined;
 
     try {
       this.#effectCleanup = $effect.root(() => {
@@ -137,7 +173,9 @@ class DynamicSyncClientController<
     return this.#client;
   }
 
-  setData(data: MaybeGetter<TContext>): SyncClientType<TSchema> | undefined {
+  setData(
+    data: DynamicSyncContextInput<TContext>,
+  ): SyncClientType<TSchema> | undefined {
     return this.setContext(data);
   }
 
@@ -157,11 +195,7 @@ class DynamicSyncClientController<
   disconnect(): void {
     this.#effectCleanup?.();
     this.#effectCleanup = undefined;
-    this.#client?.disconnect();
-    this.#client?.close();
-    this.#client = undefined;
-    this.#context = undefined;
-    this.#hasContext = false;
+    this.#teardownClient();
   }
 
   requireClient(): SyncClientType<TSchema> {
@@ -171,7 +205,26 @@ class DynamicSyncClientController<
     return this.#client;
   }
 
-  #applyContext(next: TContext) {
+  #teardownClient() {
+    const previousClient = this.#client;
+    this.#client = undefined;
+    this.#context = undefined;
+    this.#hasContext = false;
+    previousClient?.disconnect();
+    previousClient?.close();
+  }
+
+  /**
+   * Applies resolved context. `null` / `undefined` means "not ready yet":
+   * tear down any existing client and wait.
+   */
+  #applyContext(next: TContext | null | undefined) {
+    if (next == null) {
+      if (!this.#hasContext && !this.#client) return;
+      this.#teardownClient();
+      return;
+    }
+
     if (this.#hasContext && this.#equals(this.#context as TContext, next)) {
       return;
     }
@@ -226,13 +279,53 @@ export function createDynamicSyncClient<
     options,
   );
 
-  return new Proxy(controller, {
+  // Public surface as a plain object — never proxy the controller itself.
+  // Proxying a class with private fields (#client, etc.) breaks when
+  // Reflect.get(..., receiver) rebinds getters so `this` is the proxy:
+  // "Cannot read private member #client from an object whose class did not declare it".
+  const facade = {
+    isDynamicSyncClient: true as const,
+    get client() {
+      return controller.client;
+    },
+    get context() {
+      return controller.context;
+    },
+    get status() {
+      return controller.status;
+    },
+    get isSyncing() {
+      return controller.isSyncing;
+    },
+    get pendingMutationCount() {
+      return controller.pendingMutationCount;
+    },
+    get pendingFetchCount() {
+      return controller.pendingFetchCount;
+    },
+    setContext: (context: DynamicSyncContextInput<TContext>) =>
+      controller.setContext(context),
+    setData: (data: DynamicSyncContextInput<TContext>) => controller.setData(data),
+    onClientChange: (
+      callback: (client: SyncClientType<TSchema>, context: TContext) => void,
+    ) => controller.onClientChange(callback),
+    reconnect: () => controller.reconnect(),
+    disconnect: () => controller.disconnect(),
+  };
+
+  return new Proxy(facade, {
     get(target, property, receiver) {
       if (property in target) {
         return Reflect.get(target, property, receiver);
       }
 
-      const client = target.requireClient() as any;
+      const client = controller.requireClient() as any;
+      // Route store names through table() — that's the decorated Dexie Table
+      // instance. db[name] is a separate undecorated instance in Dexie.
+      if (typeof property === "string" && isDexieTableName(client, property)) {
+        return client.table(property);
+      }
+
       const value = client[property as keyof typeof client];
       return typeof value === "function" ? value.bind(client) : value;
     },
@@ -241,22 +334,36 @@ export function createDynamicSyncClient<
         return Reflect.set(target, property, value, receiver);
       }
 
-      const client = target.requireClient() as any;
+      const client = controller.requireClient() as any;
       client[property as keyof typeof client] = value;
       return true;
     },
     has(target, property) {
-      return property in target || (target.client ? property in target.client : false);
+      return (
+        property in target ||
+        (controller.client ? property in controller.client : false)
+      );
     },
     ownKeys(target) {
-      const client = target.client as any;
+      const client = controller.client as any;
       return client
         ? [...new Set([...Reflect.ownKeys(target), ...Reflect.ownKeys(client)])]
         : Reflect.ownKeys(target);
     },
     getOwnPropertyDescriptor(target, property) {
-      return Reflect.getOwnPropertyDescriptor(target, property)
-        ?? Reflect.getOwnPropertyDescriptor(target.client ?? {}, property);
+      return (
+        Reflect.getOwnPropertyDescriptor(target, property) ??
+        Reflect.getOwnPropertyDescriptor(controller.client ?? {}, property)
+      );
     },
   }) as unknown as DynamicSyncClient<TSchema, TContext>;
+}
+
+function isDexieTableName(client: any, name: string): boolean {
+  const allTables = client?._allTables;
+  if (allTables && Object.prototype.hasOwnProperty.call(allTables, name)) {
+    return true;
+  }
+  const storeNames = client?._storeNames;
+  return Array.isArray(storeNames) && storeNames.includes(name);
 }

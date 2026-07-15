@@ -10,7 +10,7 @@ import type {
   DynamicSyncClient,
   DynamicSyncClientOptions,
 } from "./dynamic-client.svelte.js";
-import { ConnectionStatus } from "./status.svelte.js";
+import { ConnectionStatus, SyncActivity } from "./status.svelte.js";
 
 export { createLiveQuery } from "./live-query.svelte.js";
 export { SerializableError } from "../errors.js";
@@ -19,7 +19,12 @@ export type {
   SyncErrorInput,
   SyncErrorPayload,
 } from "../errors.js";
-export type { DynamicSyncClient, DynamicSyncClientOptions, MaybeGetter } from "./dynamic-client.svelte.js";
+export type {
+  DynamicSyncClient,
+  DynamicSyncClientOptions,
+  DynamicSyncContextInput,
+  MaybeGetter,
+} from "./dynamic-client.svelte.js";
 export type { LiveQueryState } from "./live-query.svelte.js";
 
 const SYNC_META_TABLE = "__sync_meta";
@@ -89,10 +94,14 @@ class SyncClientClass<
 
   // Reactive connection status delegated to status.svelte.ts
   private _statusState = new ConnectionStatus();
+  // Reactive upload/download activity for UI "syncing" indicators
+  private _activity = new SyncActivity();
 
   // Mutations waiting for ack/reject from server
   private pendingMutations = new Map<string, PendingMutation>();
   private pendingSnapshots = new Map<string, PendingSnapshot[]>();
+  /** Channels with an outstanding subscribe → snapshot round-trip. */
+  private pendingFetchChannels = new Set<string>();
   // Mutations queued to be sent when connection is established
   private mutationQueue: Array<{
     id: string;
@@ -122,8 +131,12 @@ class SyncClientClass<
     schema[SYNC_META_TABLE] = "key";
     this.version(1).stores(schema);
 
-    // Decorate tables to intercept native Dexie write operations
+    // Decorate tables to intercept native Dexie write operations.
+    // Re-run on ready in case Dexie rebuilt Table objects during open.
     this.decorateTables();
+    this.on("ready", () => {
+      this.decorateTables();
+    });
 
     if (typeof window !== "undefined") {
       this.connect();
@@ -140,155 +153,225 @@ class SyncClientClass<
   }
 
   /**
+   * True while mutations are waiting for ack (or queued offline) **or**
+   * channels are waiting for a snapshot fetch.
+   *
+   * Use for a global "syncing" indicator — it can flash briefly for fast ops.
+   */
+  public get isSyncing() {
+    return this._activity.isSyncing;
+  }
+
+  /** Count of mutations not yet acked (includes offline queue). */
+  public get pendingMutationCount() {
+    return this._activity.pendingMutations;
+  }
+
+  /** Count of channels waiting on a snapshot response. */
+  public get pendingFetchCount() {
+    return this._activity.pendingFetches;
+  }
+
+  private refreshActivity() {
+    // pendingMutations already tracks offline writes; mutationQueue is only
+    // the outbound buffer for those same ids.
+    this._activity.setCounts(
+      this.pendingMutations.size,
+      this.pendingFetchChannels.size,
+    );
+  }
+
+  private markFetchPending(channel: string) {
+    this.pendingFetchChannels.add(channel);
+    this.refreshActivity();
+  }
+
+  private clearFetchPending(channel: string) {
+    if (this.pendingFetchChannels.delete(channel)) {
+      this.refreshActivity();
+    }
+  }
+
+  private clearAllFetches() {
+    if (this.pendingFetchChannels.size === 0) return;
+    this.pendingFetchChannels.clear();
+    this.refreshActivity();
+  }
+
+  /**
    * Wraps configured Dexie table write methods with sync-aware versions.
    *
-   * Local writes are applied optimistically first, then sent to the server. If
-   * the server rejects a mutation, the stored rollback function restores the
-   * previous local row.
+   * Local writes resolve immediately (snappy UI). Server `mutate` runs in the
+   * background; on `reject` the stored rollback restores the previous row.
+   *
+   * Dexie installs separate `Table` instances for `db[name]` vs `db.table(name)`.
+   * We decorate `_allTables` and expose it via a getter so both access paths
+   * hit the intercepted table.
+   *
+   * Safe to call more than once (idempotent per Table instance).
    */
   private decorateTables() {
     for (const [tableName, config] of Object.entries(this.tableConfigs)) {
       const table = this.table(tableName);
+      this.interceptTableWrites(table, config);
 
-      const originalAdd = table.add.bind(table);
-      const originalPut = table.put.bind(table);
-      const originalUpdate = table.update.bind(table);
-      const originalDelete = table.delete.bind(table);
+      // Always resolve db.courses → db.table("courses") (decorated instance).
+      Object.defineProperty(this, tableName, {
+        configurable: true,
+        enumerable: true,
+        get: () => this.table(tableName),
+      });
+    }
+  }
 
-      // Save original methods to bypass sync trigger loops when updating from WebSocket
-      (table as any)._originalMethods = {
-        add: originalAdd,
-        put: originalPut,
-        update: originalUpdate,
-        delete: originalDelete,
-      };
+  /**
+   * Replaces add/put/update/delete on one Dexie Table with optimistic sync wrappers.
+   *
+   * Contract: the Promise returned to the caller resolves/rejects with the
+   * **local IndexedDB write only**. Server transport is scheduled in a later
+   * macrotask (`setTimeout(0)`) *after* that resolve, so it cannot participate
+   * in the caller's `await` chain (no waiting for server `ack`).
+   */
+  private interceptTableWrites(table: Table, config: TableConfig) {
+    // Walk to the Dexie Table.prototype that actually owns add/put/… —
+    // never use table.add (may already be a sync wrapper from a prior decorate).
+    const dexieMethod = (name: "add" | "put" | "update" | "delete" | "get") => {
+      let obj: object | null = table;
+      while (obj) {
+        const desc = Object.getOwnPropertyDescriptor(obj, name);
+        if (desc && typeof desc.value === "function" && obj !== table) {
+          return (desc.value as Function).bind(table);
+        }
+        obj = Object.getPrototypeOf(obj);
+      }
+      // Fallback: current own/prototype method
+      return (table as any)[name].bind(table);
+    };
 
-      table.add = (async (row: any) => {
-        const id = row.id || crypto.randomUUID();
-        const fullRow = { ...row, id };
+    const originalAdd = dexieMethod("add");
+    const originalPut = dexieMethod("put");
+    const originalUpdate = dexieMethod("update");
+    const originalDelete = dexieMethod("delete");
+    const originalGet = dexieMethod("get");
 
-        const rollback = async () => {
-          await originalDelete(id);
-        };
+    (table as any)._originalMethods = {
+      add: originalAdd,
+      put: originalPut,
+      update: originalUpdate,
+      delete: originalDelete,
+    };
 
-        await originalAdd(fullRow);
+    const channel = config.channel;
 
-        return this.enqueueMutation(
-          config.channel,
-          "create",
-          id,
-          fullRow,
-          rollback,
+    /**
+     * Run local write, resolve the caller immediately when it finishes, then
+     * enqueue the server mutation on a later turn of the event loop.
+     */
+    const localThenSync = <T>(
+      localWrite: () => PromiseLike<T>,
+      action: "create" | "update" | "delete",
+      key: string,
+      data: any,
+      rollback: () => PromiseLike<unknown> | unknown,
+    ): Promise<T> => {
+      return new Promise<T>((resolve, reject) => {
+        Promise.resolve(localWrite()).then(
+          (result) => {
+            // 1) Unblock awaiters first — only local IDB latency.
+            resolve(result);
+            // 2) Server fan-out on a later macrotask so it cannot extend
+            //    the caller's await (same tick / same promise chain).
+            setTimeout(() => {
+              void this.enqueueMutation(channel, action, key, data, async () => {
+                await rollback();
+              }).catch(() => {
+                // reject path already rolls back
+              });
+            }, 0);
+          },
+          reject,
         );
-      }) as any;
+      });
+    };
 
-      table.put = (async (rowOrId: any, changes?: any) => {
-        // Overload 1: put(id, changes) - Partial Update
-        if (changes !== undefined) {
-          const id = rowOrId;
-          const existing = await table.get(id);
+    table.add = ((row: any) => {
+      const id = row.id || crypto.randomUUID();
+      const fullRow = row.id ? row : { ...row, id };
+      return localThenSync(
+        () => originalAdd(fullRow),
+        "create",
+        id,
+        fullRow,
+        () => originalDelete(id),
+      ).then(() => id);
+    }) as any;
+
+    table.put = ((rowOrId: any, changes?: any) => {
+      if (changes !== undefined) {
+        const id = rowOrId;
+        return Promise.resolve(originalGet(id)).then((existing: any) => {
           if (!existing) {
             throw new Error(`Cannot update item ${id}: not found locally.`);
           }
-
-          const rollback = async () => {
-            await originalPut(existing);
-          };
-
-          const updatedRow = { ...existing, ...changes };
-          await originalPut(updatedRow);
-
-          const diff: any = {};
-          for (const [k, v] of Object.entries(changes)) {
-            if (existing[k] !== v) {
-              diff[k] = v;
-            }
-          }
-
-          return this.enqueueMutation(
-            config.channel,
+          return localThenSync(
+            () => originalUpdate(id, changes),
             "update",
             id,
-            diff,
-            rollback,
-          );
-        }
+            changes,
+            () => originalPut(existing),
+          ).then(() => id);
+        });
+      }
 
-        // Overload 2: put(row) - Insert/Replace
-        const row = rowOrId;
-        const id = row.id;
-        if (!id) {
-          throw new Error("put operation requires an inline 'id' property.");
-        }
+      const row = rowOrId;
+      const id = row?.id;
+      if (!id) {
+        throw new Error("put operation requires an inline 'id' property.");
+      }
 
-        const existing = await table.get(id);
+      return Promise.resolve(originalGet(id)).then((existing: any) => {
         if (!existing) {
           return table.add(row);
         }
-
-        const rollback = async () => {
-          await originalPut(existing);
-        };
-
-        const updatedRow = { ...existing, ...row };
-        await originalPut(updatedRow);
-
-        const diff: any = {};
-        for (const [k, v] of Object.entries(row)) {
-          if (existing[k] !== v) {
-            diff[k] = v;
-          }
-        }
-
-        return this.enqueueMutation(
-          config.channel,
+        return localThenSync(
+          () => originalPut(row),
           "update",
           id,
-          diff,
-          rollback,
-        );
-      }) as any;
+          row,
+          () => originalPut(existing),
+        ).then(() => id);
+      });
+    }) as any;
 
-      table.update = (async (id: any, changes: any) => {
-        const existing = await table.get(id);
+    table.update = ((id: any, changes: any) => {
+      return Promise.resolve(originalGet(id)).then((existing: any) => {
         if (!existing) {
           throw new Error(`Cannot update item ${id}: not found locally.`);
         }
-
-        const rollback = async () => {
-          await originalPut(existing);
-        };
-
-        await originalUpdate(id, changes);
-
-        return this.enqueueMutation(
-          config.channel,
+        return localThenSync(
+          () => originalUpdate(id, changes),
           "update",
           id,
           changes,
-          rollback,
-          );
-      }) as any;
+          () => originalPut(existing),
+        );
+      });
+    }) as any;
 
-      table.delete = (async (id: any) => {
-        const existing = await table.get(id);
+    table.delete = ((id: any) => {
+      return Promise.resolve(originalGet(id)).then((existing: any) => {
         if (!existing) return;
-
-        const rollback = async () => {
-          await originalPut(existing);
-        };
-
-        await originalDelete(id);
-
-        return this.enqueueMutation(
-          config.channel,
+        return localThenSync(
+          () => originalDelete(id),
           "delete",
           id,
           undefined,
-          rollback,
+          () => originalPut(existing),
         );
-      }) as any;
-    }
+      });
+    }) as any;
+
+    (table as any)._syncWriteIntercepted = true;
   }
 
   /**
@@ -373,6 +456,7 @@ class SyncClientClass<
       if (this.socket === socket) {
         this.socket = undefined;
         this._statusState.value = "disconnected";
+        this.clearAllFetches();
         this.stopHeartbeat();
         if (!this.closedByClient) {
           this.reconnectTimer = setTimeout(() => this.connect(), 2000);
@@ -500,6 +584,7 @@ class SyncClientClass<
       }
       const viewVersion = await this.getChannelViewVersion(channel);
       if (socket !== this.socket || socket.readyState !== WebSocket.OPEN) return;
+      this.markFetchPending(channel);
       socket.send(
         JSON.stringify({ type: "subscribe", channel, since, viewVersion }),
       );
@@ -654,9 +739,24 @@ class SyncClientClass<
         // Ignore older update (Last-Write-Wins)
         return;
       }
+      // Same timestamp as optimistic local write — nothing new to apply.
+      if (incomingUpdatedAt === existingUpdatedAt) {
+        return;
+      }
     }
     const originalPut = (table as any)._originalMethods?.put || table.put.bind(table);
     await originalPut(data);
+  }
+
+  /**
+   * Applies an ack payload only when the server row is newer than local.
+   */
+  private async applyAckRow(tableName: string, data: any) {
+    try {
+      await this.safePutRow(tableName, data);
+    } catch (err) {
+      console.warn("SyncClient: failed to apply ack row", err);
+    }
   }
 
   /**
@@ -714,6 +814,7 @@ class SyncClientClass<
           }
           await this.setChannelViewVersion(msg.channel, msg.viewVersion);
         }
+        this.clearFetchPending(msg.channel);
         const pending = this.pendingSnapshots.get(msg.channel);
         if (pending?.length) {
           this.pendingSnapshots.delete(msg.channel);
@@ -726,15 +827,23 @@ class SyncClientClass<
       case "ack": {
         const pending = this.pendingMutations.get(msg.id);
         if (pending) {
-          // If server returned canonical data, update local Dexie (respecting LWW)
+          // Resolve immediately so any rare waiters are not blocked on IDB.
+          this.pendingMutations.delete(msg.id);
+          this.refreshActivity();
+          pending.resolve(msg.data);
+
+          // Apply server canonical row off the critical path. Skip when the
+          // local row already has the same updatedAt to avoid a second
+          // liveQuery storm right after the optimistic write.
           if (msg.data) {
             const tableName = this.findTableByChannel(pending.channel);
+            const data = msg.data;
             if (tableName) {
-              await this.safePutRow(tableName, msg.data);
+              queueMicrotask(() => {
+                void this.applyAckRow(tableName, data);
+              });
             }
           }
-          pending.resolve(msg.data);
-          this.pendingMutations.delete(msg.id);
         }
         break;
       }
@@ -746,6 +855,7 @@ class SyncClientClass<
             }
           }
           this.pendingSnapshots.clear();
+          this.clearAllFetches();
           break;
         }
 
@@ -756,6 +866,7 @@ class SyncClientClass<
 
           pending.reject(this.errorCodec.deserialize(msg.error));
           this.pendingMutations.delete(msg.id);
+          this.refreshActivity();
         }
         break;
       }
@@ -849,9 +960,9 @@ class SyncClientClass<
   /**
    * Records and sends an optimistic mutation.
    *
-   * The returned promise resolves when the server sends `ack` and rejects after
-   * `reject`, at which point `rollback` has already restored the previous local
-   * state.
+   * Resolves on server `ack`, rejects after `reject` (rollback already applied).
+   * Write helpers do not await this — they return after the local IndexedDB write
+   * and run server sync in the background.
    */
   private enqueueMutation(
     channel: string,
@@ -873,6 +984,7 @@ class SyncClientClass<
         resolve,
         reject,
       });
+      this.refreshActivity();
 
       const msg = {
         id: mutationId,
@@ -899,6 +1011,7 @@ class SyncClientClass<
   public disconnect() {
     this.closedByClient = true;
     this._statusState.value = "disconnected";
+    this.clearAllFetches();
     this.stopHeartbeat();
     for (const timer of this.changeTimers.values()) {
       clearTimeout(timer);

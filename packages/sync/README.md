@@ -105,13 +105,23 @@ Missing server handlers for create/update/delete reject and roll back.
 
 Use UTC milliseconds (`Date.now()`) for `updatedAt`. On reconnect the client sends the newest local timestamp as `since` so the server can return only newer rows.
 
-### Connection
+### Connection and activity
 
 ```ts
-db.status;      // "connecting" | "connected" | "disconnected"
-db.reconnect(); // after login/logout so the cookie is fresh
-db.disconnect(); // stop auto-reconnect; local data stays
+db.status;               // "connecting" | "connected" | "disconnected"
+db.isSyncing;            // true while uploads or snapshot fetches are in flight
+db.pendingMutationCount; // mutations waiting for server ack
+db.pendingFetchCount;    // channels waiting for a snapshot
+db.reconnect();          // after login/logout so the cookie is fresh
+db.disconnect();         // stop auto-reconnect; local data stays
 ```
+
+`isSyncing` is true when:
+
+- a write is waiting for `ack` / `reject`, or  
+- a channel subscribe is waiting for a `snapshot` (initial load, resync, channel-change)
+
+It can flash briefly for fast ops — that’s expected for a “syncing” indicator.
 
 Unexpected closes retry after ~2 seconds. Heartbeats keep the socket alive.
 
@@ -152,6 +162,9 @@ const visible = createLiveQuery(
 
 ### Per-tenant / dynamic clients
 
+`createSyncClient` does **not** open a database until context is set. Until then
+`sync.client` is `undefined` and table access throws.
+
 When the DB name or channels depend on context (org, user, …):
 
 ```ts
@@ -176,11 +189,22 @@ export const sync = createSyncClient<AppDatabase, { orgId: string }>(
   import { sync } from "$lib/sync-client.svelte";
 
   let { data } = $props();
-  sync.setContext(() => ({ orgId: data.org.id }));
+
+  // Return null/undefined to wait until everything is ready
+  sync.setContext(() => {
+    if (!data.org?.id) return null;
+    return { orgId: data.org.id };
+  });
 </script>
 ```
 
-The inner client is recreated only when context values actually change. `setData` is an alias for `setContext`. Access tables only after context is set.
+- No `setContext` / no initial `context` option → no client
+- Getter returns `null` or `undefined` → tear down any existing client and wait
+- Real context → create (or rebuild) the inner client
+- Context is compared structurally; same values do not reconnect
+
+`setData` is an alias for `setContext`. Guard UI with `if (sync.client)` before
+querying tables.
 
 For live queries with a dynamic client, depend on the inner client:
 

@@ -18,3 +18,33 @@ export class ConnectionStatus {
     this._value = newValue;
   }
 }
+
+/**
+ * Reactive activity flag for in-flight uploads (mutations) and downloads
+ * (snapshot fetches). UI can show a brief "syncing" indicator while true.
+ */
+export class SyncActivity {
+  private _syncing = $state(false);
+  private _pendingMutations = $state(0);
+  private _pendingFetches = $state(0);
+
+  get isSyncing() {
+    return this._syncing;
+  }
+
+  /** Mutations waiting for server ack (or queued while offline). */
+  get pendingMutations() {
+    return this._pendingMutations;
+  }
+
+  /** Channels waiting for a snapshot response. */
+  get pendingFetches() {
+    return this._pendingFetches;
+  }
+
+  setCounts(mutations: number, fetches: number) {
+    this._pendingMutations = mutations;
+    this._pendingFetches = fetches;
+    this._syncing = mutations > 0 || fetches > 0;
+  }
+}
