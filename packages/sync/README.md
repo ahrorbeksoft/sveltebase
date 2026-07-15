@@ -96,10 +96,13 @@ await db.todos.delete(todoId);
 What happens on write:
 
 1. Update IndexedDB immediately (optimistic)
-2. Send the mutation over the socket (or queue it if offline)
-3. Wait for the server to acknowledge
-4. On reject — roll back the local change and throw
-5. On success — optional canonical row from the server replaces the local copy
+2. Persist the mutation to a durable **outbox** (survives refresh)
+3. Send over the socket (or keep in outbox until connected)
+4. On reject — roll back the local change and drop the outbox row
+5. On success — drop the outbox row; optional canonical row replaces the local copy
+
+If the user refreshes before the server acks, the outbox is reloaded on next
+connect and mutations are re-sent automatically.
 
 Missing server handlers for create/update/delete reject and roll back.
 

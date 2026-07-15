@@ -28,6 +28,8 @@ export type {
 export type { LiveQueryState } from "./live-query.svelte.js";
 
 const SYNC_META_TABLE = "__sync_meta";
+/** Durable queue of mutations not yet acked by the server. */
+const SYNC_OUTBOX_TABLE = "__sync_outbox";
 
 /**
  * Local IndexedDB table configuration for one synced table.
@@ -69,6 +71,8 @@ type PendingMutation = {
   action: "create" | "update" | "delete";
   key: string;
   data?: any;
+  /** Previous row for update/delete rollback after reload. */
+  previous?: any;
   rollback: () => Promise<void>;
   resolve: (value: any) => void;
   reject: (reason: any) => void;
@@ -77,6 +81,17 @@ type PendingMutation = {
 type PendingSnapshot = {
   resolve: (rows: any[]) => void;
   reject: (reason: any) => void;
+};
+
+/** Serialized mutation stored in IndexedDB so refresh/crash does not drop it. */
+type OutboxEntry = {
+  id: string;
+  channel: string;
+  action: "create" | "update" | "delete";
+  key: string;
+  data?: any;
+  previous?: any;
+  createdAt: number;
 };
 
 class SyncClientClass<
@@ -129,7 +144,14 @@ class SyncClientClass<
       schema[tableName] = config.indexes;
     }
     schema[SYNC_META_TABLE] = "key";
-    this.version(1).stores(schema);
+
+    // v1: app tables + meta (existing installs)
+    this.version(1).stores({ ...schema });
+    // v2: durable mutation outbox (survives refresh before server ack)
+    this.version(2).stores({
+      ...schema,
+      [SYNC_OUTBOX_TABLE]: "id, channel, createdAt",
+    });
 
     // Decorate tables to intercept native Dexie write operations.
     // Re-run on ready in case Dexie rebuilt Table objects during open.
@@ -264,30 +286,36 @@ class SyncClientClass<
     const channel = config.channel;
 
     /**
-     * Run local write, resolve the caller immediately when it finishes, then
-     * enqueue the server mutation on a later turn of the event loop.
+     * Local write → durable outbox + wire dispatch → resolve caller.
+     * Awaits only IDB (row + outbox), never the server ack.
      */
     const localThenSync = <T>(
       localWrite: () => PromiseLike<T>,
       action: "create" | "update" | "delete",
       key: string,
       data: any,
+      previous: any | undefined,
       rollback: () => PromiseLike<unknown> | unknown,
     ): Promise<T> => {
       return new Promise<T>((resolve, reject) => {
         Promise.resolve(localWrite()).then(
-          (result) => {
-            // 1) Unblock awaiters first — only local IDB latency.
+          async (result) => {
+            try {
+              // Persist outbox + start wire send (does not wait for server ack).
+              await this.dispatchMutation(
+                channel,
+                action,
+                key,
+                data,
+                async () => {
+                  await rollback();
+                },
+                previous,
+              );
+            } catch (err) {
+              console.warn("SyncClient: failed to dispatch mutation", err);
+            }
             resolve(result);
-            // 2) Server fan-out on a later macrotask so it cannot extend
-            //    the caller's await (same tick / same promise chain).
-            setTimeout(() => {
-              void this.enqueueMutation(channel, action, key, data, async () => {
-                await rollback();
-              }).catch(() => {
-                // reject path already rolls back
-              });
-            }, 0);
           },
           reject,
         );
@@ -302,6 +330,7 @@ class SyncClientClass<
         "create",
         id,
         fullRow,
+        undefined,
         () => originalDelete(id),
       ).then(() => id);
     }) as any;
@@ -318,6 +347,7 @@ class SyncClientClass<
             "update",
             id,
             changes,
+            existing,
             () => originalPut(existing),
           ).then(() => id);
         });
@@ -338,6 +368,7 @@ class SyncClientClass<
           "update",
           id,
           row,
+          existing,
           () => originalPut(existing),
         ).then(() => id);
       });
@@ -353,6 +384,7 @@ class SyncClientClass<
           "update",
           id,
           changes,
+          existing,
           () => originalPut(existing),
         );
       });
@@ -366,6 +398,7 @@ class SyncClientClass<
           "delete",
           id,
           undefined,
+          existing,
           () => originalPut(existing),
         );
       });
@@ -422,23 +455,9 @@ class SyncClientClass<
 
       if (this.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
 
-      // Re-send all pending unacknowledged mutations
-      for (const mut of this.pendingMutations.values()) {
-        if (this.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
-        socket.send(
-          JSON.stringify({
-            type: "mutate",
-            id: mut.id,
-            channel: mut.channel,
-            action: mut.action,
-            key: mut.key,
-            data: mut.data,
-          }),
-        );
-      }
-
-      // Flush queued mutations
-      this.flushMutationQueue(socket);
+      // Restore durable outbox from a previous session, then send everything.
+      await this.hydrateOutbox();
+      this.flushPendingMutations(socket);
     });
 
     socket.addEventListener("message", async (message) => {
@@ -830,6 +849,7 @@ class SyncClientClass<
           // Resolve immediately so any rare waiters are not blocked on IDB.
           this.pendingMutations.delete(msg.id);
           this.refreshActivity();
+          void this.removeOutboxEntry(msg.id);
           pending.resolve(msg.data);
 
           // Apply server canonical row off the critical path. Skip when the
@@ -844,6 +864,9 @@ class SyncClientClass<
               });
             }
           }
+        } else {
+          // Ack for a mutation restored only in outbox / already cleaned up.
+          void this.removeOutboxEntry(msg.id);
         }
         break;
       }
@@ -863,10 +886,20 @@ class SyncClientClass<
         if (pending) {
           console.warn(`Mutation ${msg.id} rejected by server`, msg.error);
           await pending.rollback();
+          void this.removeOutboxEntry(msg.id);
 
           pending.reject(this.errorCodec.deserialize(msg.error));
           this.pendingMutations.delete(msg.id);
           this.refreshActivity();
+        } else {
+          // Reject after reload: rebuild rollback from durable outbox entry.
+          const entry = await this.getOutboxEntry(msg.id);
+          if (entry) {
+            console.warn(`Mutation ${msg.id} rejected by server`, msg.error);
+            await this.rollbackOutboxEntry(entry);
+            void this.removeOutboxEntry(msg.id);
+            this.refreshActivity();
+          }
         }
         break;
       }
@@ -957,49 +990,156 @@ class SyncClientClass<
   }
 
 
+  private outboxTable(): Table<OutboxEntry, string> {
+    return this.table(SYNC_OUTBOX_TABLE) as Table<OutboxEntry, string>;
+  }
+
+  private async saveOutboxEntry(entry: OutboxEntry) {
+    const table = this.outboxTable();
+    const put = (table as any)._originalMethods?.put || table.put.bind(table);
+    await put(entry);
+  }
+
+  private async removeOutboxEntry(id: string) {
+    try {
+      const table = this.outboxTable();
+      const del = (table as any)._originalMethods?.delete || table.delete.bind(table);
+      await del(id);
+    } catch {
+      // Outbox table may not exist yet during upgrades.
+    }
+  }
+
+  private async getOutboxEntry(id: string): Promise<OutboxEntry | undefined> {
+    try {
+      return await this.outboxTable().get(id);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async rollbackOutboxEntry(entry: OutboxEntry) {
+    const tableName = this.findTableByChannel(entry.channel);
+    if (!tableName) return;
+    const table = this.table(tableName);
+    const methods = (table as any)._originalMethods ?? {
+      put: table.put.bind(table),
+      delete: table.delete.bind(table),
+    };
+    if (entry.action === "create") {
+      await methods.delete(entry.key);
+    } else if (entry.previous != null) {
+      await methods.put(entry.previous);
+    }
+  }
+
   /**
-   * Records and sends an optimistic mutation.
-   *
-   * Resolves on server `ack`, rejects after `reject` (rollback already applied).
-   * Write helpers do not await this — they return after the local IndexedDB write
-   * and run server sync in the background.
+   * Loads durable outbox rows into memory after a refresh/reconnect so they
+   * can be re-sent. Local optimistic data is already in the app tables.
    */
-  private enqueueMutation(
+  private async hydrateOutbox() {
+    let entries: OutboxEntry[] = [];
+    try {
+      entries = await this.outboxTable().orderBy("createdAt").toArray();
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (this.pendingMutations.has(entry.id)) continue;
+
+      this.pendingMutations.set(entry.id, {
+        id: entry.id,
+        channel: entry.channel,
+        action: entry.action,
+        key: entry.key,
+        data: entry.data,
+        previous: entry.previous,
+        rollback: async () => {
+          await this.rollbackOutboxEntry(entry);
+        },
+        // No UI waiter after reload.
+        resolve: () => {},
+        reject: () => {},
+      });
+    }
+
+    this.refreshActivity();
+  }
+
+  /** Sends every in-memory pending mutation over the open socket. */
+  private flushPendingMutations(socket = this.socket) {
+    if (!socket || socket !== this.socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    for (const mut of this.pendingMutations.values()) {
+      if (socket !== this.socket || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(
+        JSON.stringify({
+          type: "mutate",
+          id: mut.id,
+          channel: mut.channel,
+          action: mut.action,
+          key: mut.key,
+          data: mut.data,
+        }),
+      );
+    }
+  }
+
+  /**
+   * Persists a mutation to the durable outbox, tracks it in memory, and sends
+   * it when the socket is open. Resolves after the outbox write — not after ack.
+   */
+  private async dispatchMutation(
     channel: string,
     action: "create" | "update" | "delete",
     key: string,
     data: any,
     rollback: () => Promise<void>,
-  ): Promise<any> {
+    previous?: any,
+  ): Promise<void> {
     const mutationId = crypto.randomUUID();
 
-    return new Promise((resolve, reject) => {
-      this.pendingMutations.set(mutationId, {
-        id: mutationId,
-        channel,
-        action,
-        key,
-        data,
-        rollback,
-        resolve,
-        reject,
-      });
-      this.refreshActivity();
+    const entry: OutboxEntry = {
+      id: mutationId,
+      channel,
+      action,
+      key,
+      data,
+      previous,
+      createdAt: Date.now(),
+    };
 
-      const msg = {
-        id: mutationId,
-        channel,
-        action,
-        key,
-        data,
-      };
+    await this.saveOutboxEntry(entry);
 
-      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-        this.socket.send(JSON.stringify({ type: "mutate", ...msg }));
-      } else {
-        this.mutationQueue.push(msg);
-      }
+    this.pendingMutations.set(mutationId, {
+      id: mutationId,
+      channel,
+      action,
+      key,
+      data,
+      previous,
+      rollback,
+      resolve: () => {},
+      reject: () => {},
     });
+    this.refreshActivity();
+
+    // Offline: stays in outbox + pendingMutations until connect re-sends.
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(
+        JSON.stringify({
+          type: "mutate",
+          id: mutationId,
+          channel,
+          action,
+          key,
+          data,
+        }),
+      );
+    }
   }
 
   /**
