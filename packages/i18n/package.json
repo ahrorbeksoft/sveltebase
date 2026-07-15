@@ -1,6 +1,6 @@
 {
   "name": "@sveltebase/i18n",
-  "version": "1.7.4",
+  "version": "1.7.5",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -18,7 +18,7 @@
     }
   },
   "dependencies": {
-    "@sveltebase/state": "1.7.4",
+    "@sveltebase/state": "1.7.5",
     "use-intl": "^4.9.1"
   },
   "peerDependencies": {
