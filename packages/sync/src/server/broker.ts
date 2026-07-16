@@ -45,6 +45,13 @@ export class SyncBroker {
   private handlers = new Map<string, SyncHandler>();
   private dynamicHandlers: SyncHandler[] = [];
   private connections: Set<ISyncConnection> = new Set();
+  /**
+   * Per-connection promise chain so concurrent websocket deliveries still run
+   * handlers in arrival order. Without this, two rapid mutates (e.g. create
+   * subscription then create invoice) can interleave at `await` points and
+   * trip foreign-key constraints on the later write.
+   */
+  private connectionQueues = new WeakMap<ISyncConnection, Promise<void>>();
 
   /**
    * Creates a broker with the initial set of channel handlers.
@@ -206,13 +213,33 @@ export class SyncBroker {
   }
 
   /**
+   * Handles one client websocket message, serialized per connection.
+   *
+   * Concurrent `webSocketMessage` / `ws.on("message")` deliveries still process
+   * in order so dependent mutations (parent row then child FK) cannot race.
+   */
+  public async handleMessage(
+    conn: ISyncConnection,
+    rawMessage: string,
+    platform: SyncPlatform,
+    request: Request,
+  ) {
+    const previous = this.connectionQueues.get(conn) ?? Promise.resolve();
+    const run = previous
+      .catch(() => undefined)
+      .then(() => this.processMessage(conn, rawMessage, platform, request));
+    this.connectionQueues.set(conn, run);
+    await run;
+  }
+
+  /**
    * Handles one parsed client websocket message.
    *
    * `subscribe` runs `authorize`, fetches a snapshot, and records the channel.
    * `mutate` validates data, runs the configured write handler, acknowledges the
    * sender, then broadcasts the change to topic-matched subscribers.
    */
-  public async handleMessage(
+  private async processMessage(
     conn: ISyncConnection,
     rawMessage: string,
     platform: SyncPlatform,
