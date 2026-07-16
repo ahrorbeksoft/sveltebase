@@ -55,11 +55,7 @@ export class SyncBroker {
     this.setHandlers(handlers);
   }
 
-  private sendReject(
-    conn: ISyncConnection,
-    id: string,
-    error: unknown,
-  ) {
+  private sendReject(conn: ISyncConnection, id: string, error: unknown) {
     conn.send(
       JSON.stringify({
         type: "reject",
@@ -251,10 +247,12 @@ export class SyncBroker {
 
           conn.getSubscribedChannels().add(msg.channel);
 
-          const currentViewVersion = await this.resolveViewVersion(handler, ctx);
-          const clientViewVersion = msg.viewVersion == null
-            ? null
-            : String(msg.viewVersion);
+          const currentViewVersion = await this.resolveViewVersion(
+            handler,
+            ctx,
+          );
+          const clientViewVersion =
+            msg.viewVersion == null ? null : String(msg.viewVersion);
           const forceFull = currentViewVersion !== clientViewVersion;
 
           // Fetch snapshot with delta support. A stale view version means the
@@ -302,7 +300,9 @@ export class SyncBroker {
               msg.data = handler.config.validate.create.parse(msg.data);
             }
             if (!handler.config.create) {
-              throw new Error(`Forbidden: Create operation not supported on channel ${msg.channel}`);
+              throw new Error(
+                `Forbidden: Create operation not supported on channel ${msg.channel}`,
+              );
             }
             result = await handler.config.create(ctx, msg.data);
           } else if (msg.action === "update") {
@@ -310,12 +310,16 @@ export class SyncBroker {
               msg.data = handler.config.validate.update.parse(msg.data);
             }
             if (!handler.config.update) {
-              throw new Error(`Forbidden: Update operation not supported on channel ${msg.channel}`);
+              throw new Error(
+                `Forbidden: Update operation not supported on channel ${msg.channel}`,
+              );
             }
             result = await handler.config.update(ctx, msg.key!, msg.data);
           } else if (msg.action === "delete") {
             if (!handler.config.delete) {
-              throw new Error(`Forbidden: Delete operation not supported on channel ${msg.channel}`);
+              throw new Error(
+                `Forbidden: Delete operation not supported on channel ${msg.channel}`,
+              );
             }
             await handler.config.delete(ctx, msg.key!);
             result = { id: msg.key };
@@ -348,7 +352,9 @@ export class SyncBroker {
         `SyncBroker: error handling message type=${msg.type}:`,
         err,
       );
-      if (msg.type === "mutate") {
+      if (msg.type === "subscribe") {
+        this.sendReject(conn, "subscribe", err);
+      } else if (msg.type === "mutate") {
         this.sendReject(conn, msg.id, err);
       }
     }
@@ -542,7 +548,11 @@ export class SyncBroker {
    */
   public async handleExternalBatchChange(
     channel: string,
-    changes: Array<{ action: "create" | "update" | "delete"; key?: string; data?: any }>,
+    changes: Array<{
+      action: "create" | "update" | "delete";
+      key?: string;
+      data?: any;
+    }>,
     platform: SyncPlatform = { env: {} },
     request?: Request,
   ) {

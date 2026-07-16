@@ -17,12 +17,13 @@ interface WsWebSocketServer {
 /**
  * Options for the local Vite websocket sync plugin.
  */
-export type SyncDevPluginOptions<TAuth = unknown> = SyncDevAuthOptions<TAuth> & {
-  /** Module path loaded by Vite SSR to get `handlers`. */
-  handlersPath?: string;
-  /** Local websocket path. Defaults to `"/api/sync"`. */
-  path?: string;
-};
+export type SyncDevPluginOptions<TAuth = unknown> =
+  SyncDevAuthOptions<TAuth> & {
+    /** Module path loaded by Vite SSR to get `handlers`. */
+    handlersPath?: string;
+    /** Local websocket path. Defaults to `"/api/sync"`. */
+    path?: string;
+  };
 
 /**
  * Vite dev plugin that serves sync websockets without Cloudflare Durable Objects.
@@ -46,6 +47,23 @@ export function syncDevPlugin<TAuth = unknown>(
         WebSocketServer: new (opts: { noServer: boolean }) => WsWebSocketServer;
       };
       const wss = new WebSocketServer({ noServer: true });
+
+      // Install the in-memory broker immediately so server-side publish*
+      // works before any client opens a WebSocket (login, remote commands).
+      // Handlers are replaced on the first upgrade once Vite can SSR-load them.
+      try {
+        const devEngine = await import("@sveltebase/sync/server/dev-engine");
+        if (typeof devEngine.setHandlers === "function") {
+          // Empty handlers are fine for broadcast-only fan-out; upgrade path
+          // calls setHandlers again with the real module.
+          (devEngine.setHandlers as (handlers: unknown[]) => void)([]);
+        }
+      } catch (err) {
+        console.warn(
+          "sync dev plugin: could not install publisher broker early",
+          err,
+        );
+      }
 
       server.httpServer?.on("upgrade", (request, socket, head) => {
         const url = new URL(
@@ -76,27 +94,45 @@ export function syncDevPlugin<TAuth = unknown>(
                 handlersModule.handlers,
               );
 
-              (client as any).off("message", onMessage);
-
               const authMetadata = options?.auth as
                 | {
                     identity?: (
                       auth: TAuth,
                     ) => string | number | bigint | null | undefined;
+                    allowUnauthenticated?: boolean;
                   }
                 | undefined;
 
-              const connected = await (devEngine.addClient as (
-                ws: unknown,
-                req: IncomingMessage,
-                options?: SyncDevAuthOptions<TAuth>,
-              ) => Promise<boolean>)(client, request, {
+              // Prefer explicit options.topics; otherwise use resolveSyncTopics
+              // exported next to handlers (avoids $lib imports in vite.config).
+              const topics =
+                options?.topics ??
+                (handlersModule.resolveSyncTopics as
+                  | SyncDevAuthOptions<TAuth>["topics"]
+                  | undefined);
+
+              const connected = await (
+                devEngine.addClient as (
+                  ws: unknown,
+                  req: IncomingMessage,
+                  options?: SyncDevAuthOptions<TAuth>,
+                ) => Promise<boolean>
+              )(client, request, {
                 auth: options?.auth,
                 identity: options?.identity ?? authMetadata?.identity,
-                allowUnauthenticated: options?.allowUnauthenticated,
+                topics,
+                allowUnauthenticated:
+                  options?.allowUnauthenticated ??
+                  authMetadata?.allowUnauthenticated,
                 platform: options?.platform,
                 wranglerConfigPath: options?.wranglerConfigPath,
               });
+
+              // addClient installs the permanent message listener. Keep the
+              // temporary queue attached until that listener exists so eager
+              // subscriptions sent immediately after `open` cannot disappear
+              // during async auth/topic resolution.
+              (client as any).off("message", onMessage);
 
               if (!connected) return;
 

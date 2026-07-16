@@ -12,13 +12,17 @@ Peer deps: Svelte 5, SvelteKit. Install `@sveltebase/sync` if you use client ver
 
 ## How sessions work
 
-A session is an HMAC-SHA256 JWT stored in an HTTP-only cookie (`sf_session` by default). The payload is your user object:
+A session is an HMAC-SHA256 JWT stored in an HTTP-only cookie (`sf_session` by default). The payload separates **profile** from **claims**:
 
 ```ts
-{ user: { id: "…", /* your fields */ }, exp?: number }
+{
+  user: { id: "…", /* profile fields mirrored in verifyTable */ },
+  claims: { activeRoleId?: "…", /* session-only state */ },
+  exp?: number
+}
 ```
 
-Keep the signing secret private and stable — rotating it logs everyone out. The cookie is **signed, not encrypted**, so don’t put secrets in the user snapshot.
+Claims are for things that are not columns on the user row (active role, tenant, etc.). Profile refresh preserves claims. Keep the signing secret private and stable — rotating it logs everyone out. The cookie is **signed, not encrypted**, so don’t put secrets in the snapshot.
 
 ## Entry points
 
@@ -26,10 +30,11 @@ Keep the signing secret private and stable — rotating it logs everyone out. Th
 | --- | --- |
 | `@sveltebase/auth` | JWT helpers, cookie parsing, shared errors |
 | `@sveltebase/auth/server` | `createServerAuth` |
-| `@sveltebase/auth/sveltekit` | Auth API routes |
-| `@sveltebase/auth/client` | Reactive client auth |
-| `@sveltebase/auth/sync` | Websocket auth for sync |
+| `@sveltebase/auth/sveltekit` | Auth API routes (`login`, `refresh`, `claims`, `google`, `tma`) |
+| `@sveltebase/auth/client` | Reactive client auth (`user` + `claims`) |
+| `@sveltebase/auth/sync` | Websocket auth for sync (merges claims onto auth user) |
 | `@sveltebase/auth/google` | Google Identity Services UI + server verify |
+| `@sveltebase/auth/telegram` | Telegram Mini App `verifyInitData` + helpers |
 
 ## Server setup
 
@@ -38,7 +43,9 @@ Keep the signing secret private and stable — rotating it logs everyone out. Th
 import { createServerAuth } from "@sveltebase/auth/server";
 import type { User } from "$lib/types";
 
-export const auth = createServerAuth<User>({
+type Claims = { activeRoleId?: string };
+
+export const auth = createServerAuth<User, Claims>({
   secret: process.env.JWT_SECRET!
   // cookieName: "sf_session",  // optional
   // cookieOptions: { secure: false }  // for local HTTP
@@ -50,15 +57,18 @@ Defaults: cookie `sf_session`, `path: "/"`, `httpOnly: true`, `secure: true`, `s
 ### Methods
 
 ```ts
-await auth.login(cookies, user, { maxAge: 60 * 60 * 24 * 30 });
-const user = await auth.getUser(cookies); // User | null
-await auth.refresh(cookies, user);
+await auth.login(cookies, user, { claims: { activeRoleId }, maxAge: 60 * 60 * 24 * 30 });
+const session = await auth.getSession(cookies); // { user, claims } | null
+const user = await auth.getUser(cookies);       // profile only
+await auth.setClaims(cookies, { activeRoleId: "…" });
+await auth.refresh(cookies, user);              // preserves claims
 auth.logout(cookies);
 ```
 
-- **login** — signs the user, writes the cookie, returns the user
-- **getUser** — verifies the cookie; missing/invalid/expired → `null`
-- **refresh** — re-signs with a fresh expiration
+- **login** — signs profile + claims, writes the cookie, returns `{ user, claims }`
+- **getSession** / **getUser** / **getClaims** — verify the cookie
+- **setClaims** — update claims without reloading the profile
+- **refresh** — re-signs with a fresh profile; claims are preserved unless overridden
 - **logout** — deletes the cookie
 
 ## SvelteKit routes
@@ -91,10 +101,14 @@ export const { GET, POST } = createAuthRoutes({
 
 | Action | Method | What it does |
 | --- | --- | --- |
-| `/login` | POST | Runs `login`, sets cookie, returns user |
+| `/login` | POST | Runs `login`, sets cookie, returns `{ user, claims }` |
 | `/logout` | POST | Clears cookie (204) |
-| `/refresh` | POST | Re-validates session via `getUser` |
+| `/refresh` | POST | Reloads **profile** via `getUser`; preserves claims |
+| `/claims` | POST | Updates claims (`setClaims` callback optional) |
 | `/google` | POST | Verifies Google ID token, runs `google.getUser` |
+| `/tma` | POST | Verifies Telegram initData, runs `tma.getUser` |
+
+Login callbacks may return a plain profile or `{ user, claims }`.
 
 Missing callbacks return 404 for that action. Request bodies are JSON (parse failures become `{}`).
 
@@ -106,9 +120,10 @@ Missing callbacks return 404 for that action. Request bodies are JSON (parse fai
 // src/lib/auth.ts
 import { createAuth } from "@sveltebase/auth/client";
 
-export const auth = createAuth<User>({
+export const auth = createAuth<User, Claims>({
   routesBase: "/api/auth",
-  verifyTable: "users" // optional: sync table for live verification
+  verifyTable: "users", // optional: sync table for live verification
+  reconnect: "if-connected" // default — do not abort a first connect after login
 });
 ```
 
@@ -119,14 +134,19 @@ Initialize from server load data in a root layout:
   import { auth } from "$lib/auth";
 
   let { data } = $props();
-  auth.init(() => data.user); // User | null, or a function returning either
+  auth.init(() => data.user, () => data.claims);
+  // Always attach the dynamic client (not only when .client exists):
+  auth.setClient(app.sync);
 </script>
 ```
 
 ### State
 
 ```ts
-auth.user;            // User | null
+auth.user;            // profile User | null
+auth.claims;          // Claims (e.g. { activeRoleId })
+auth.session;         // { user, claims } | null
+auth.sessionUser;     // flattened User & Claims | null
 auth.isReady;         // finished startup
 auth.isVerifying;     // refresh or sync check in progress
 auth.isAuthenticated; // ready && user != null
@@ -135,13 +155,15 @@ auth.isAuthenticated; // ready && user != null
 ### Actions
 
 ```ts
-await auth.login({ email, password });
-await auth.loginWithGoogle(credential); // Google ID token
+await auth.login({ email, password }, { reconnect: false });
+await auth.loginWithGoogle(credential);
+await auth.loginWithTma({ initData, domain });
+await auth.setClaims({ activeRoleId }, { reconnect: true });
 await auth.refresh();
-await auth.logout();
+await auth.logout(); // clears cookie + IDB + disconnects sync
 ```
 
-If a sync client is attached, login/refresh wait for a matching row in `verifyTable`. When that row disappears or verification fails, the client clears the user, runs `onInvalidSession`, and wipes local sync tables so leftover IndexedDB data doesn’t stick around.
+If a sync client is attached, login/refresh wait for a matching row in `verifyTable` (profile only). When that row disappears or verification fails, the client clears the session, runs `onInvalidSession` / `onLogout`, wipes local tables, and disconnects.
 
 ### Useful options
 
@@ -218,6 +240,31 @@ Options (all optional):
 - `secret` / `secretBinding` — signing key (default binding: `JWT_SECRET`)
 - `cookieName` — default `sf_session`
 - `identity` — defaults to `user.id` for the `user:…` topic
+
+## Telegram Mini App
+
+```ts
+import { verifyInitData } from "@sveltebase/auth/telegram";
+// or mount a first-class route:
+createAuthRoutes({
+  auth,
+  tma: {
+    getBotToken: async (event, body) => findBotToken(body.domain),
+    getUser: async (initData, event, body) => {
+      // map verified initData.user → your profile + claims
+      return { user, claims: { activeRoleId } };
+    },
+    maxAgeSeconds: 86_400
+  }
+});
+```
+
+```ts
+// client
+await auth.loginWithTma({ initData: Telegram.WebApp.initData, domain });
+```
+
+`verifyInitData` uses Web Crypto HMAC (works on Cloudflare Workers). It checks signature, `auth_date` age, and returns a typed payload.
 
 ## Google sign-in
 

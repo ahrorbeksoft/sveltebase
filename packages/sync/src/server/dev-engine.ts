@@ -222,7 +222,8 @@ export async function addClient(
         new Set([...baseTopics, ...(await options.topics(topicCtx))]),
       );
     }
-  } catch {
+  } catch (error) {
+    console.error("sync dev engine: websocket setup failed", error);
     ws.close(1011, "Internal server error");
     return false;
   }

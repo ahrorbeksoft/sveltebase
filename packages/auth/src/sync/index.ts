@@ -1,59 +1,55 @@
-import { getVerifiedUserFromRequest } from "../index.js";
+import {
+  getVerifiedSessionFromRequest,
+  mergeSessionUser,
+} from "../index.js";
 import type { SyncPlatform } from "@sveltebase/sync";
 
 /**
  * Creates a sync websocket auth resolver backed by the signed session cookie.
  *
- * The returned function can be passed to `syncDevPlugin`, `syncEngineRoute`, or
- * `createSyncAppWorker`. It also carries metadata that marks unauthenticated
- * websocket connections as forbidden and uses `user.id` as the default scope
- * identity.
+ * Returns the **merged** profile + claims object so handlers can read claims
+ * like `activeRoleId` on `ctx.auth.user` without a separate claims field.
  *
- * @example
- * ```ts
- * createSyncAppWorker(app, {
- *   handlers,
- *   auth: sessionCookieAuth<User>({ secretBinding: "JWT_SECRET" })
- * });
- * ```
+ * The returned function can be passed to `syncDevPlugin`, `syncEngineRoute`, or
+ * `createSyncAppWorker`. It marks unauthenticated websockets as forbidden and
+ * uses `user.id` as the default identity.
  */
-export function sessionCookieAuth<User extends { id: string }>(options?: {
-  /**
-   * Session signing secret or resolver.
-   *
-   * If omitted, the secret is read from `platform.env[secretBinding]`.
-   */
+export function sessionCookieAuth<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+>(options?: {
   secret?: string | ((platform: SyncPlatform) => string | undefined);
-  /** Env binding name used when `secret` is not provided. */
   secretBinding?: string;
-  /** Session cookie name. Defaults to `"sf_session"`. */
   cookieName?: string;
-  /** Converts the verified user into the identity used by sync `scope`. */
-  identity?: (user: User) => string | number | bigint | null | undefined;
+  identity?: (
+    user: User & Claims,
+  ) => string | number | bigint | null | undefined;
 }) {
   const resolver = async (request: Request, platform: SyncPlatform) => {
     const secretBinding = options?.secretBinding ?? "JWT_SECRET";
     const secret =
       typeof options?.secret === "function"
         ? options.secret(platform)
-        : options?.secret ?? platform.env[secretBinding];
+        : (options?.secret ?? platform.env[secretBinding]);
     if (!secret) {
       throw new Error(`Missing ${secretBinding} binding for sync auth`);
     }
 
-    const user = await getVerifiedUserFromRequest<User>(
+    const session = await getVerifiedSessionFromRequest<User, Claims>(
       request,
       String(secret),
       options?.cookieName,
     );
 
-    if (!user) return null;
+    if (!session) return null;
 
-    return user;
+    return mergeSessionUser(session.user, session.claims);
   };
 
   return Object.assign(resolver, {
     allowUnauthenticated: false,
-    identity: options?.identity ?? ((user: User) => user.id),
+    identity:
+      options?.identity ??
+      ((user: User & Claims) => user.id),
   });
 }

@@ -47,7 +47,16 @@ export type DynamicSyncClient<
   setData(
     data: DynamicSyncContextInput<TContext>,
   ): SyncClientType<TSchema> | undefined;
-  reconnect(): void;
+  reconnect(options?: { force?: boolean }): void;
+  whenConnected(options?: {
+    timeoutMs?: number;
+    reconnectIfDisconnected?: boolean;
+  }): Promise<void>;
+  whenIdle(options?: { timeoutMs?: number }): Promise<void>;
+  resyncTables(
+    tableNames: Array<keyof TSchema & string>,
+    options?: { reconnect?: boolean; wait?: boolean },
+  ): Promise<Record<string, any[]>>;
   disconnect(): void;
   onClientChange(
     callback: (client: SyncClientType<TSchema>, context: TContext) => void,
@@ -188,8 +197,26 @@ class DynamicSyncClientController<
     };
   }
 
-  reconnect(): void {
-    this.requireClient().reconnect();
+  reconnect(options?: { force?: boolean }): void {
+    this.requireClient().reconnect(options);
+  }
+
+  whenConnected(options?: {
+    timeoutMs?: number;
+    reconnectIfDisconnected?: boolean;
+  }): Promise<void> {
+    return this.requireClient().whenConnected(options);
+  }
+
+  whenIdle(options?: { timeoutMs?: number }): Promise<void> {
+    return this.requireClient().whenIdle(options);
+  }
+
+  resyncTables(
+    tableNames: Array<keyof TSchema & string>,
+    options?: { reconnect?: boolean; wait?: boolean },
+  ): Promise<Record<string, any[]>> {
+    return this.requireClient().resyncTables(tableNames, options);
   }
 
   disconnect(): void {
@@ -210,8 +237,13 @@ class DynamicSyncClientController<
     this.#client = undefined;
     this.#context = undefined;
     this.#hasContext = false;
+    // Disconnect first so the old socket cannot race auto-reconnect after close().
     previousClient?.disconnect();
-    previousClient?.close();
+    try {
+      previousClient?.close();
+    } catch {
+      // Dexie may already be closed.
+    }
   }
 
   /**
@@ -232,12 +264,22 @@ class DynamicSyncClientController<
     this.#context = next;
     this.#hasContext = true;
 
+    // Tear down the previous client *before* opening the next one.
+    // Otherwise two SyncClients share the same name/URL briefly and both log
+    // "WebSocket connected", then fight over IndexedDB.
     const previousClient = this.#client;
+    if (previousClient) {
+      previousClient.disconnect();
+      try {
+        previousClient.close();
+      } catch {
+        // ignore
+      }
+      this.#client = undefined;
+    }
+
     const nextClient = new this.#SyncClient<TSchema>(this.#factory(next));
     this.#client = nextClient;
-
-    previousClient?.disconnect();
-    previousClient?.close();
 
     for (const listener of this.#listeners) {
       listener(nextClient, next);
@@ -309,7 +351,16 @@ export function createDynamicSyncClient<
     onClientChange: (
       callback: (client: SyncClientType<TSchema>, context: TContext) => void,
     ) => controller.onClientChange(callback),
-    reconnect: () => controller.reconnect(),
+    reconnect: (options?: { force?: boolean }) => controller.reconnect(options),
+    whenConnected: (options?: {
+      timeoutMs?: number;
+      reconnectIfDisconnected?: boolean;
+    }) => controller.whenConnected(options),
+    whenIdle: (options?: { timeoutMs?: number }) => controller.whenIdle(options),
+    resyncTables: (
+      tableNames: Array<keyof TSchema & string>,
+      options?: { reconnect?: boolean; wait?: boolean },
+    ) => controller.resyncTables(tableNames, options),
     disconnect: () => controller.disconnect(),
   };
 

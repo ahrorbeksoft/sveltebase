@@ -222,6 +222,16 @@ export function defineSync<TRow = any, TAuth = any>(
 }
 
 export {
+  definePolicySync,
+} from "./policy.js";
+export type {
+  PolicyContextFn,
+  PolicyMutations,
+  PolicyRules,
+  PolicySyncOptions,
+} from "./policy.js";
+
+export {
   createBulkPublisher,
   createPublishChangeEvent,
   createPublishResetEvent,

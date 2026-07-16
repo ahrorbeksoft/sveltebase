@@ -10,12 +10,26 @@ export type {
 /**
  * Data stored inside the signed session cookie.
  *
- * `user` is the application user snapshot returned by your login code. `exp`
- * is a Unix timestamp in seconds and is checked during verification.
+ * `user` is the profile snapshot (usually mirrors a DB row / verify table).
+ * `claims` is session-only state (active role, tenant, etc.) that is not part
+ * of the profile table.
  */
-export type SessionPayload<User extends { id: string }> = {
+export type SessionPayload<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+> = {
   user: User;
+  claims: Claims;
   exp?: number;
+};
+
+/** Runtime session returned by server/client helpers. */
+export type AuthSession<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+> = {
+  user: User;
+  claims: Claims;
 };
 
 /**
@@ -49,9 +63,6 @@ export interface AuthConfig {
 
 /**
  * Encodes bytes using Base64URL without padding.
- *
- * Used by JWT signing. It avoids Node-only APIs so it works in browsers, edge
- * runtimes, and Cloudflare Workers.
  */
 export function base64urlEncode(uint8Array: Uint8Array): string {
   let binary = "";
@@ -65,8 +76,6 @@ export function base64urlEncode(uint8Array: Uint8Array): string {
 
 /**
  * Decodes a Base64URL string back into bytes.
- *
- * Accepts strings with or without padding.
  */
 export function base64urlDecode(str: string): Uint8Array {
   let base64 = str.replace(/-/g, "+").replace(/_/g, "/");
@@ -81,23 +90,14 @@ export function base64urlDecode(str: string): Uint8Array {
   return bytes;
 }
 
-/**
- * Encodes a UTF-8 string as Base64URL.
- */
 function stringToBase64url(str: string): string {
   return base64urlEncode(new TextEncoder().encode(str));
 }
 
-/**
- * Decodes a Base64URL string into UTF-8 text.
- */
 function base64urlToString(str: string): string {
   return new TextDecoder().decode(base64urlDecode(str));
 }
 
-/**
- * Imports the session secret as an HMAC-SHA256 Web Crypto key.
- */
 async function getCryptoKey(secret: string): Promise<CryptoKey> {
   const encoder = new TextEncoder();
   const keyData = encoder.encode(secret);
@@ -106,27 +106,22 @@ async function getCryptoKey(secret: string): Promise<CryptoKey> {
     keyData,
     { name: "HMAC", hash: "SHA-256" },
     false,
-    ["sign", "verify"]
+    ["sign", "verify"],
   );
 }
 
 /**
  * Signs a payload into a JWT using HMAC-SHA256.
- *
- * @param payload JSON-serializable claims to place in the token body.
- * @param secret HMAC secret used to sign the token.
- * @param expiresAt Optional expiration time in milliseconds since epoch.
- *
- * @example
- * ```ts
- * const token = await signJWT({ user: { id: "u1" } }, secret);
- * ```
  */
-export async function signJWT(payload: Record<string, any>, secret: string, expiresAt?: number): Promise<string> {
+export async function signJWT(
+  payload: Record<string, any>,
+  secret: string,
+  expiresAt?: number,
+): Promise<string> {
   const header = { alg: "HS256", typ: "JWT" };
   const fullPayload = {
     ...payload,
-    ...(expiresAt ? { exp: Math.floor(expiresAt / 1000) } : {})
+    ...(expiresAt ? { exp: Math.floor(expiresAt / 1000) } : {}),
   };
 
   const headerStr = stringToBase64url(JSON.stringify(header));
@@ -142,13 +137,11 @@ export async function signJWT(payload: Record<string, any>, secret: string, expi
 
 /**
  * Verifies a JWT using HMAC-SHA256 and returns its payload.
- *
- * Throws when the token format, signature, or expiration is invalid.
- *
- * @param token JWT string produced by `signJWT`.
- * @param secret Same secret used to sign the token.
  */
-export async function verifyJWT(token: string, secret: string): Promise<Record<string, any>> {
+export async function verifyJWT(
+  token: string,
+  secret: string,
+): Promise<Record<string, any>> {
   const parts = token.split(".");
   if (parts.length !== 3) {
     throw new Error("Invalid token format");
@@ -159,7 +152,12 @@ export async function verifyJWT(token: string, secret: string): Promise<Record<s
   const signatureBytes = base64urlDecode(signatureStr);
 
   const key = await getCryptoKey(secret);
-  const isValid = await crypto.subtle.verify("HMAC", key, signatureBytes as unknown as BufferSource, dataToVerify as unknown as BufferSource);
+  const isValid = await crypto.subtle.verify(
+    "HMAC",
+    key,
+    signatureBytes as unknown as BufferSource,
+    dataToVerify as unknown as BufferSource,
+  );
   if (!isValid) {
     throw new Error("Invalid signature");
   }
@@ -174,59 +172,82 @@ export async function verifyJWT(token: string, secret: string): Promise<Record<s
 
 /**
  * Signs a full session payload into an opaque cookie value.
- *
- * This is a thin wrapper around `signJWT` for session-shaped payloads.
  */
-export async function signSessionPayload<User extends { id: string }>(
-  payload: SessionPayload<User>,
-  secret: string,
-): Promise<string> {
+export async function signSessionPayload<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+>(payload: SessionPayload<User, Claims>, secret: string): Promise<string> {
   return signJWT(payload, secret);
+}
+
+function normalizeSessionPayload<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+>(payload: Record<string, any>): SessionPayload<User, Claims> {
+  if (!payload.user || typeof payload.user.id !== "string") {
+    throw new Error("Invalid session payload");
+  }
+
+  // Claims live in `payload.claims`. Empty object when missing.
+  const claims = (payload.claims ?? {}) as Claims;
+
+  return {
+    user: payload.user as User,
+    claims,
+    ...(payload.exp ? { exp: payload.exp } : {}),
+  };
 }
 
 /**
  * Verifies a signed session cookie value and returns the full session payload.
- *
- * Throws when the cookie cannot be verified or when it does not contain a
- * `user.id` string.
  */
-export async function verifySessionPayload<User extends { id: string }>(
-  cookieValue: string,
-  secret: string,
-): Promise<SessionPayload<User>> {
+export async function verifySessionPayload<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+>(cookieValue: string, secret: string): Promise<SessionPayload<User, Claims>> {
   const payload = await verifyJWT(cookieValue, secret);
-  if (!payload.user || typeof payload.user.id !== "string") {
-    throw new Error("Invalid session payload");
-  }
-  return payload as SessionPayload<User>;
+  return normalizeSessionPayload<User, Claims>(payload);
 }
 
 /**
- * Extracts and verifies the signed user session from SvelteKit cookies.
- *
- * Returns `null` instead of throwing for missing, expired, or invalid cookies.
+ * Extracts and verifies the signed session from SvelteKit cookies.
  */
-export async function getUserFromCookie<User extends { id: string }>(
+export async function getSessionFromCookie<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+>(
   cookies: Cookies,
   secret: string,
   cookieName = "sf_session",
-): Promise<User | null> {
+): Promise<AuthSession<User, Claims> | null> {
   const cookieVal = cookies.get(cookieName);
   if (!cookieVal) return null;
 
   try {
-    const session = await verifySessionPayload<User>(cookieVal, secret);
-    return session.user;
+    const session = await verifySessionPayload<User, Claims>(cookieVal, secret);
+    return { user: session.user, claims: session.claims };
   } catch {
     return null;
   }
 }
 
 /**
- * Parses a raw Cookie header string into key-value pairs.
+ * Extracts and verifies the signed user profile from SvelteKit cookies.
  *
- * Used by request-based auth helpers where SvelteKit `cookies` are not
- * available, such as sync websocket auth.
+ * Returns `null` instead of throwing for missing, expired, or invalid cookies.
+ * Session claims are not included — use `getSessionFromCookie` when you need them.
+ */
+export async function getUserFromCookie<User extends { id: string }>(
+  cookies: Cookies,
+  secret: string,
+  cookieName = "sf_session",
+): Promise<User | null> {
+  const session = await getSessionFromCookie<User>(cookies, secret, cookieName);
+  return session?.user ?? null;
+}
+
+/**
+ * Parses a raw Cookie header string into key-value pairs.
  */
 export function parseCookies(cookieHeader: string): Record<string, string> {
   const cookies: Record<string, string> = {};
@@ -241,15 +262,16 @@ export function parseCookies(cookieHeader: string): Record<string, string> {
 }
 
 /**
- * Extracts and verifies the signed user session from standard Request headers.
- *
- * Returns `null` when the cookie header is missing or the session is invalid.
+ * Extracts and verifies the signed session from standard Request headers.
  */
-export async function getUserFromRequest<User extends { id: string }>(
+export async function getSessionFromRequest<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+>(
   request: Request,
   secret: string,
   cookieName = "sf_session",
-): Promise<User | null> {
+): Promise<AuthSession<User, Claims> | null> {
   const cookieHeader = request.headers.get("Cookie");
   if (!cookieHeader) return null;
 
@@ -258,17 +280,29 @@ export async function getUserFromRequest<User extends { id: string }>(
   if (!rawSession) return null;
 
   try {
-    const session = await verifySessionPayload<User>(rawSession, secret);
-    return session.user;
+    const session = await verifySessionPayload<User, Claims>(rawSession, secret);
+    return { user: session.user, claims: session.claims };
   } catch {
     return null;
   }
 }
 
 /**
- * Extracts and cryptographically verifies the user session from standard Request headers.
+ * Extracts and verifies the signed user profile from standard Request headers.
+ */
+export async function getUserFromRequest<User extends { id: string }>(
+  request: Request,
+  secret: string,
+  cookieName = "sf_session",
+): Promise<User | null> {
+  const session = await getSessionFromRequest<User>(request, secret, cookieName);
+  return session?.user ?? null;
+}
+
+/**
+ * Extracts and cryptographically verifies the user profile from Request headers.
  *
- * Alias for `getUserFromRequest` kept for readability at sync auth call sites.
+ * Alias for `getUserFromRequest` kept for readability at call sites.
  */
 export async function getVerifiedUserFromRequest<User extends { id: string }>(
   request: Request,
@@ -279,18 +313,46 @@ export async function getVerifiedUserFromRequest<User extends { id: string }>(
 }
 
 /**
+ * Extracts and verifies the full session (profile + claims) from Request headers.
+ */
+export async function getVerifiedSessionFromRequest<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+>(
+  request: Request,
+  secret: string,
+  cookieName = "sf_session",
+): Promise<AuthSession<User, Claims> | null> {
+  return getSessionFromRequest<User, Claims>(request, secret, cookieName);
+}
+
+/**
+ * Merges profile + claims into a single object for places that still expect a
+ * flat session identity (e.g. sync auth `ctx.auth.user`).
+ */
+export function mergeSessionUser<
+  User extends { id: string },
+  Claims extends Record<string, unknown>,
+>(user: User, claims: Claims): User & Claims {
+  return { ...user, ...claims };
+}
+
+type CookieWriteOptions = {
+  maxAge?: number;
+  expires?: Date;
+  claims?: Record<string, unknown>;
+};
+
+/**
  * Creates SvelteKit server-side session management helpers.
  *
- * The returned methods sign, verify, refresh, and delete the configured session
- * cookie. Use these helpers in hooks and auth route handlers.
- *
- * @example
- * ```ts
- * const auth = createServerAuth<User>({ secret: env.JWT_SECRET });
- * await auth.login(event.cookies, user, { maxAge: 60 * 60 * 24 });
- * ```
+ * Profile (`user`) and session claims are stored separately in the cookie so
+ * role/tenant state does not thrash profile refresh against the verify table.
  */
-export function createServerAuth<User extends { id: string }>(config: AuthConfig) {
+export function createServerAuth<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+>(config: AuthConfig) {
   const cookieName = config.cookieName || "sf_session";
   const defaultCookieOptions = {
     path: "/",
@@ -300,76 +362,122 @@ export function createServerAuth<User extends { id: string }>(config: AuthConfig
     ...config.cookieOptions,
   };
 
+  function resolveExpiresAt(options?: CookieWriteOptions): number | undefined {
+    if (options?.maxAge) {
+      return Date.now() + options.maxAge * 1000;
+    }
+    if (options?.expires) {
+      return options.expires.getTime();
+    }
+    if (defaultCookieOptions.maxAge) {
+      return Date.now() + defaultCookieOptions.maxAge * 1000;
+    }
+    return undefined;
+  }
+
+  async function writeSession(
+    cookies: Cookies,
+    user: User,
+    claims: Claims,
+    options?: CookieWriteOptions,
+  ): Promise<AuthSession<User, Claims>> {
+    const expiresAt = resolveExpiresAt(options);
+    const cookieVal = await signSessionPayload<User, Claims>(
+      {
+        user,
+        claims,
+        ...(expiresAt ? { exp: Math.floor(expiresAt / 1000) } : {}),
+      },
+      config.secret,
+    );
+    cookies.set(cookieName, cookieVal, {
+      ...defaultCookieOptions,
+      ...options,
+    });
+    return { user, claims };
+  }
+
   return {
     /**
-     * Signs the full session payload and writes it to the SvelteKit cookies.
-     *
-     * Called after your app has validated credentials and selected the user to
-     * store in the session.
+     * Signs profile + claims and writes the session cookie.
      */
     async login(
       cookies: Cookies,
       userPayload: User,
-      options?: { maxAge?: number; expires?: Date }
-    ): Promise<User> {
-      let expiresAt: number | undefined;
-      if (options?.maxAge) {
-        expiresAt = Date.now() + options.maxAge * 1000;
-      } else if (options?.expires) {
-        expiresAt = options.expires.getTime();
-      } else if (defaultCookieOptions.maxAge) {
-        expiresAt = Date.now() + defaultCookieOptions.maxAge * 1000;
-      }
-
-      const cookieVal = await signSessionPayload<User>(
-        {
-          user: userPayload,
-          ...(expiresAt ? { exp: Math.floor(expiresAt / 1000) } : {}),
-        },
-        config.secret,
-      );
-      cookies.set(cookieName, cookieVal, {
-        ...defaultCookieOptions,
-        ...options,
-      });
-
-      return userPayload;
+      options?: CookieWriteOptions & { claims?: Claims },
+    ): Promise<AuthSession<User, Claims>> {
+      const claims = (options?.claims ?? ({} as Claims)) as Claims;
+      return writeSession(cookies, userPayload, claims, options);
     },
 
     /**
-     * Verifies the signed session cookie and returns the stored user snapshot.
-     *
-     * Usually called from `hooks.server.ts` or route handlers to read the
-     * current session.
+     * Verifies the cookie and returns profile + claims.
+     */
+    async getSession(
+      cookies: Cookies,
+    ): Promise<AuthSession<User, Claims> | null> {
+      return getSessionFromCookie<User, Claims>(cookies, config.secret, cookieName);
+    },
+
+    /**
+     * Verifies the cookie and returns the profile only.
      */
     async getUser(cookies: Cookies): Promise<User | null> {
-      return getUserFromCookie<User>(cookies, config.secret, cookieName);
+      const session = await this.getSession(cookies);
+      return session?.user ?? null;
     },
 
     /**
-     * Rewrites the signed session cookie with a fresh user object.
-     *
-     * Use this when user fields stored in the cookie changed and the browser
-     * should receive an updated session snapshot.
+     * Verifies the cookie and returns claims (empty object when missing).
+     */
+    async getClaims(cookies: Cookies): Promise<Claims> {
+      const session = await this.getSession(cookies);
+      return (session?.claims ?? ({} as Claims)) as Claims;
+    },
+
+    /**
+     * Rewrites the cookie with a fresh profile, preserving claims unless overridden.
      */
     async refresh(
       cookies: Cookies,
       userPayload: User,
-      options?: { maxAge?: number; expires?: Date },
-    ): Promise<User> {
-      return this.login(cookies, userPayload, options);
+      options?: CookieWriteOptions & { claims?: Claims },
+    ): Promise<AuthSession<User, Claims>> {
+      const existing = await this.getSession(cookies);
+      const claims = (options?.claims ?? existing?.claims ?? ({} as Claims)) as Claims;
+      return writeSession(cookies, userPayload, claims, options);
     },
 
     /**
-     * Deletes the session cookie to clear the session.
-     *
-     * Called by logout routes and invalid-session handling.
+     * Updates session claims while keeping the current profile.
+     */
+    async setClaims(
+      cookies: Cookies,
+      claims: Claims | ((current: Claims) => Claims),
+      options?: CookieWriteOptions,
+    ): Promise<AuthSession<User, Claims> | null> {
+      const existing = await this.getSession(cookies);
+      if (!existing) return null;
+      const nextClaims =
+        typeof claims === "function"
+          ? claims(existing.claims)
+          : claims;
+      return writeSession(cookies, existing.user, nextClaims, options);
+    },
+
+    /**
+     * Deletes the session cookie.
      */
     logout(cookies: Cookies, options?: { path?: string; domain?: string }): void {
       cookies.delete(cookieName, {
         path: "/",
         ...options,
       });
-    }
+    },
   };
 }
+
+export type ServerAuth<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+> = ReturnType<typeof createServerAuth<User, Claims>>;

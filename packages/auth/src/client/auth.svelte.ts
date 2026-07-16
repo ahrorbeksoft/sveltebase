@@ -6,31 +6,32 @@ import {
   type AuthErrorInput,
   type SerializableErrorConstructor,
 } from "../errors.js";
+import type { AuthSession } from "../index.js";
 
 /**
  * Value or getter used to keep auth state connected to SvelteKit load data.
  */
 export type MaybeGetter<T> = T | (() => T);
 
+/** When / whether to reconnect the sync client after login. */
+export type AuthReconnectPolicy = boolean | "if-connected";
+
 /**
  * Client-side auth state options.
+ *
+ * The cookie is the session source of truth. When a sync client is attached,
+ * the configured profile table provides live invalidation and profile refresh.
  */
-export interface AuthClientConfig {
+export interface AuthClientConfig<
+  User extends { id: string } = { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+> {
   /**
-   * The Svelteflare Sync client instance.
-   * If provided, session verification will run automatically over the WebSocket connection.
+   * Optional sync client or dynamic wrapper used for profile verification.
    */
-  syncClient?: SyncClient<any>;
-  /**
-   * Sync table used to verify the current session after SSR.
-   * @default "users"
-   */
+  syncClient?: SyncClient<any> | any;
   verifyTable?: string;
-  /**
-   * App-specific comparison for deciding if a synced verify row belongs to
-   * the current session user.
-   */
-  verifyUser?: (sessionUser: any, syncedUser: any) => boolean;
+  verifyUser?: (sessionUser: User, syncedUser: any) => boolean;
   /**
    * Base path for auth route handlers.
    * @default "/api/auth"
@@ -38,40 +39,62 @@ export interface AuthClientConfig {
   routesBase?: string;
   /** Error classes to restore from failed auth route responses. */
   errorClasses?: readonly SerializableErrorConstructor[];
-  /**
-   * Called when the verification table subscription fails.
-   */
   onInvalidSession?: () => void | Promise<void>;
+  onLogout?: () => void | Promise<void>;
+  onSession?: (
+    session: AuthSession<User, Claims> | null,
+  ) => void | Promise<void>;
+  refreshWhenChanged?:
+    | boolean
+    | ((sessionUser: User, syncedUser: any) => boolean);
   /**
-   * Refresh the HTTP-only session cookie when the synced user row changes.
+   * Default reconnect policy after login / TMA / Google.
+   * @default false
    */
-  refreshWhenChanged?: boolean | ((sessionUser: any, syncedUser: any) => boolean);
+  reconnect?: AuthReconnectPolicy;
 }
 
 function isBrowser() {
   return typeof window !== "undefined";
 }
 
-/**
- * Clears every local sync table after logout or invalid session detection.
- *
- * This prevents user-specific IndexedDB rows from remaining visible after the
- * session cookie has become invalid.
- */
-async function clearSyncData(sync: SyncClient<any>) {
-  if (sync && typeof sync.tables !== "undefined") {
-    try {
-      await Promise.all(sync.tables.map((table: any) => table.clear()));
-    } catch (err) {
-      console.error("Failed to clear local database tables", err);
-    }
+function resolveConcreteSyncClient(sync: any): any | undefined {
+  if (!sync || typeof sync === "function") return undefined;
+  if (sync.isDynamicSyncClient === true) {
+    return sync.client;
+  }
+  return sync;
+}
+
+async function clearSyncData(sync: any) {
+  const concrete = resolveConcreteSyncClient(sync);
+  if (!concrete) return;
+  try {
+    // Prefer Dexie tables collection; never call .table() on a dynamic proxy.
+    const tables =
+      typeof concrete.tables !== "undefined"
+        ? Array.from(concrete.tables as Iterable<any>)
+        : [];
+    if (tables.length === 0) return;
+    await Promise.all(
+      tables.map((table: any) =>
+        typeof table?.clear === "function" ? table.clear() : Promise.resolve(),
+      ),
+    );
+  } catch (err) {
+    console.error("Failed to clear local database tables", err);
   }
 }
 
-async function readAuthError(
-  response: Response,
-  codec: AuthErrorCodec,
-) {
+function disconnectSync(sync: any) {
+  try {
+    sync?.disconnect?.();
+  } catch {
+    // already torn down
+  }
+}
+
+async function readAuthError(response: Response, codec: AuthErrorCodec) {
   const text = await response.text();
 
   if (!text) {
@@ -88,153 +111,212 @@ async function readAuthError(
   }
 }
 
+function resolveReconnect(
+  policy: AuthReconnectPolicy | undefined,
+  syncClient: any,
+): boolean {
+  const resolved = policy ?? false;
+  if (resolved === true) return true;
+  if (resolved === false) return false;
+  // "if-connected"
+  const concrete = resolveConcreteSyncClient(syncClient);
+  if (!concrete) return false;
+  return concrete.status === "connected" || concrete.status === "connecting";
+}
+
+const EMPTY_CLAIMS: Record<string, never> = Object.freeze({});
+
 /**
- * Svelte-reactive client auth state.
- *
- * It mirrors the server-provided user, supports login/logout routes, and can
- * verify the session against a synced user table after SSR hydration.
+ * Svelte-reactive client auth with cookie profile, session claims, and optional
+ * live verification against a synced profile table.
  */
-export class AuthClientState<User extends { id: string }> {
+export class AuthClientState<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+> {
   #userGetter = $state<MaybeGetter<User | null>>(null);
-  #localOverride = $state<User | null | undefined>(undefined);
-  #syncClient?: SyncClient<any>;
+  #claimsGetter = $state<MaybeGetter<Claims | null>>(null);
+  #localUser = $state<User | null | undefined>(undefined);
+  #localClaims = $state<Claims | null | undefined>(undefined);
+  #syncClient?: any;
+  #syncClientGetter?: () => any;
+  #syncClientGetterCleanup?: () => void;
   #verifySubscription?: { unsubscribe(): void };
   #syncClientChangeUnsubscribe?: () => void;
   #verifyTable: string;
+  #verifyUser: (sessionUser: User, syncedUser: any) => boolean;
+  #refreshWhenChanged?:
+    | boolean
+    | ((sessionUser: User, syncedUser: any) => boolean);
+  #verificationReady = false;
+  #syncVerificationPromise?: Promise<AuthSession<User, Claims> | null>;
   #routesBase: string;
   #errorCodec: AuthErrorCodec;
   #onInvalidSession?: () => void | Promise<void>;
-  #refreshWhenChanged?: boolean | ((sessionUser: User, syncedUser: User) => boolean);
-  #verifyUser: (sessionUser: User, syncedUser: any) => boolean;
+  #onLogout?: () => void | Promise<void>;
+  #onSession?: (
+    session: AuthSession<User, Claims> | null,
+  ) => void | Promise<void>;
+  #defaultReconnect: AuthReconnectPolicy;
   #isVerifying = $state(false);
   #isReady = $state(false);
-  #verificationReady = false;
   #initialized = $state(false);
   #lastResolvedUserId: string | null | undefined;
   #ranNoSyncInitVerification = false;
   #noSyncInitVerificationPromise?: Promise<void>;
 
-  /**
-   * Creates client auth state.
-   *
-   * Pass a `SyncClient` when the app should verify the cookie session against a
-   * synced user row and clear local data when that row disappears.
-   */
-  constructor(config?: AuthClientConfig) {
-    this.#verifyTable = config?.verifyTable ?? "users";
+  constructor(config?: AuthClientConfig<User, Claims>) {
     this.#routesBase = config?.routesBase ?? "/api/auth";
     this.#errorCodec = createAuthErrorCodec(config?.errorClasses);
     this.#onInvalidSession = config?.onInvalidSession;
+    this.#onLogout = config?.onLogout;
+    this.#onSession = config?.onSession;
+    this.#defaultReconnect = config?.reconnect ?? false;
+    this.#verifyTable = config?.verifyTable ?? "users";
+    this.#verifyUser =
+      config?.verifyUser ??
+      ((sessionUser, syncedUser) =>
+        String(sessionUser.id) === String(syncedUser?.id));
     this.#refreshWhenChanged = config?.refreshWhenChanged;
-    this.#verifyUser = config?.verifyUser ?? ((sessionUser, syncedUser) => {
-      return String(sessionUser.id) === String(syncedUser?.id);
-    });
     if (config?.syncClient) {
       this.setClient(config.syncClient);
     }
   }
 
-  /**
-   * Gets the current reactive user object.
-   *
-   * If `init` received a getter, the getter is evaluated so Svelte can track the
-   * same data value that came from the server load function.
-   */
   get user(): User | null {
-    if (this.#localOverride !== undefined) {
-      return this.#localOverride;
+    if (this.#localUser !== undefined) {
+      return this.#localUser;
     }
     const val = this.#userGetter;
     return typeof val === "function" ? (val as () => User | null)() : val;
   }
 
-  /**
-   * Overrides the current reactive user object.
-   *
-   * Login, refresh, logout, and invalid-session handling use this to reflect
-   * client-side changes before the next server load.
-   */
   set user(value: User | null) {
-    this.#localOverride = value;
+    this.#localUser = value;
   }
 
-  /**
-   * True once auth state is initialized and any required startup verification completed.
-   */
+  get claims(): Claims {
+    try {
+      if (this.#localClaims !== undefined) {
+        return (this.#localClaims ?? (EMPTY_CLAIMS as Claims)) as Claims;
+      }
+      const val = this.#claimsGetter;
+      const resolved =
+        typeof val === "function"
+          ? (val as () => Claims | null | undefined)()
+          : val;
+      if (resolved && typeof resolved === "object") {
+        return resolved as Claims;
+      }
+      return EMPTY_CLAIMS as Claims;
+    } catch {
+      return EMPTY_CLAIMS as Claims;
+    }
+  }
+
+  set claims(value: Claims) {
+    this.#localClaims =
+      value && typeof value === "object" ? value : (EMPTY_CLAIMS as Claims);
+  }
+
+  get session(): AuthSession<User, Claims> | null {
+    const user = this.user;
+    if (!user) return null;
+    return { user, claims: this.claims };
+  }
+
+  get sessionUser(): (User & Claims) | null {
+    const user = this.user;
+    if (!user) return null;
+    return { ...user, ...this.claims };
+  }
+
   get isReady(): boolean {
     return this.#isReady;
   }
 
-  /**
-   * True while auth is actively verifying the current session.
-   */
   get isVerifying(): boolean {
     return this.#isVerifying;
   }
 
-  /**
-   * True when auth is ready and `user` is not `null`.
-   */
   get isAuthenticated(): boolean {
     return this.#isReady && this.user !== null;
   }
 
-  /**
-   * Initializes the client-side user state.
-   * Accepts a static user object or a getter function (e.g. `() => data.user`).
-   *
-   * Call this once from a root component or layout effect after receiving the
-   * server session user from SvelteKit load data.
-   */
-  init(user: MaybeGetter<User | null>) {
+  init(
+    user: MaybeGetter<User | null>,
+    claims?: MaybeGetter<Claims | null | undefined>,
+  ) {
     this.#initialized = true;
     this.#userGetter = user;
+    this.#claimsGetter = (claims ?? null) as MaybeGetter<Claims | null>;
     this.#isReady = false;
-    this.#localOverride = undefined; // Reset local override on new init
+    this.#localUser = undefined;
+    this.#localClaims = undefined;
 
-    // Reactive effect to reset local override whenever the server's user getter updates
     $effect(() => {
-      // Access the getter reactively so Svelte tracks this dependency
-      const serverUser = typeof this.#userGetter === "function"
-        ? (this.#userGetter as () => User | null)()
-        : this.#userGetter;
+      const serverUser =
+        typeof this.#userGetter === "function"
+          ? (this.#userGetter as () => User | null)()
+          : this.#userGetter;
 
       const resolvedUserId = serverUser ? String(serverUser.id) : null;
       if (this.#lastResolvedUserId !== resolvedUserId) {
         this.#lastResolvedUserId = resolvedUserId;
-        this.#verificationReady = false;
         this.#ranNoSyncInitVerification = false;
         this.#noSyncInitVerificationPromise = undefined;
         this.#isReady = false;
+        this.#localUser = undefined;
+        this.#localClaims = undefined;
+        this.#verificationReady = false;
+        this.#syncVerificationPromise = undefined;
       }
-
-      // Clear any local override (like query error overrides) whenever the server session changes
-      this.#localOverride = undefined;
 
       void this.ensureReady();
     });
 
-    this.setupSyncVerification();
     void this.ensureReady();
   }
 
   /**
-   * Attaches or replaces the sync client used for session verification.
-   *
-   * This is useful when a dynamic sync client cannot be created until app data
-   * has been initialized.
+   * Attach or replace the sync client used for live session verification.
    */
-  setClient(syncClient?: SyncClient<any>): this {
-    if (this.#syncClient === syncClient) return this;
+  setClient(syncClient?: any | (() => any)): this {
+    if (typeof syncClient === "function" && !syncClient.isDynamicSyncClient) {
+      this.#syncClientGetterCleanup?.();
+      this.#syncClientGetter = syncClient as () => any;
+      try {
+        this.#syncClientGetterCleanup = $effect.root(() => {
+          $effect(() => {
+            const next = (this.#syncClientGetter as () => any)();
+            this.#bindSyncClient(next ?? undefined);
+          });
+        });
+      } catch {
+        this.#bindSyncClient((syncClient as () => any)() ?? undefined);
+      }
+      return this;
+    }
+
+    this.#syncClientGetterCleanup?.();
+    this.#syncClientGetterCleanup = undefined;
+    this.#syncClientGetter = undefined;
+    this.#bindSyncClient(syncClient);
+    return this;
+  }
+
+  #bindSyncClient(syncClient?: any) {
+    if (this.#syncClient === syncClient) return;
 
     this.#verifySubscription?.unsubscribe();
     this.#verifySubscription = undefined;
     this.#syncClientChangeUnsubscribe?.();
     this.#syncClientChangeUnsubscribe = undefined;
-    this.#verificationReady = false;
     this.#syncClient = syncClient;
+    this.#verificationReady = false;
+    this.#syncVerificationPromise = undefined;
 
-    const onClientChange = (syncClient as any)?.onClientChange as
+    const onClientChange = syncClient?.onClientChange as
       | ((callback: () => void) => () => void)
       | undefined;
     if (onClientChange) {
@@ -242,6 +324,7 @@ export class AuthClientState<User extends { id: string }> {
         this.#verifySubscription?.unsubscribe();
         this.#verifySubscription = undefined;
         this.#verificationReady = false;
+        this.#syncVerificationPromise = undefined;
         this.setupSyncVerification();
         void this.ensureReady();
       });
@@ -251,53 +334,135 @@ export class AuthClientState<User extends { id: string }> {
       this.setupSyncVerification();
       void this.ensureReady();
     }
-
-    return this;
   }
 
   private setupSyncVerification() {
-    // liveQuery / IndexedDB are browser-only.
-    if (!isBrowser() || !this.#syncClient || this.#verifySubscription) return;
+    if (!isBrowser() || this.#verifySubscription) return;
+    const concrete = resolveConcreteSyncClient(this.#syncClient);
+    if (!concrete) return;
 
-    const sync = this.#syncClient;
-    if ((sync as any).isDynamicSyncClient === true && !(sync as any).client) {
-      return;
-    }
-
-    const observable = liveQuery(() => sync.table(this.#verifyTable).toArray());
+    const observable = liveQuery(() =>
+      concrete.table(this.#verifyTable).toArray(),
+    );
     this.#verifySubscription = observable.subscribe({
-      next: (rows) => {
+      next: (rows: any[]) => {
         const activeUser = this.user;
-        if (!activeUser || this.#isVerifying || !this.#verificationReady) return;
-        const syncedUser = rows.find((row: User) => this.#verifyUser(activeUser, row));
+        if (!activeUser || this.#isVerifying || !this.#verificationReady)
+          return;
+
+        const syncedUser = rows.find((row) =>
+          this.#verifyUser(activeUser, row),
+        );
         if (!syncedUser) {
-          this.handleInvalidSession();
+          void this.handleInvalidSession();
           return;
         }
 
         if (!this.#refreshWhenChanged) return;
-
         const shouldRefresh =
           this.#refreshWhenChanged === true
             ? JSON.stringify(activeUser) !== JSON.stringify(syncedUser)
             : this.#refreshWhenChanged(activeUser, syncedUser);
         if (shouldRefresh) {
-          this.refresh().catch((err) => {
-            console.warn("Failed to refresh auth session after sync change.", err);
+          void this.refresh().catch((error) => {
+            console.warn(
+              "Failed to refresh auth session after sync change.",
+              error,
+            );
           });
         }
       },
-      error: (err) => {
-        console.warn("WebSocket session verification failed: logging out.", err);
-        this.handleInvalidSession();
-        clearSyncData(sync);
-      }
+      error: (error) => {
+        console.warn("WebSocket session verification failed.", error);
+        void this.handleInvalidSession();
+      },
     });
   }
 
-  private hasUsableSyncClient(syncClient = this.#syncClient): syncClient is SyncClient<any> {
-    if (!syncClient) return false;
-    return (syncClient as any).isDynamicSyncClient !== true || Boolean((syncClient as any).client);
+  private applySession(
+    session: AuthSession<User, Claims> | null,
+    options?: { notify?: boolean },
+  ) {
+    if (!session) {
+      this.#localUser = null;
+      this.#localClaims = EMPTY_CLAIMS as Claims;
+    } else {
+      this.#localUser = session.user;
+      this.#localClaims = session.claims ?? (EMPTY_CLAIMS as Claims);
+    }
+    if (options?.notify !== false) {
+      void this.#onSession?.(session);
+    }
+  }
+
+  private parseSessionResponse(data: any): AuthSession<User, Claims> {
+    if (data && typeof data === "object" && "user" in data) {
+      return {
+        user: data.user as User,
+        claims: (data.claims ?? {}) as Claims,
+      };
+    }
+    return {
+      user: data as User,
+      claims: {} as Claims,
+    };
+  }
+
+  private hasUsableSyncClient(syncClient = this.#syncClient): boolean {
+    return Boolean(resolveConcreteSyncClient(syncClient));
+  }
+
+  private async verifySyncedSession(
+    session: AuthSession<User, Claims> | null,
+    options?: { reconnect?: boolean },
+  ): Promise<AuthSession<User, Claims> | null> {
+    if (!session) return null;
+
+    const concrete = resolveConcreteSyncClient(this.#syncClient);
+    if (!concrete?.resyncTable) return session;
+
+    this.setupSyncVerification();
+    this.#isVerifying = true;
+    try {
+      const rows = await concrete.resyncTable(this.#verifyTable, options);
+      const syncedUser = rows.find((row: any) =>
+        this.#verifyUser(session.user, row),
+      );
+      if (!syncedUser) {
+        await this.handleInvalidSession();
+        return null;
+      }
+
+      const verified = {
+        user: syncedUser as User,
+        claims: session.claims,
+      };
+      this.applySession(verified);
+      this.#verificationReady = true;
+      this.#isReady = true;
+      return verified;
+    } catch (error) {
+      await this.handleInvalidSession();
+      throw error;
+    } finally {
+      this.#isVerifying = false;
+    }
+  }
+
+  /** Resyncs the configured profile table and verifies the active session. */
+  async verifySync(options?: {
+    reconnect?: boolean;
+  }): Promise<AuthSession<User, Claims> | null> {
+    const session = this.session;
+    if (!session || !this.hasUsableSyncClient()) return session;
+    if (this.#syncVerificationPromise) return this.#syncVerificationPromise;
+
+    this.#syncVerificationPromise = this.verifySyncedSession(session, options);
+    try {
+      return await this.#syncVerificationPromise;
+    } finally {
+      this.#syncVerificationPromise = undefined;
+    }
   }
 
   private async ensureReady() {
@@ -312,19 +477,35 @@ export class AuthClientState<User extends { id: string }> {
 
     if (this.hasUsableSyncClient()) {
       this.setupSyncVerification();
+      if (!this.#verificationReady) {
+        try {
+          await this.verifySync();
+        } catch (error) {
+          console.warn("Initial sync session verification failed.", error);
+        }
+      }
+      this.#isReady = true;
+      this.#ranNoSyncInitVerification = true;
+      return;
+    }
+
+    // A dynamic wrapper may not have context yet. Its onClientChange callback
+    // starts verification as soon as the concrete client is created.
+    if (this.#syncClient) {
       this.#isReady = true;
       return;
     }
 
-    // During SSR, trust the server-provided user. Relative fetch to
-    // /api/auth/refresh is not allowed during SSR in SvelteKit, and the
-    // browser will re-run ensureReady after hydration to verify the cookie.
     if (!isBrowser()) {
       this.#isReady = true;
       return;
     }
 
-    if (this.#ranNoSyncInitVerification || this.#noSyncInitVerificationPromise) {
+    // No sync attached (owner/admin): optional one-shot HTTP refresh.
+    if (
+      this.#ranNoSyncInitVerification ||
+      this.#noSyncInitVerificationPromise
+    ) {
       return;
     }
 
@@ -332,11 +513,11 @@ export class AuthClientState<User extends { id: string }> {
     this.#noSyncInitVerificationPromise = (async () => {
       try {
         await this.refresh();
-        this.#ranNoSyncInitVerification = true;
-        this.#isReady = true;
       } catch (err) {
         console.warn("Initial auth refresh verification failed.", err);
       } finally {
+        this.#ranNoSyncInitVerification = true;
+        this.#isReady = true;
         this.#isVerifying = false;
         this.#noSyncInitVerificationPromise = undefined;
       }
@@ -345,71 +526,52 @@ export class AuthClientState<User extends { id: string }> {
     await this.#noSyncInitVerificationPromise;
   }
 
-  /**
-   * Resyncs the verification table and confirms the session user still exists.
-   *
-   * This is called after login, Google login, and refresh. If the synced user
-   * cannot be found, the client treats the cookie as invalid and clears local
-   * sync data.
-   */
-  private async verifySyncedUser(
-    user: User | null,
-    options?: { reconnect?: boolean },
-  ): Promise<User | null> {
-    if (!user || !this.#syncClient) return user;
-    const resyncTable = (this.#syncClient as any).resyncTable as
-      | ((tableName: string, options?: { reconnect?: boolean }) => Promise<any[]>)
-      | undefined;
-    if (!resyncTable) return user;
-
-    this.#isVerifying = true;
-    try {
-      const rows = await resyncTable.call(
-        this.#syncClient,
-        this.#verifyTable,
-        options,
-      );
-      const syncedUser = rows.find((row) => this.#verifyUser(user, row));
-      if (!syncedUser) {
-        await this.handleInvalidSession();
-        return null;
-      }
-      this.#verificationReady = true;
-      this.#isReady = true;
-      return syncedUser as User;
-    } finally {
-      this.#isVerifying = false;
-    }
-  }
-
-  /**
-   * Marks the session invalid, runs the optional hook, and clears sync caches.
-   */
   private async handleInvalidSession() {
-    this.#localOverride = null;
+    if (!this.user && !this.#verificationReady) return;
+    this.applySession(null, { notify: false });
+    this.#verificationReady = false;
+    this.#verifySubscription?.unsubscribe();
+    this.#verifySubscription = undefined;
     const invalid = this.#onInvalidSession?.();
     if (invalid && typeof invalid.then === "function") {
       await invalid.catch((hookErr) => {
         console.error("onInvalidSession hook failed", hookErr);
       });
     }
-    this.#verificationReady = false;
+    await this.#onLogout?.();
     this.#isReady = true;
     this.#ranNoSyncInitVerification = true;
     if (this.#syncClient) {
       await clearSyncData(this.#syncClient);
+      disconnectSync(this.#syncClient);
     }
   }
 
-  /**
-   * Calls the configured login route and stores the returned app user.
-   *
-   * After a successful response, the sync client is reconnected and the verify
-   * table is resynced so stale local data cannot keep an invalid session alive.
-   *
-   * @param body JSON body sent to `${routesBase}/login`.
-   */
-  async login<Body = unknown>(body: Body): Promise<User> {
+  private afterAuthSuccess(
+    session: AuthSession<User, Claims>,
+    options?: { reconnect?: AuthReconnectPolicy },
+  ): Promise<AuthSession<User, Claims>> {
+    this.applySession(session);
+    this.#isReady = true;
+    this.#ranNoSyncInitVerification = true;
+
+    const shouldReconnect = resolveReconnect(
+      options?.reconnect ?? this.#defaultReconnect,
+      this.#syncClient,
+    );
+    return (async () => {
+      const verified = await this.verifySyncedSession(session, {
+        reconnect: shouldReconnect,
+      });
+      if (!verified) throw new Error("Invalid session");
+      return verified;
+    })();
+  }
+
+  async login<Body = unknown>(
+    body: Body,
+    options?: { reconnect?: AuthReconnectPolicy },
+  ): Promise<AuthSession<User, Claims>> {
     const response = await fetch(`${this.#routesBase}/login`, {
       method: "POST",
       body: JSON.stringify(body),
@@ -419,23 +581,14 @@ export class AuthClientState<User extends { id: string }> {
       throw await readAuthError(response, this.#errorCodec);
     }
 
-    const user = await response.json() as User;
-    this.#localOverride = user;
-    const verifiedUser = await this.verifySyncedUser(user, { reconnect: true });
-    if (!verifiedUser) {
-      throw new Error("Invalid session");
-    }
-    this.#isReady = true;
-    this.#ranNoSyncInitVerification = true;
-    return verifiedUser;
+    const session = this.parseSessionResponse(await response.json());
+    return await this.afterAuthSuccess(session, options);
   }
 
-  /**
-   * Calls the configured Google auth route with a Google credential.
-   *
-   * The credential is the ID token returned by Google Identity Services.
-   */
-  async loginWithGoogle(credential: string): Promise<User | null> {
+  async loginWithGoogle(
+    credential: string,
+    options?: { reconnect?: AuthReconnectPolicy },
+  ): Promise<AuthSession<User, Claims> | null> {
     const response = await fetch(`${this.#routesBase}/google`, {
       method: "POST",
       body: JSON.stringify({ credential }),
@@ -445,71 +598,108 @@ export class AuthClientState<User extends { id: string }> {
       throw await readAuthError(response, this.#errorCodec);
     }
 
-    const user = await response.json() as User;
-    this.#localOverride = user;
-    const verifiedUser = await this.verifySyncedUser(user, { reconnect: true });
-    this.#isReady = true;
-    this.#ranNoSyncInitVerification = true;
-    return verifiedUser;
+    const session = this.parseSessionResponse(await response.json());
+    return await this.afterAuthSuccess(session, options);
   }
 
-  /**
-   * Verifies the current cookie server-side and rewrites it with a fresh user object.
-   *
-   * Called manually by apps and automatically when `refreshWhenChanged` decides
-   * the synced user row no longer matches the cookie snapshot.
-   */
-  async refresh(): Promise<User | null> {
-    const response = await fetch(`${this.#routesBase}/refresh`, { method: "POST" });
+  async loginWithTma(
+    body: { initData: string } & Record<string, unknown>,
+    options?: { reconnect?: AuthReconnectPolicy },
+  ): Promise<AuthSession<User, Claims>> {
+    const response = await fetch(`${this.#routesBase}/tma`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!response.ok) {
+      throw await readAuthError(response, this.#errorCodec);
+    }
+
+    const session = this.parseSessionResponse(await response.json());
+    return await this.afterAuthSuccess(session, options);
+  }
+
+  async setClaims(
+    claims: Claims,
+    options?: { reconnect?: AuthReconnectPolicy },
+  ): Promise<AuthSession<User, Claims> | null> {
+    const response = await fetch(`${this.#routesBase}/claims`, {
+      method: "POST",
+      body: JSON.stringify(claims),
+      headers: { "Content-Type": "application/json" },
+    });
     if (response.status === 401) {
-      this.#localOverride = null;
-      await this.#onInvalidSession?.();
-      this.#isReady = true;
-      this.#ranNoSyncInitVerification = true;
+      await this.handleInvalidSession();
       return null;
     }
     if (!response.ok) {
       throw await readAuthError(response, this.#errorCodec);
     }
 
-    const user = await response.json() as User;
-    this.#localOverride = user;
-    const verifiedUser = await this.verifySyncedUser(user);
+    const session = this.parseSessionResponse(await response.json());
+    this.applySession(session);
+
+    const shouldReconnect = resolveReconnect(
+      options?.reconnect ?? true,
+      this.#syncClient,
+    );
+    if (shouldReconnect) {
+      try {
+        resolveConcreteSyncClient(this.#syncClient)?.reconnect?.({
+          force: true,
+        });
+      } catch {
+        // ignore
+      }
+    }
+
     this.#isReady = true;
-    this.#ranNoSyncInitVerification = true;
-    return verifiedUser;
+    return session;
   }
 
-  /**
-   * Clears client state, calls the server logout endpoint to delete cookies, and wipes local IndexedDB caches.
-   *
-   * Network failures during the logout fetch are ignored because the local app
-   * should still leave the authenticated state immediately.
-   */
+  async refresh(): Promise<AuthSession<User, Claims> | null> {
+    const response = await fetch(`${this.#routesBase}/refresh`, {
+      method: "POST",
+    });
+    if (response.status === 401) {
+      await this.handleInvalidSession();
+      return null;
+    }
+    if (!response.ok) {
+      throw await readAuthError(response, this.#errorCodec);
+    }
+
+    const session = this.parseSessionResponse(await response.json());
+    this.applySession(session);
+    const verified = await this.verifySyncedSession(session);
+    this.#isReady = true;
+    this.#ranNoSyncInitVerification = true;
+    return verified;
+  }
+
   async logout() {
-    this.#localOverride = null;
+    this.applySession(null, { notify: false });
+    this.#verificationReady = false;
+    this.#verifySubscription?.unsubscribe();
+    this.#verifySubscription = undefined;
     this.#isReady = true;
     this.#ranNoSyncInitVerification = true;
     try {
       await fetch(`${this.#routesBase}/logout`, { method: "POST" });
     } catch {
-      // Ignore network failure on logout fetch
+      // ignore network failure
     }
     if (this.#syncClient) {
-      clearSyncData(this.#syncClient);
+      await clearSyncData(this.#syncClient);
+      disconnectSync(this.#syncClient);
     }
+    await this.#onLogout?.();
   }
 }
 
-/**
- * Creates client-side reactive auth state.
- *
- * @example
- * ```ts
- * export const auth = createAuth<User>({ syncClient: db });
- * auth.init(() => data.user);
- * ```
- */
-export function createAuth<User extends { id: string }>(config?: AuthClientConfig): AuthClientState<User> {
-  return new AuthClientState<User>(config);
+export function createAuth<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+>(config?: AuthClientConfig<User, Claims>): AuthClientState<User, Claims> {
+  return new AuthClientState<User, Claims>(config);
 }

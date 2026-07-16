@@ -15,7 +15,7 @@ Peer deps: `svelte`, `@sveltejs/kit`. Optional: `zod` for server mutation valida
 | Import | What it’s for |
 | --- | --- |
 | `@sveltebase/sync/client` | Client DB, live queries, dynamic clients |
-| `@sveltebase/sync/server` | Handlers and publish helpers |
+| `@sveltebase/sync/server` | Handlers, `definePolicySync`, and publish helpers |
 | `@sveltebase/sync/cloudflare` | Worker + Durable Object for production |
 | `@sveltebase/sync/sveltekit` | Sync route on a SvelteKit endpoint |
 | `@sveltebase/sync/vite` | Dev WebSocket plugin |
@@ -115,7 +115,10 @@ db.status;               // "connecting" | "connected" | "disconnected"
 db.isSyncing;            // true while uploads or snapshot fetches are in flight
 db.pendingMutationCount; // mutations waiting for server ack
 db.pendingFetchCount;    // channels waiting for a snapshot
-db.reconnect();          // after login/logout so the cookie is fresh
+db.reconnect();          // safe: no-op while already connecting (use { force: true } to abort)
+await db.whenConnected();
+await db.whenIdle();
+await db.resyncTables(["roles", "schools"], { reconnect: true });
 db.disconnect();         // stop auto-reconnect; local data stays
 ```
 

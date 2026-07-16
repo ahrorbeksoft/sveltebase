@@ -9,74 +9,125 @@ import {
 import type { GoogleData } from "../google/types.js";
 import { verifyIdToken } from "../google/verifier.js";
 import { serializeAuthError, SerializableError } from "../errors.js";
+import type { AuthSession } from "../index.js";
+import {
+  verifyInitData,
+  type TelegramInitData,
+} from "../telegram/verifier.js";
 
 /**
  * Server session helper shape expected by `createAuthRoutes`.
- *
- * `createServerAuth` returns an object with this interface.
  */
-export type ServerAuth<User extends { id: string }> = {
-  /** Writes a signed session cookie for the user. */
+export type ServerAuth<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+> = {
   login(
     cookies: Cookies,
     user: User,
-    options?: { maxAge?: number; expires?: Date },
-  ): Promise<User>;
-  /** Deletes the signed session cookie. */
+    options?: { maxAge?: number; expires?: Date; claims?: Claims },
+  ): Promise<AuthSession<User, Claims>>;
   logout(cookies: Cookies, options?: { path?: string; domain?: string }): void;
-  /** Reads and verifies the current session cookie. */
   getUser(cookies: Cookies): Promise<User | null>;
-  /** Rewrites the session cookie with a fresh user snapshot. */
+  getClaims(cookies: Cookies): Promise<Claims>;
+  getSession(cookies: Cookies): Promise<AuthSession<User, Claims> | null>;
   refresh(
     cookies: Cookies,
     user: User,
+    options?: { maxAge?: number; expires?: Date; claims?: Claims },
+  ): Promise<AuthSession<User, Claims>>;
+  setClaims(
+    cookies: Cookies,
+    claims: Claims | ((current: Claims) => Claims),
     options?: { maxAge?: number; expires?: Date },
-  ): Promise<User>;
+  ): Promise<AuthSession<User, Claims> | null>;
 };
+
+/** Normalized login result from app callbacks. */
+export type LoginResult<
+  User extends { id: string },
+  Claims extends Record<string, unknown> = Record<string, never>,
+> = User | AuthSession<User, Claims>;
+
+function normalizeLoginResult<
+  User extends { id: string },
+  Claims extends Record<string, unknown>,
+>(result: LoginResult<User, Claims>): AuthSession<User, Claims> {
+  if (result && typeof result === "object" && "user" in result && "claims" in result) {
+    return result as AuthSession<User, Claims>;
+  }
+  return {
+    user: result as User,
+    claims: {} as Claims,
+  };
+}
 
 export type CreateAuthRoutesOptions<
   User extends { id: string },
   LoginBody = unknown,
+  Claims extends Record<string, unknown> = Record<string, never>,
+  TmaBody extends { initData?: string } = { initData: string },
 > = {
-  /** Session helpers, usually returned by `createServerAuth`. */
-  auth: ServerAuth<User>;
+  auth: ServerAuth<User, Claims>;
   /**
-   * App-specific credential login callback.
-   *
-   * Called by `POST /login` with the parsed JSON body.
+   * Credential login for `POST /login`.
+   * Return a user profile, or `{ user, claims }` for session claims.
    */
-  login?: (credentials: LoginBody, event: RequestEvent) => Promise<User> | User;
+  login?: (
+    credentials: LoginBody,
+    event: RequestEvent,
+  ) => Promise<LoginResult<User, Claims>> | LoginResult<User, Claims>;
   /**
-   * Looks up the latest user by session user id.
-   *
-   * Called by `POST /refresh` before rewriting the cookie.
+   * Looks up the latest **profile** by session user id.
+   * Claims are preserved from the cookie automatically.
    */
-  getUser?: (userId: string, event: RequestEvent) => Promise<User | null | undefined> | User | null | undefined;
+  getUser?: (
+    userId: string,
+    event: RequestEvent,
+  ) => Promise<User | null | undefined> | User | null | undefined;
   /**
-   * Google ID-token login configuration for `POST /google`.
+   * Optional claims update for `POST /claims`.
+   * When omitted, the route applies the body as claims (full replace).
    */
+  setClaims?: (
+    claims: Claims,
+    event: RequestEvent,
+    current: AuthSession<User, Claims>,
+  ) => Promise<Claims> | Claims;
   google?: {
-    /** Google OAuth client id expected in the ID token audience claim. */
     clientId: string;
-    /** Maps the verified Google profile to an application user. */
-    getUser: (profile: GoogleData, event: RequestEvent) => Promise<User> | User;
+    getUser: (
+      profile: GoogleData,
+      event: RequestEvent,
+    ) => Promise<LoginResult<User, Claims>> | LoginResult<User, Claims>;
+  };
+  /**
+   * Telegram Mini App login for `POST /tma`.
+   * Package verifies initData; app maps verified data to a user/session.
+   */
+  tma?: {
+    getBotToken: (
+      event: RequestEvent,
+      body: TmaBody,
+    ) => Promise<string | null | undefined> | string | null | undefined;
+    getUser: (
+      initData: TelegramInitData,
+      event: RequestEvent,
+      body: TmaBody,
+    ) => Promise<LoginResult<User, Claims>> | LoginResult<User, Claims>;
+    maxAgeSeconds?: number;
+    clockSkewSeconds?: number;
   };
 };
 
-/**
- * Parses a JSON request body and falls back to an empty object.
- */
 async function parseJsonBody<T>(event: RequestEvent): Promise<T> {
   try {
-    return await event.request.json() as T;
+    return (await event.request.json()) as T;
   } catch {
     return {} as T;
   }
 }
 
-/**
- * Returns a 204 empty response.
- */
 function empty() {
   return new Response(null, { status: 204 });
 }
@@ -87,9 +138,10 @@ function authErrorResponse(error: unknown) {
     return json(
       {
         code: typeof body.code === "string" ? body.code : "HttpError",
-        message: typeof body.message === "string"
-          ? body.message
-          : "Authentication request failed",
+        message:
+          typeof body.message === "string"
+            ? body.message
+            : "Authentication request failed",
       },
       { status: error.status },
     );
@@ -100,11 +152,6 @@ function authErrorResponse(error: unknown) {
   });
 }
 
-/**
- * Extracts the auth action from SvelteKit route params.
- *
- * Supports both `[auth]` and `[...auth]` route layouts.
- */
 function routeSegment(event: RequestEvent) {
   const params = event.params as Record<string, string | undefined>;
   const value = params.auth ?? params["...auth"] ?? "";
@@ -114,22 +161,15 @@ function routeSegment(event: RequestEvent) {
 /**
  * Creates SvelteKit auth route handlers.
  *
- * Mount this from a route such as `src/routes/api/auth/[auth]/+server.ts` or a
- * rest route. Supported POST actions are `login`, `logout`, `refresh`, and
- * `google`.
- *
- * @example
- * ```ts
- * export const { GET, POST } = createAuthRoutes({
- *   auth,
- *   login: async (body) => users.verifyPassword(body)
- * });
- * ```
+ * Supported POST actions: `login`, `logout`, `refresh`, `claims`, `google`, `tma`.
+ * All successful auth responses return `{ user, claims }`.
  */
 export function createAuthRoutes<
   User extends { id: string },
   LoginBody = unknown,
->(options: CreateAuthRoutesOptions<User, LoginBody>): {
+  Claims extends Record<string, unknown> = Record<string, never>,
+  TmaBody extends { initData?: string } = { initData: string },
+>(options: CreateAuthRoutesOptions<User, LoginBody, Claims, TmaBody>): {
   GET: RequestHandler;
   POST: RequestHandler;
 } {
@@ -154,9 +194,13 @@ export function createAuthRoutes<
       }
 
       const credentials = await parseJsonBody<LoginBody>(event);
-      const user = await options.login(credentials, event);
-      await options.auth.login(event.cookies, user);
-      return json(user);
+      const result = normalizeLoginResult(
+        await options.login(credentials, event),
+      );
+      const session = await options.auth.login(event.cookies, result.user, {
+        claims: result.claims,
+      });
+      return json(session);
     }
 
     if (route === "logout") {
@@ -169,20 +213,42 @@ export function createAuthRoutes<
         return new Response("Refresh route is not configured", { status: 404 });
       }
 
-      const sessionUser = await options.auth.getUser(event.cookies);
-      if (!sessionUser) {
+      const current = await options.auth.getSession(event.cookies);
+      if (!current) {
         options.auth.logout(event.cookies);
         return new Response("Unauthorized", { status: 401 });
       }
 
-      const user = await options.getUser(sessionUser.id, event);
+      const user = await options.getUser(current.user.id, event);
       if (!user) {
         options.auth.logout(event.cookies);
         return new Response("Unauthorized", { status: 401 });
       }
 
-      await options.auth.refresh(event.cookies, user);
-      return json(user);
+      // Preserve claims; only refresh profile snapshot.
+      const session = await options.auth.refresh(event.cookies, user, {
+        claims: current.claims,
+      });
+      return json(session);
+    }
+
+    if (route === "claims") {
+      const current = await options.auth.getSession(event.cookies);
+      if (!current) {
+        options.auth.logout(event.cookies);
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const body = await parseJsonBody<Claims>(event);
+      const nextClaims = options.setClaims
+        ? await options.setClaims(body, event, current)
+        : body;
+
+      const session = await options.auth.setClaims(event.cookies, nextClaims);
+      if (!session) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+      return json(session);
     }
 
     if (route === "google") {
@@ -200,10 +266,50 @@ export function createAuthRoutes<
         credential,
         clientId: options.google.clientId,
       });
-      const user = await options.google.getUser(profile, event);
-      await options.auth.login(event.cookies, user);
+      const result = normalizeLoginResult(
+        await options.google.getUser(profile, event),
+      );
+      const session = await options.auth.login(event.cookies, result.user, {
+        claims: result.claims,
+      });
+      return json(session);
+    }
 
-      return json(user);
+    if (route === "tma") {
+      if (!options.tma) {
+        return new Response("TMA route is not configured", { status: 404 });
+      }
+
+      const body = await parseJsonBody<TmaBody>(event);
+      const initDataRaw =
+        typeof (body as any)?.initData === "string"
+          ? (body as any).initData
+          : typeof (body as any)?.telegramData === "string"
+            ? (body as any).telegramData
+            : "";
+      if (!initDataRaw) {
+        return new Response("Missing Telegram initData", { status: 400 });
+      }
+
+      const botToken = await options.tma.getBotToken(event, body);
+      if (!botToken) {
+        return new Response("Telegram bot is not configured", { status: 400 });
+      }
+
+      const initData = await verifyInitData({
+        initData: initDataRaw,
+        botToken,
+        maxAgeSeconds: options.tma.maxAgeSeconds,
+        clockSkewSeconds: options.tma.clockSkewSeconds,
+      });
+
+      const result = normalizeLoginResult(
+        await options.tma.getUser(initData, event, body),
+      );
+      const session = await options.auth.login(event.cookies, result.user, {
+        claims: result.claims,
+      });
+      return json(session);
     }
 
     return new Response("Not found", { status: 404 });

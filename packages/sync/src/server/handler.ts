@@ -237,8 +237,11 @@ async function publish(
     return;
   }
 
-  throw new Error(
-    "Missing sync publisher target: use createSyncAppWorker() in production or syncDevPlugin() in Vite dev",
+  // No Durable Object binding and no Vite broker yet. Fan-out is best-effort:
+  // DB mutations already committed, and clients resync on next connect.
+  // Common on the login path in Vite before any `/api/sync` socket opens.
+  console.warn(
+    "Missing sync publisher target: publish skipped (use createSyncAppWorker() in production or syncDevPlugin() in Vite dev)",
   );
 }
 

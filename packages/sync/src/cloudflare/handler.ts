@@ -188,6 +188,14 @@ async function handleWebSocket<TAuth>(
     topics = Array.from(
       new Set([...baseTopics, ...(await options.topics(topicCtx))]),
     );
+  } else if (
+    options.handlers?.some((handler) => Boolean(handler.config.broadcastTopics))
+  ) {
+    // Footgun: scoped live delivery and topic-targeted resets need a topics
+    // resolver. Without it, only the default user:{id} topic is attached.
+    console.warn(
+      "[@sveltebase/sync] Handlers declare broadcastTopics but no `topics` resolver was passed to the worker. Scoped live payloads will not reach clients.",
+    );
   }
 
   const forwardedHeaders = new Headers(publicRequest.headers);

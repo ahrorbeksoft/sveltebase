@@ -104,6 +104,11 @@ class SyncClientClass<
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private pingInterval: ReturnType<typeof setInterval> | undefined;
   private closedByClient = false;
+  /** Bumps whenever a connect attempt should supersede prior ones. */
+  private connectGeneration = 0;
+  /** True while `connect()` is opening a socket (async URL resolve → open). */
+  private connectInFlight = false;
+  private reconnectAttempt = 0;
   private activeChannels = new Set<string>();
   private changeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -413,8 +418,70 @@ class SyncClientClass<
    * Called automatically in the browser constructor and again after disconnects
    * unless `disconnect()` was called by user code.
    */
+  private clearReconnectTimer() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+  }
+
+  /**
+   * Schedules a single reconnect with bounded exponential backoff.
+   * Coalesces duplicate close/error handlers into one timer.
+   */
+  private scheduleReconnect() {
+    if (this.closedByClient) return;
+    this.clearReconnectTimer();
+
+    const attempt = this.reconnectAttempt;
+    const delay = Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5));
+    this.reconnectAttempt = attempt + 1;
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      void this.connect();
+    }, delay);
+  }
+
+  /**
+   * Abandons the current socket without triggering the auto-reconnect path.
+   * Used by reconnect/disconnect so the close handler does not race a new connect.
+   */
+  private abandonSocket() {
+    const socket = this.socket;
+    this.socket = undefined;
+    this.connectInFlight = false;
+    this.stopHeartbeat();
+    this.clearAllFetches();
+    if (!socket) return;
+    try {
+      socket.close();
+    } catch {
+      // ignore
+    }
+  }
+
   private async connect() {
     if (this.closedByClient) return;
+
+    // Already live — nothing to do.
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this._statusState.value = "connected";
+      this.connectInFlight = false;
+      return;
+    }
+
+    // A connect is already opening a socket; do not open a second one.
+    if (
+      this.connectInFlight ||
+      this.socket?.readyState === WebSocket.CONNECTING
+    ) {
+      return;
+    }
+
+    this.clearReconnectTimer();
+    this.connectInFlight = true;
+    const generation = ++this.connectGeneration;
     this._statusState.value = "connecting";
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -425,10 +492,18 @@ class SyncClientClass<
       resolvedUrl = typeof this.wsUrl === "function" ? await this.wsUrl() : this.wsUrl;
     } catch (err) {
       console.error("SyncClient: Failed to resolve wsUrl", err);
+      if (generation !== this.connectGeneration) return;
+      this.connectInFlight = false;
       this._statusState.value = "disconnected";
       if (!this.closedByClient) {
-        this.reconnectTimer = setTimeout(() => this.connect(), 2000);
+        this.scheduleReconnect();
       }
+      return;
+    }
+
+    // Superseded by disconnect/reconnect while resolving the URL.
+    if (this.closedByClient || generation !== this.connectGeneration) {
+      this.connectInFlight = false;
       return;
     }
 
@@ -441,8 +516,10 @@ class SyncClientClass<
     this.socket = socket;
 
     socket.addEventListener("open", async () => {
-      if (this.socket !== socket) return;
+      if (this.socket !== socket || generation !== this.connectGeneration) return;
 
+      this.connectInFlight = false;
+      this.reconnectAttempt = 0;
       console.log("SyncClient: WebSocket connected");
       this._statusState.value = "connected";
       this.activeChannels.clear();
@@ -450,6 +527,7 @@ class SyncClientClass<
 
       // Re-subscribe to all tables (delta-sync aware)
       for (const config of Object.values(this.tableConfigs)) {
+        if (this.socket !== socket || generation !== this.connectGeneration) return;
         await this.subscribeToChannel(config.channel, { socket });
       }
 
@@ -457,11 +535,12 @@ class SyncClientClass<
 
       // Restore durable outbox from a previous session, then send everything.
       await this.hydrateOutbox();
+      if (this.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
       this.flushPendingMutations(socket);
     });
 
     socket.addEventListener("message", async (message) => {
-      if (this.socket !== socket) return;
+      if (this.socket !== socket || generation !== this.connectGeneration) return;
       if (typeof message.data !== "string") return;
       if (message.data === "pong") return;
 
@@ -471,16 +550,26 @@ class SyncClientClass<
       await this.handleServerMessage(msg);
     });
 
-    socket.addEventListener("close", () => {
-      if (this.socket === socket) {
-        this.socket = undefined;
-        this._statusState.value = "disconnected";
-        this.clearAllFetches();
-        this.stopHeartbeat();
-        if (!this.closedByClient) {
-          this.reconnectTimer = setTimeout(() => this.connect(), 2000);
-        }
+    socket.addEventListener("close", (event) => {
+      // Only the active socket owns reconnects. Abandoned sockets are ignored.
+      if (this.socket !== socket) return;
+
+      this.socket = undefined;
+      this.connectInFlight = false;
+      this._statusState.value = "disconnected";
+      this.clearAllFetches();
+      this.stopHeartbeat();
+
+      if (this.closedByClient) return;
+
+      if (event.code === 1008) {
+        console.warn(
+          "SyncClient: websocket closed unauthorized (1008) — will retry",
+          event.reason,
+        );
       }
+
+      this.scheduleReconnect();
     });
 
     socket.addEventListener("error", (err) => {
@@ -495,21 +584,105 @@ class SyncClientClass<
    *
    * Use this after auth changes, for example after login, so the websocket is
    * recreated with the latest cookies.
+   *
+   * Safe by default: if a connection is already in flight (`connecting` or
+   * `WebSocket.CONNECTING`), this is a no-op unless `{ force: true }` is set.
+   * Calling reconnect while connecting aborts the first socket and can leave
+   * the client stuck (browser: "WebSocket is closed before the connection is
+   * established").
    */
-  public reconnect() {
+  public reconnect(options?: { force?: boolean }) {
+    const connecting =
+      this.connectInFlight ||
+      this._statusState.value === "connecting" ||
+      this.socket?.readyState === WebSocket.CONNECTING;
+    if (connecting && !options?.force) {
+      return;
+    }
+
     this.closedByClient = false;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = undefined;
+    this.clearReconnectTimer();
+    // Invalidate any in-flight connect() so its open/close handlers no-op.
+    this.connectGeneration++;
+    this.connectInFlight = false;
+    this.reconnectAttempt = 0;
+    this.abandonSocket();
+    this._statusState.value = "disconnected";
+    void this.connect();
+  }
+
+  /**
+   * Resolves when the websocket is open.
+   *
+   * Optionally kicks a reconnect when fully disconnected (not while a connect
+   * is already in flight).
+   */
+  public async whenConnected(options?: {
+    timeoutMs?: number;
+    /** When true (default), call `reconnect()` if status is `"disconnected"`. */
+    reconnectIfDisconnected?: boolean;
+  }): Promise<void> {
+    const timeoutMs = options?.timeoutMs ?? 15000;
+    const reconnectIfDisconnected = options?.reconnectIfDisconnected ?? true;
+
+    if (this.status === "connected" || this.socket?.readyState === WebSocket.OPEN) {
+      return;
     }
-    if (this.socket) {
-      try {
-        this.socket.close();
-      } catch {}
-      this.socket = undefined;
-      this._statusState.value = "disconnected";
+
+    if (
+      reconnectIfDisconnected &&
+      this.status === "disconnected" &&
+      !this.connectInFlight &&
+      this.socket?.readyState !== WebSocket.CONNECTING
+    ) {
+      this.reconnect();
     }
-    this.connect();
+
+    await this.waitForSocket(timeoutMs);
+  }
+
+  /**
+   * Resolves when there are no pending mutations or snapshot fetches.
+   */
+  public async whenIdle(options?: { timeoutMs?: number }): Promise<void> {
+    const timeoutMs = options?.timeoutMs ?? 15000;
+    if (!this.isSyncing) return;
+
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!this.isSyncing) return;
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error("Timed out waiting for sync idle");
+  }
+
+  /**
+   * Force-full snapshot for multiple local tables.
+   *
+   * When `reconnect` is true, opens a fresh socket first (safe reconnect).
+   * When `wait` is true (default), waits until the client is idle after resyncs.
+   */
+  public async resyncTables(
+    tableNames: Array<keyof TSchema & string>,
+    options?: { reconnect?: boolean; wait?: boolean },
+  ): Promise<Record<string, any[]>> {
+    if (options?.reconnect) {
+      this.reconnect();
+    }
+    await this.whenConnected({
+      reconnectIfDisconnected: !options?.reconnect,
+    });
+
+    const results: Record<string, any[]> = {};
+    for (const name of tableNames) {
+      results[String(name)] = await this.resyncTable(name);
+    }
+
+    if (options?.wait !== false) {
+      await this.whenIdle();
+    }
+
+    return results;
   }
 
   /**
@@ -648,7 +821,8 @@ class SyncClientClass<
       this.socket.readyState === WebSocket.CLOSING ||
       this.socket.readyState === WebSocket.CLOSED
     ) {
-      this.reconnect();
+      // force when caller asked for reconnect after auth changes
+      this.reconnect({ force: Boolean(options?.reconnect) });
     }
 
     await this.waitForSocket();
@@ -666,10 +840,10 @@ class SyncClientClass<
   /**
    * Waits until the current websocket is open.
    *
-   * The promise rejects after 10 seconds so callers do not hang forever when the
+   * The promise rejects after `timeoutMs` so callers do not hang forever when the
    * sync endpoint is unavailable.
    */
-  private waitForSocket(): Promise<void> {
+  private waitForSocket(timeoutMs = 10000): Promise<void> {
     if (this.socket?.readyState === WebSocket.OPEN) {
       return Promise.resolve();
     }
@@ -678,7 +852,7 @@ class SyncClientClass<
       const timeout = setTimeout(() => {
         cleanup();
         reject(new Error("Timed out waiting for sync connection"));
-      }, 10000);
+      }, timeoutMs);
 
       let socket: WebSocket | undefined;
       let poll: ReturnType<typeof setInterval> | undefined;
@@ -1150,37 +1324,30 @@ class SyncClientClass<
    */
   public disconnect() {
     this.closedByClient = true;
+    this.connectGeneration++;
+    this.connectInFlight = false;
+    this.reconnectAttempt = 0;
+    this.clearReconnectTimer();
+    this.abandonSocket();
     this._statusState.value = "disconnected";
-    this.clearAllFetches();
-    this.stopHeartbeat();
     for (const timer of this.changeTimers.values()) {
       clearTimeout(timer);
     }
     this.changeTimers.clear();
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = undefined;
-    }
-    if (this.socket) {
-      try {
-        this.socket.close();
-      } catch {}
-      this.socket = undefined;
-    }
   }
 }
 
 /**
  * Dexie database type returned by `new SyncClient(...)`.
  *
- * Table names from `TSchema` are available as typed Dexie tables while still
- * allowing dynamic table access through Dexie's standard API.
+ * Table names from `TSchema` are available as typed Dexie tables. Dynamic table
+ * access still works via `client.table(name)` — an open string index was avoided
+ * here because it erased non-table members like `status` and `isSyncing`.
  */
-export type SyncClient<TSchema extends Record<string, any> = Record<string, any>> = SyncClientClass<TSchema> & {
-  [K in keyof TSchema]: Table<TSchema[K]>;
-} & {
-  [tableName: string]: Table<any>;
-};
+export type SyncClient<TSchema extends Record<string, any> = Record<string, any>> =
+  SyncClientClass<TSchema> & {
+    [K in keyof TSchema]: Table<TSchema[K]>;
+  };
 
 /**
  * Creates a sync-enabled Dexie client.
