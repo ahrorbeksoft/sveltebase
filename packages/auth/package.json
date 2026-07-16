@@ -1,6 +1,6 @@
 {
   "name": "@sveltebase/auth",
-  "version": "1.7.10",
+  "version": "1.7.11",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -42,7 +42,7 @@
   "peerDependencies": {
     "svelte": "^5.0.0",
     "@sveltejs/kit": "^2.0.0",
-    "@sveltebase/sync": "1.7.10"
+    "@sveltebase/sync": "1.7.11"
   },
   "devDependencies": {
     "@types/google.accounts": "^0.0.14"
