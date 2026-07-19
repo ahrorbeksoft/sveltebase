@@ -62,11 +62,17 @@ export class SyncBroker {
     this.setHandlers(handlers);
   }
 
-  private sendReject(conn: ISyncConnection, id: string, error: unknown) {
+  private sendReject(
+    conn: ISyncConnection,
+    id: string,
+    error: unknown,
+    channel?: string,
+  ) {
     conn.send(
       JSON.stringify({
         type: "reject",
         id,
+        ...(channel ? { channel } : {}),
         error: serializeSyncError(error),
       }),
     );
@@ -115,6 +121,7 @@ export class SyncBroker {
     conn: ISyncConnection,
     platform: SyncPlatform,
     request?: Request,
+    cache = new Map<string, unknown>(),
   ): SyncContext {
     const authUser = conn.getAuth();
     const identity = conn.getIdentity();
@@ -132,6 +139,7 @@ export class SyncBroker {
         : null,
       identity,
       topics,
+      cache,
     };
   }
 
@@ -151,6 +159,7 @@ export class SyncBroker {
       auth: null,
       identity: null,
       topics: new Set(),
+      cache: new Map<string, unknown>(),
     };
   }
 
@@ -257,45 +266,25 @@ export class SyncBroker {
           break;
 
         case "subscribe": {
-          const handler = this.findHandler(msg.channel, ctx);
-          if (!handler) {
-            this.sendReject(
-              conn,
-              "subscribe",
-              new Error(`No handler registered for channel: ${msg.channel}`),
-            );
-            return;
-          }
+          await this.processSubscribe(conn, ctx, msg);
+          break;
+        }
 
-          // Channel authorize
-          if (handler.config.authorize) {
-            await handler.config.authorize(ctx);
-          }
-
-          conn.getSubscribedChannels().add(msg.channel);
-
-          const currentViewVersion = await this.resolveViewVersion(
-            handler,
-            ctx,
-          );
-          const clientViewVersion =
-            msg.viewVersion == null ? null : String(msg.viewVersion);
-          const forceFull = currentViewVersion !== clientViewVersion;
-
-          // Fetch snapshot with delta support. A stale view version means the
-          // user's visible set may have changed, so the local table must be
-          // replaced instead of patched by `since`.
-          const data = await handler.config.fetch(
-            ctx,
-            forceFull ? undefined : msg.since,
-          );
-          conn.send(
-            JSON.stringify({
-              type: "snapshot",
-              channel: msg.channel,
-              data,
-              isDelta: msg.since != null && !forceFull,
-              viewVersion: currentViewVersion,
+        case "subscribe-batch": {
+          // The batch is one queued connection operation, so mutations sent
+          // after it still wait for every initial snapshot. Individual channel
+          // fetches can run concurrently and share the same per-batch cache.
+          await Promise.all(
+            msg.subscriptions.map(async (subscription) => {
+              try {
+                await this.processSubscribe(conn, ctx, subscription);
+              } catch (error) {
+                console.error(
+                  `SyncBroker: error subscribing to ${subscription.channel}:`,
+                  error,
+                );
+                this.sendReject(conn, "subscribe", error, subscription.channel);
+              }
             }),
           );
           break;
@@ -380,11 +369,53 @@ export class SyncBroker {
         err,
       );
       if (msg.type === "subscribe") {
-        this.sendReject(conn, "subscribe", err);
+        this.sendReject(conn, "subscribe", err, msg.channel);
       } else if (msg.type === "mutate") {
         this.sendReject(conn, msg.id, err);
       }
     }
+  }
+
+  private async processSubscribe(
+    conn: ISyncConnection,
+    ctx: SyncContext,
+    subscription: {
+      channel: string;
+      since?: number;
+      viewVersion?: string | number | null;
+    },
+  ) {
+    const handler = this.findHandler(subscription.channel, ctx);
+    if (!handler) {
+      throw new Error(
+        `No handler registered for channel: ${subscription.channel}`,
+      );
+    }
+
+    if (handler.config.authorize) {
+      await handler.config.authorize(ctx);
+    }
+
+    conn.getSubscribedChannels().add(subscription.channel);
+
+    const currentViewVersion = await this.resolveViewVersion(handler, ctx);
+    const clientViewVersion =
+      subscription.viewVersion == null ? null : String(subscription.viewVersion);
+    const forceFull = currentViewVersion !== clientViewVersion;
+    const data = await handler.config.fetch(
+      ctx,
+      forceFull ? undefined : subscription.since,
+    );
+
+    conn.send(
+      JSON.stringify({
+        type: "snapshot",
+        channel: subscription.channel,
+        data,
+        isDelta: subscription.since != null && !forceFull,
+        viewVersion: currentViewVersion,
+      }),
+    );
   }
 
   /**

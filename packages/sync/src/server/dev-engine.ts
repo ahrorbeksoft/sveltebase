@@ -217,6 +217,7 @@ export async function addClient(
           : null,
         identity,
         topics: new Set(baseTopics),
+        cache: new Map<string, unknown>(),
       };
       topics = Array.from(
         new Set([...baseTopics, ...(await options.topics(topicCtx))]),

@@ -58,6 +58,8 @@ export type SyncContext<
   auth: SyncConnectionAuth<TAuth> | null;
   identity: string | null;
   topics: Set<string>;
+  /** Per-message cache shared by authorize, viewVersion, and fetch callbacks. */
+  cache?: Map<string, unknown>;
 };
 
 /**

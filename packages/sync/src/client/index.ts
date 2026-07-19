@@ -61,12 +61,19 @@ export type SyncClientOptions<
   url: string | (() => string | Promise<string>);
   /** Dexie tables that should be kept in sync with server channels. */
   tables: Record<keyof TSchema & string, TableConfig>;
+  /** Use one concurrent initial subscription batch when the server supports it. */
+  batchSubscriptions?: boolean;
   /** Error classes to restore from rejected server mutations. */
   errorClasses?: readonly SerializableErrorConstructor[];
 };
 
 type PendingMutation = {
   id: string;
+  revision: number;
+  /** True after the mutation has been persisted to the durable outbox. */
+  ready: boolean;
+  /** Socket on which this mutation was last sent, used to avoid same-socket duplicates. */
+  sentSocket?: WebSocket;
   channel: string;
   action: "create" | "update" | "delete";
   key: string;
@@ -94,12 +101,18 @@ type OutboxEntry = {
   createdAt: number;
 };
 
+type MutationIntent = {
+  id: string;
+  revision: number;
+};
+
 class SyncClientClass<
   TSchema extends Record<string, any> = Record<string, any>,
 > extends Dexie {
   private wsUrl: string | (() => string | Promise<string>);
   private socket: WebSocket | undefined;
   private tableConfigs: Record<string, TableConfig>;
+  private batchSubscriptions: boolean;
   private errorCodec: ErrorCodec;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private pingInterval: ReturnType<typeof setInterval> | undefined;
@@ -111,6 +124,16 @@ class SyncClientClass<
   private reconnectAttempt = 0;
   private activeChannels = new Set<string>();
   private changeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private resyncBatchTimer: ReturnType<typeof setTimeout> | undefined;
+  private pendingResyncs = new Map<string, { forceFull: boolean }>();
+  private mutationDispatchQueue: Promise<void> = Promise.resolve();
+  private serverMessageQueue: Promise<void> = Promise.resolve();
+  private nextMutationRevision = 0;
+  private latestMutationRevisions = new Map<string, number>();
+  private acknowledgedMutationTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
 
   // Reactive connection status delegated to status.svelte.ts
   private _statusState = new ConnectionStatus();
@@ -141,6 +164,7 @@ class SyncClientClass<
     super(options.name);
     this.wsUrl = options.url;
     this.tableConfigs = options.tables;
+    this.batchSubscriptions = options.batchSubscriptions ?? false;
     this.errorCodec = createErrorCodec(options.errorClasses);
 
     // Initialize Dexie database
@@ -255,9 +279,8 @@ class SyncClientClass<
    * Replaces add/put/update/delete on one Dexie Table with optimistic sync wrappers.
    *
    * Contract: the Promise returned to the caller resolves/rejects with the
-   * **local IndexedDB write only**. Server transport is scheduled in a later
-   * macrotask (`setTimeout(0)`) *after* that resolve, so it cannot participate
-   * in the caller's `await` chain (no waiting for server `ack`).
+   * **local IndexedDB write only**. Durable outbox persistence and server
+   * transport continue in an ordered background queue.
    */
   private interceptTableWrites(table: Table, config: TableConfig) {
     // Walk to the Dexie Table.prototype that actually owns add/put/… —
@@ -286,14 +309,12 @@ class SyncClientClass<
       put: originalPut,
       update: originalUpdate,
       delete: originalDelete,
+      get: originalGet,
     };
 
     const channel = config.channel;
 
-    /**
-     * Local write → durable outbox + wire dispatch → resolve caller.
-     * Awaits only IDB (row + outbox), never the server ack.
-     */
+    /** Local write resolves first; durable sync continues in the background. */
     const localThenSync = <T>(
       localWrite: () => PromiseLike<T>,
       action: "create" | "update" | "delete",
@@ -302,27 +323,34 @@ class SyncClientClass<
       previous: any | undefined,
       rollback: () => PromiseLike<unknown> | unknown,
     ): Promise<T> => {
+      const mutation = this.createMutationIntent(channel, key);
+
       return new Promise<T>((resolve, reject) => {
         Promise.resolve(localWrite()).then(
-          async (result) => {
-            try {
-              // Persist outbox + start wire send (does not wait for server ack).
-              await this.dispatchMutation(
-                channel,
-                action,
-                key,
-                data,
-                async () => {
-                  await rollback();
-                },
-                previous,
-              );
-            } catch (err) {
-              console.warn("SyncClient: failed to dispatch mutation", err);
-            }
+          (result) => {
+            // Keep local writes independent from outbox latency. The dispatch
+            // queue still preserves mutation order and durability in the
+            // background.
             resolve(result);
+
+            void this.dispatchMutation(
+              mutation,
+              channel,
+              action,
+              key,
+              data,
+              async () => {
+                await rollback();
+              },
+              previous,
+            ).catch((err) => {
+              console.warn("SyncClient: failed to dispatch mutation", err);
+            });
           },
-          reject,
+          (err) => {
+            this.releaseMutationIntent(channel, key, mutation);
+            reject(err);
+          },
         );
       });
     };
@@ -525,10 +553,20 @@ class SyncClientClass<
       this.activeChannels.clear();
       this.startHeartbeat();
 
-      // Re-subscribe to all tables (delta-sync aware)
-      for (const config of Object.values(this.tableConfigs)) {
-        if (this.socket !== socket || generation !== this.connectGeneration) return;
-        await this.subscribeToChannel(config.channel, { socket });
+      if (this.batchSubscriptions) {
+        // Re-subscribe to all tables in one broker operation. The server fetches
+        // independent channels concurrently while keeping mutations behind the
+        // complete initial batch.
+        await this.subscribeToChannels(
+          Object.values(this.tableConfigs).map((config) => config.channel),
+          { socket },
+        );
+      } else {
+        // Keep the original wire format available for older sync servers.
+        for (const config of Object.values(this.tableConfigs)) {
+          if (this.socket !== socket || generation !== this.connectGeneration) return;
+          await this.subscribeToChannel(config.channel, { socket });
+        }
       }
 
       if (this.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
@@ -539,7 +577,7 @@ class SyncClientClass<
       this.flushPendingMutations(socket);
     });
 
-    socket.addEventListener("message", async (message) => {
+    socket.addEventListener("message", (message) => {
       if (this.socket !== socket || generation !== this.connectGeneration) return;
       if (typeof message.data !== "string") return;
       if (message.data === "pong") return;
@@ -547,7 +585,7 @@ class SyncClientClass<
       const msg = parseSyncMessage(message.data);
       if (!msg) return;
 
-      await this.handleServerMessage(msg);
+      this.enqueueServerMessage(msg, socket, generation);
     });
 
     socket.addEventListener("close", (event) => {
@@ -760,28 +798,68 @@ class SyncClientClass<
   ) {
     const socket = options?.socket ?? this.socket;
     if (socket && socket === this.socket && socket.readyState === WebSocket.OPEN) {
-      const tableName = this.findTableByChannel(channel);
-      let since: number | undefined;
-      if (tableName && !options?.forceFull) {
-        try {
-          const table = this.table(tableName);
-          const updatedAtField = this.getUpdatedAtField(tableName);
-          const latestRow = await table.orderBy(updatedAtField).last();
-          if (latestRow) {
-            since = this.getUpdatedAtValue(tableName, latestRow);
-          }
-        } catch {
-          // Ignore if query fails or table is empty
-        }
-      }
-      const viewVersion = await this.getChannelViewVersion(channel);
+      const subscription = await this.prepareSubscription(channel, options);
       if (socket !== this.socket || socket.readyState !== WebSocket.OPEN) return;
       this.markFetchPending(channel);
-      socket.send(
-        JSON.stringify({ type: "subscribe", channel, since, viewVersion }),
-      );
+      socket.send(JSON.stringify({ type: "subscribe", ...subscription }));
       this.activeChannels.add(channel);
     }
+  }
+
+  private async prepareSubscription(
+    channel: string,
+    options?: { forceFull?: boolean },
+  ) {
+    const tableName = this.findTableByChannel(channel);
+    let since: number | undefined;
+    if (tableName && !options?.forceFull) {
+      try {
+        const table = this.table(tableName);
+        const updatedAtField = this.getUpdatedAtField(tableName);
+        const latestRow = await table.orderBy(updatedAtField).last();
+        if (latestRow) {
+          since = this.getUpdatedAtValue(tableName, latestRow);
+        }
+      } catch {
+        // Ignore if query fails or table is empty
+      }
+    }
+
+    const viewVersion = await this.getChannelViewVersion(channel);
+    return { channel, since, viewVersion };
+  }
+
+  private async subscribeToChannels(
+    channels: string[],
+    options?: {
+      forceFull?: boolean;
+      forceFullChannels?: ReadonlySet<string>;
+      socket?: WebSocket;
+    },
+  ) {
+    const socket = options?.socket ?? this.socket;
+    if (!socket || socket !== this.socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const subscriptions = await Promise.all(
+      channels.map((channel) =>
+        this.prepareSubscription(channel, {
+          forceFull:
+            options?.forceFullChannels?.has(channel) ?? options?.forceFull,
+        }),
+      ),
+    );
+    if (socket !== this.socket || socket.readyState !== WebSocket.OPEN) return;
+
+    for (const subscription of subscriptions) {
+      this.markFetchPending(subscription.channel);
+      this.activeChannels.add(subscription.channel);
+    }
+
+    socket.send(
+      JSON.stringify({ type: "subscribe-batch", subscriptions }),
+    );
   }
 
   /**
@@ -893,6 +971,29 @@ class SyncClientClass<
   }
 
   /**
+   * Processes websocket messages in wire order. Message handlers perform IDB
+   * work, so separate async event callbacks could otherwise apply an older ack
+   * after a newer snapshot or mutation.
+   */
+  private enqueueServerMessage(
+    msg: SyncMessage,
+    socket: WebSocket,
+    generation: number,
+  ) {
+    this.serverMessageQueue = this.serverMessageQueue
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.socket !== socket || generation !== this.connectGeneration) {
+          return;
+        }
+        await this.handleServerMessage(msg);
+      })
+      .catch((err) => {
+        console.warn("SyncClient: failed to apply server message", err);
+      });
+  }
+
+  /**
    * Sends mutations queued while the websocket was closed.
    */
   private flushMutationQueue(socket = this.socket) {
@@ -942,11 +1043,80 @@ class SyncClientClass<
   }
 
   /**
+   * Applies a delta snapshot with one IndexedDB read and one bulk write while
+   * preserving the row-level last-write-wins checks used by safePutRow.
+   */
+  private async safePutRows(tableName: string, rows: any[]) {
+    const table = this.table(tableName);
+    const validRows = rows.filter((row) => row?.id);
+    if (validRows.length === 0) return;
+
+    await this.transaction("rw", table, async () => {
+      const ids = [...new Set(validRows.map((row) => row.id))];
+      const existingRows = await table.bulkGet(ids);
+      const current = new Map<string, any>();
+      ids.forEach((id, index) => {
+        const existing = existingRows[index];
+        if (existing) current.set(id, existing);
+      });
+
+      const accepted = new Map<string, any>();
+      for (const row of validRows) {
+        const existing = current.get(row.id);
+        const existingUpdatedAt = this.getUpdatedAtValue(tableName, existing);
+        const incomingUpdatedAt = this.getUpdatedAtValue(tableName, row);
+        if (
+          existingUpdatedAt != null &&
+          incomingUpdatedAt != null &&
+          incomingUpdatedAt <= existingUpdatedAt
+        ) {
+          continue;
+        }
+
+        current.set(row.id, row);
+        accepted.set(row.id, row);
+      }
+
+      if (accepted.size > 0) {
+        await table.bulkPut([...accepted.values()]);
+      }
+    });
+  }
+
+  /**
    * Applies an ack payload only when the server row is newer than local.
    */
-  private async applyAckRow(tableName: string, data: any) {
+  private async applyAckRow(
+    tableName: string,
+    data: any,
+    channel: string,
+    key: string,
+    revision: number,
+  ) {
     try {
-      await this.safePutRow(tableName, data);
+      if (this.latestMutationRevisions.get(this.mutationKey(channel, key)) !== revision) {
+        return;
+      }
+
+      const table = this.table(tableName);
+      const existing = await table.get(data?.id);
+      if (this.latestMutationRevisions.get(this.mutationKey(channel, key)) !== revision) {
+        return;
+      }
+
+      const existingUpdatedAt = this.getUpdatedAtValue(tableName, existing);
+      const incomingUpdatedAt = this.getUpdatedAtValue(tableName, data);
+      if (
+        existingUpdatedAt != null &&
+        incomingUpdatedAt != null &&
+        incomingUpdatedAt <= existingUpdatedAt
+      ) {
+        return;
+      }
+
+      const originalPut =
+        (table as any)._originalMethods?.put || table.put.bind(table);
+      await originalPut(data);
     } catch (err) {
       console.warn("SyncClient: failed to apply ack row", err);
     }
@@ -993,16 +1163,17 @@ class SyncClientClass<
           const table = this.table(tableName);
           if (msg.isDelta) {
             // Delta Sync: put changes using Last-Write-Wins
-            for (const row of msg.data) {
-              await this.safePutRow(tableName, row);
-            }
+            await this.safePutRows(tableName, msg.data);
+            await this.reapplyPendingMutations(msg.channel, tableName);
           } else {
             // Full Snapshot: clear and replace
             await this.transaction("rw", table, async () => {
               await table.clear();
-              for (const row of msg.data) {
-                await this.safePutRow(tableName, row);
+              const rows = msg.data.filter((row) => row?.id);
+              if (rows.length > 0) {
+                await table.bulkPut(rows);
               }
+              await this.reapplyPendingMutations(msg.channel, tableName);
             });
           }
           await this.setChannelViewVersion(msg.channel, msg.viewVersion);
@@ -1020,32 +1191,53 @@ class SyncClientClass<
       case "ack": {
         const pending = this.pendingMutations.get(msg.id);
         if (pending) {
+          this.rememberAcknowledgedMutation(msg.id);
           // Resolve immediately so any rare waiters are not blocked on IDB.
           this.pendingMutations.delete(msg.id);
           this.refreshActivity();
           void this.removeOutboxEntry(msg.id);
           pending.resolve(msg.data);
 
-          // Apply server canonical row off the critical path. Skip when the
-          // local row already has the same updatedAt to avoid a second
-          // liveQuery storm right after the optimistic write.
-          if (msg.data) {
+          // Apply the canonical row only when this is still the newest local
+          // mutation for the row. A create ack must not resurrect a row that
+          // was deleted locally while the create was in flight.
+          if (
+            msg.data &&
+            pending.action !== "delete" &&
+            this.isLatestMutation(pending)
+          ) {
             const tableName = this.findTableByChannel(pending.channel);
-            const data = msg.data;
             if (tableName) {
-              queueMicrotask(() => {
-                void this.applyAckRow(tableName, data);
-              });
+              await this.applyAckRow(
+                tableName,
+                msg.data,
+                pending.channel,
+                pending.key,
+                pending.revision,
+              );
             }
           }
         } else {
           // Ack for a mutation restored only in outbox / already cleaned up.
+          this.rememberAcknowledgedMutation(msg.id);
           void this.removeOutboxEntry(msg.id);
         }
         break;
       }
       case "reject": {
         if (msg.id === "subscribe") {
+          if (msg.channel) {
+            const pending = this.pendingSnapshots.get(msg.channel);
+            if (pending?.length) {
+              this.pendingSnapshots.delete(msg.channel);
+              for (const waiter of pending) {
+                waiter.reject(this.errorCodec.deserialize(msg.error));
+              }
+            }
+            this.clearFetchPending(msg.channel);
+            break;
+          }
+
           for (const pending of this.pendingSnapshots.values()) {
             for (const waiter of pending) {
               waiter.reject(this.errorCodec.deserialize(msg.error));
@@ -1078,8 +1270,13 @@ class SyncClientClass<
         break;
       }
       case "change": {
-        // Prevent sync loops: if we sent this mutation, ignore the echo change
-        if (msg.mutationId && this.pendingMutations.has(msg.mutationId)) {
+        // Prevent sync loops: the server sends an ack before the echo change,
+        // so pendingMutations alone is not enough to recognize our own echo.
+        if (
+          msg.mutationId &&
+          (this.pendingMutations.has(msg.mutationId) ||
+            this.consumeAcknowledgedMutation(msg.mutationId))
+        ) {
           break;
         }
 
@@ -1099,19 +1296,7 @@ class SyncClientClass<
         if (!tableName) break;
 
         const table = this.table(tableName);
-        await this.transaction("rw", table, async () => {
-          for (const change of msg.changes) {
-            if (change.action === "create" || change.action === "update") {
-              await this.safePutRow(tableName, change.data);
-            } else if (change.action === "delete" && change.key) {
-              const incomingTime = this.getUpdatedAtValue(
-                tableName,
-                change.data,
-              );
-              await this.safeDeleteRow(tableName, change.key, incomingTime);
-            }
-          }
-        });
+        await this.applyChangeBatch(tableName, msg.changes);
         break;
       }
       case "channel-change": {
@@ -1125,6 +1310,93 @@ class SyncClientClass<
     }
   }
 
+  /** Applies a server batch with one bulk read and at most one bulk put/delete. */
+  private async applyChangeBatch(
+    tableName: string,
+    changes: Array<{
+      action: "create" | "update" | "delete";
+      key?: string;
+      data?: any;
+    }>,
+  ) {
+    const table = this.table(tableName);
+    const keys = [
+      ...new Set(
+        changes
+          .map((change) =>
+            change.action === "create" || change.action === "update"
+              ? change.data?.id ?? change.key
+              : change.key ?? change.data?.id,
+          )
+          .filter((key): key is string => Boolean(key)),
+      ),
+    ];
+    if (keys.length === 0) return;
+
+    await this.transaction("rw", table, async () => {
+      const existingRows = await table.bulkGet(keys);
+      const current = new Map<string, any>();
+      keys.forEach((key, index) => {
+        const row = existingRows[index];
+        if (row) current.set(key, row);
+      });
+
+      const writes = new Map<string, any>();
+      const deletes = new Set<string>();
+
+      for (const change of changes) {
+        const key =
+          change.action === "create" || change.action === "update"
+            ? change.data?.id ?? change.key
+            : change.key ?? change.data?.id;
+        if (!key) continue;
+
+        if (change.action === "create" || change.action === "update") {
+          const row = change.data;
+          if (!row?.id) continue;
+
+          const existing = current.get(key);
+          const existingUpdatedAt = this.getUpdatedAtValue(tableName, existing);
+          const incomingUpdatedAt = this.getUpdatedAtValue(tableName, row);
+          if (
+            existingUpdatedAt != null &&
+            incomingUpdatedAt != null &&
+            incomingUpdatedAt <= existingUpdatedAt
+          ) {
+            continue;
+          }
+
+          current.set(key, row);
+          writes.set(key, row);
+          deletes.delete(key);
+          continue;
+        }
+
+        const existing = current.get(key);
+        const incomingTime = this.getUpdatedAtValue(tableName, change.data);
+        const existingUpdatedAt = this.getUpdatedAtValue(tableName, existing);
+        if (
+          incomingTime != null &&
+          existingUpdatedAt != null &&
+          incomingTime < existingUpdatedAt
+        ) {
+          continue;
+        }
+
+        current.delete(key);
+        writes.delete(key);
+        deletes.add(key);
+      }
+
+      if (writes.size > 0) {
+        await table.bulkPut([...writes.values()]);
+      }
+      if (deletes.size > 0) {
+        await table.bulkDelete([...deletes]);
+      }
+    });
+  }
+
   /**
    * Debounces a `channel-change` notification into a fresh subscribe request.
    *
@@ -1135,6 +1407,42 @@ class SyncClientClass<
     channel: string,
     options?: { forceFull?: boolean },
   ) {
+    if (this.batchSubscriptions) {
+      const previous = this.pendingResyncs.get(channel);
+      this.pendingResyncs.set(channel, {
+        forceFull: Boolean(options?.forceFull) || Boolean(previous?.forceFull),
+      });
+
+      if (this.resyncBatchTimer) clearTimeout(this.resyncBatchTimer);
+      this.resyncBatchTimer = setTimeout(() => {
+        this.resyncBatchTimer = undefined;
+        const scheduled = [...this.pendingResyncs.entries()];
+        this.pendingResyncs.clear();
+
+        const channels = scheduled
+          .filter(([scheduledChannel]) => this.activeChannels.has(scheduledChannel))
+          .map(([scheduledChannel]) => scheduledChannel);
+        if (
+          !this.socket ||
+          this.socket.readyState !== WebSocket.OPEN ||
+          channels.length === 0
+        ) {
+          return;
+        }
+
+        const forceFullChannels = new Set(
+          scheduled
+            .filter(([, value]) => value.forceFull)
+            .map(([scheduledChannel]) => scheduledChannel),
+        );
+        void this.subscribeToChannels(channels, {
+          socket: this.socket,
+          forceFullChannels,
+        });
+      }, 50);
+      return;
+    }
+
     const existing = this.changeTimers.get(channel);
     if (existing) clearTimeout(existing);
 
@@ -1161,6 +1469,86 @@ class SyncClientClass<
       if (config.channel === channel) return tableName;
     }
     return undefined;
+  }
+
+  private mutationKey(channel: string, key: string) {
+    return JSON.stringify([channel, key]);
+  }
+
+  private createMutationIntent(channel: string, key: string): MutationIntent {
+    const intent = {
+      id: crypto.randomUUID(),
+      revision: ++this.nextMutationRevision,
+    };
+    this.latestMutationRevisions.set(
+      this.mutationKey(channel, key),
+      intent.revision,
+    );
+    return intent;
+  }
+
+  private releaseMutationIntent(
+    channel: string,
+    key: string,
+    intent: MutationIntent,
+  ) {
+    const keyName = this.mutationKey(channel, key);
+    if (this.latestMutationRevisions.get(keyName) === intent.revision) {
+      this.latestMutationRevisions.delete(keyName);
+    }
+  }
+
+  private isLatestMutation(mutation: PendingMutation) {
+    return (
+      this.latestMutationRevisions.get(
+        this.mutationKey(mutation.channel, mutation.key),
+      ) === mutation.revision
+    );
+  }
+
+  private rememberAcknowledgedMutation(id: string) {
+    const existing = this.acknowledgedMutationTimers.get(id);
+    if (existing) clearTimeout(existing);
+
+    const timer = setTimeout(() => {
+      this.acknowledgedMutationTimers.delete(id);
+    }, 30_000);
+    this.acknowledgedMutationTimers.set(id, timer);
+  }
+
+  private consumeAcknowledgedMutation(id: string) {
+    const timer = this.acknowledgedMutationTimers.get(id);
+    if (!timer) return false;
+    clearTimeout(timer);
+    this.acknowledgedMutationTimers.delete(id);
+    return true;
+  }
+
+  /** Replays optimistic mutations over a full snapshot received mid-flight. */
+  private async reapplyPendingMutations(channel: string, tableName: string) {
+    const pending = Array.from(this.pendingMutations.values()).filter(
+      (mutation) => mutation.channel === channel,
+    );
+    if (pending.length === 0) return;
+
+    const table = this.table(tableName);
+    const methods = (table as any)._originalMethods ?? {};
+    const originalPut = methods.put || table.put.bind(table);
+    const originalUpdate = methods.update || table.update.bind(table);
+    const originalDelete = methods.delete || table.delete.bind(table);
+    const originalGet = methods.get || table.get.bind(table);
+
+    for (const mutation of pending) {
+      if (mutation.action === "create" && mutation.data) {
+        await originalPut(mutation.data);
+      } else if (mutation.action === "update") {
+        if (await originalGet(mutation.key)) {
+          await originalUpdate(mutation.key, mutation.data);
+        }
+      } else if (mutation.action === "delete") {
+        await originalDelete(mutation.key);
+      }
+    }
   }
 
 
@@ -1222,8 +1610,12 @@ class SyncClientClass<
     for (const entry of entries) {
       if (this.pendingMutations.has(entry.id)) continue;
 
+      const intent = this.createMutationIntent(entry.channel, entry.key);
+
       this.pendingMutations.set(entry.id, {
         id: entry.id,
+        revision: intent.revision,
+        ready: true,
         channel: entry.channel,
         action: entry.action,
         key: entry.key,
@@ -1249,24 +1641,32 @@ class SyncClientClass<
 
     for (const mut of this.pendingMutations.values()) {
       if (socket !== this.socket || socket.readyState !== WebSocket.OPEN) return;
-      socket.send(
-        JSON.stringify({
-          type: "mutate",
-          id: mut.id,
-          channel: mut.channel,
-          action: mut.action,
-          key: mut.key,
-          data: mut.data,
-        }),
-      );
+      this.sendPendingMutation(mut, socket);
     }
   }
 
+  private sendPendingMutation(mutation: PendingMutation, socket: WebSocket) {
+    if (!mutation.ready || mutation.sentSocket === socket) return;
+
+    socket.send(
+      JSON.stringify({
+        type: "mutate",
+        id: mutation.id,
+        channel: mutation.channel,
+        action: mutation.action,
+        key: mutation.key,
+        data: mutation.data,
+      }),
+    );
+    mutation.sentSocket = socket;
+  }
+
   /**
-   * Persists a mutation to the durable outbox, tracks it in memory, and sends
-   * it when the socket is open. Resolves after the outbox write — not after ack.
+   * Tracks a mutation immediately, then persists and sends it in order behind
+   * earlier mutations. The caller does not need to wait for this promise.
    */
-  private async dispatchMutation(
+  private dispatchMutation(
+    mutation: MutationIntent,
     channel: string,
     action: "create" | "update" | "delete",
     key: string,
@@ -1274,10 +1674,8 @@ class SyncClientClass<
     rollback: () => Promise<void>,
     previous?: any,
   ): Promise<void> {
-    const mutationId = crypto.randomUUID();
-
     const entry: OutboxEntry = {
-      id: mutationId,
+      id: mutation.id,
       channel,
       action,
       key,
@@ -1286,10 +1684,10 @@ class SyncClientClass<
       createdAt: Date.now(),
     };
 
-    await this.saveOutboxEntry(entry);
-
-    this.pendingMutations.set(mutationId, {
-      id: mutationId,
+    this.pendingMutations.set(mutation.id, {
+      id: mutation.id,
+      revision: mutation.revision,
+      ready: false,
       channel,
       action,
       key,
@@ -1301,19 +1699,23 @@ class SyncClientClass<
     });
     this.refreshActivity();
 
-    // Offline: stays in outbox + pendingMutations until connect re-sends.
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(
-        JSON.stringify({
-          type: "mutate",
-          id: mutationId,
-          channel,
-          action,
-          key,
-          data,
-        }),
-      );
-    }
+    const run = this.mutationDispatchQueue
+      .catch(() => undefined)
+      .then(async () => {
+        await this.saveOutboxEntry(entry);
+
+        const pending = this.pendingMutations.get(mutation.id);
+        if (!pending) return;
+        pending.ready = true;
+
+        // Offline: stays in outbox + pendingMutations until connect re-sends.
+        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+          this.sendPendingMutation(pending, this.socket);
+        }
+      });
+
+    this.mutationDispatchQueue = run;
+    return run;
   }
 
   /**
@@ -1334,6 +1736,13 @@ class SyncClientClass<
       clearTimeout(timer);
     }
     this.changeTimers.clear();
+    if (this.resyncBatchTimer) clearTimeout(this.resyncBatchTimer);
+    this.resyncBatchTimer = undefined;
+    this.pendingResyncs.clear();
+    for (const timer of this.acknowledgedMutationTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.acknowledgedMutationTimers.clear();
   }
 }
 

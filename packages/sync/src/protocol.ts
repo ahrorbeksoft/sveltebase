@@ -3,8 +3,9 @@ import type { SyncErrorPayload } from "./errors.js";
 /**
  * Wire messages exchanged between the browser sync client and the sync broker.
  *
- * The client sends `subscribe`, `unsubscribe`, `mutate`, and `ping`. The server
- * answers with snapshots, acknowledgements, rejections, and broadcast changes.
+ * The client sends `subscribe`, `subscribe-batch`, `unsubscribe`, `mutate`, and
+ * `ping`. The server answers with snapshots, acknowledgements, rejections, and
+ * broadcast changes.
  */
 export type SyncMessage =
   | {
@@ -12,6 +13,14 @@ export type SyncMessage =
       channel: string;
       since?: number;
       viewVersion?: string | number | null;
+    }
+  | {
+      type: "subscribe-batch";
+      subscriptions: Array<{
+        channel: string;
+        since?: number;
+        viewVersion?: string | number | null;
+      }>;
     }
   | { type: "unsubscribe"; channel: string }
   | {
@@ -32,7 +41,12 @@ export type SyncMessage =
       viewVersion?: string | null;
     }
   | { type: "ack"; id: string; data?: any }
-  | { type: "reject"; id: string; error: SyncErrorPayload | string }
+  | {
+      type: "reject";
+      id: string;
+      channel?: string;
+      error: SyncErrorPayload | string;
+    }
   | {
       type: "change";
       channel: string;

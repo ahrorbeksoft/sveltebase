@@ -55,6 +55,7 @@ type AppDatabase = {
 export const db = new SyncClient<AppDatabase>({
   name: "app-sync",
   url: "/api/sync",
+  batchSubscriptions: true,
   tables: {
     todos: {
       indexes: "id, completed, updatedAt",
@@ -68,6 +69,7 @@ export const db = new SyncClient<AppDatabase>({
 - **name** — IndexedDB database name
 - **url** — absolute `ws://` / `wss://` or a relative path like `/api/sync`
 - **tables** — each table needs Dexie `indexes`, a server `channel`, and optionally `updatedAtField` for delta sync (defaults to `updatedAt`)
+- **batchSubscriptions** — opt into concurrent initial channel fetches when the server uses `@sveltebase/sync` 1.8+; defaults to `false` for older-server compatibility
 
 The WebSocket opens in the browser only, not during SSR.
 
