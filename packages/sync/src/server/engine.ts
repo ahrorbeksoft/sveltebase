@@ -187,6 +187,26 @@ export class SyncEngineBase extends DurableObject<SyncEngineEnv> {
       }
     }
 
+    if (url.pathname === "/broadcast-reset-batch" && request.method === "POST") {
+      try {
+        const body = (await request.json()) as any;
+        const resets = Array.isArray(body.resets) ? body.resets : [];
+        await this.broker.handleExternalChannelResetBatch(
+          resets.map((reset: any) => ({
+            channel: String(reset.channel),
+            topics: Array.isArray(reset.topics)
+              ? reset.topics.map(String)
+              : "all",
+          })),
+        );
+        return new Response(null, { status: 204 });
+      } catch (err: any) {
+        return new Response(err.message || "Error processing reset batch", {
+          status: 400,
+        });
+      }
+    }
+
     return new Response("Not found", { status: 404 });
   }
 

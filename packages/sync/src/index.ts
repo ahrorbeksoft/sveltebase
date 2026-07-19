@@ -22,6 +22,7 @@ export {
   publishChangeEvent,
   publishEvent,
   publishResetEvent,
+  publishResetEvents,
 } from "./server/index.js";
 export type {
   BulkPublishFn,

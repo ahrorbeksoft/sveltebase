@@ -142,7 +142,8 @@ async function publishToDurableObject(
     | "/broadcast"
     | "/broadcast-batch"
     | "/broadcast-change"
-    | "/broadcast-reset",
+    | "/broadcast-reset"
+    | "/broadcast-reset-batch",
   body: unknown,
 ) {
   const namespace = platform.env[syncEngineBinding] as
@@ -175,7 +176,8 @@ async function publishToDevBroker(
     | "/broadcast"
     | "/broadcast-batch"
     | "/broadcast-change"
-    | "/broadcast-reset",
+    | "/broadcast-reset"
+    | "/broadcast-reset-batch",
   body: any,
 ) {
   const devEngine = await import("./dev-engine.js");
@@ -184,6 +186,13 @@ async function publishToDevBroker(
     await devEngine.broadcastChannelReset(
       String(body.channel),
       Array.isArray(body.topics) ? body.topics.map(String) : "all",
+    );
+    return;
+  }
+
+  if (pathname === "/broadcast-reset-batch") {
+    await devEngine.broadcastChannelResetBatch(
+      Array.isArray(body.resets) ? body.resets : [],
     );
     return;
   }
@@ -217,7 +226,8 @@ async function publish(
     | "/broadcast"
     | "/broadcast-batch"
     | "/broadcast-change"
-    | "/broadcast-reset",
+    | "/broadcast-reset"
+    | "/broadcast-reset-batch",
   body: unknown,
 ) {
   const runtime = getPublisherRuntime();
@@ -395,5 +405,24 @@ export async function publishResetEvent(
   await publish("/broadcast-reset", {
     channel: String(channel),
     topics,
+  });
+}
+
+/**
+ * Publishes several scoped channel resets through one sync-engine request.
+ */
+export async function publishResetEvents(
+  resets: Array<{
+    channel: string;
+    topics?: string[] | "all";
+  }>,
+): Promise<void> {
+  if (resets.length === 0) return;
+
+  await publish("/broadcast-reset-batch", {
+    resets: resets.map((reset) => ({
+      channel: String(reset.channel),
+      topics: reset.topics ?? "all",
+    })),
   });
 }

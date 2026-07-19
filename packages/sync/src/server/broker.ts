@@ -563,6 +563,18 @@ export class SyncBroker {
     this.sendToScopedSubscribers(channel, resetMsg, topics);
   }
 
+  /** Sends several channel resets without requiring one internal request per channel. */
+  public async handleExternalChannelResetBatch(
+    resets: Array<{
+      channel: string;
+      topics?: string[] | "all";
+    }>,
+  ) {
+    for (const reset of resets) {
+      await this.handleExternalChannelReset(reset.channel, reset.topics ?? "all");
+    }
+  }
+
   /**
    * Broadcasts one server-originated row change to topic-matched subscribers.
    *

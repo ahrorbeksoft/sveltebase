@@ -331,3 +331,16 @@ export async function broadcastChannelReset(
   const broker = getDevBroker();
   await broker.handleExternalChannelReset(channel, topics);
 }
+
+/**
+ * Notifies dev clients that several channels should be fully resynced.
+ */
+export async function broadcastChannelResetBatch(
+  resets: Array<{
+    channel: string;
+    topics?: string[] | "all";
+  }>,
+) {
+  const broker = getDevBroker();
+  await broker.handleExternalChannelResetBatch(resets);
+}

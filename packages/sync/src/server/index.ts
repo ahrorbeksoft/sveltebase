@@ -243,6 +243,7 @@ export {
   publishChangeEvent,
   publishEvent,
   publishResetEvent,
+  publishResetEvents,
 } from "./handler.js";
 export type {
   BulkPublishFn,

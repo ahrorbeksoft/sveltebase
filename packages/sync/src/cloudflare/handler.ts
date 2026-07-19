@@ -270,7 +270,8 @@ export async function handleSyncRequest<TAuth = unknown>(
     (url.pathname === "/broadcast" ||
       url.pathname === "/broadcast-batch" ||
       url.pathname === "/broadcast-change" ||
-      url.pathname === "/broadcast-reset") &&
+      url.pathname === "/broadcast-reset" ||
+      url.pathname === "/broadcast-reset-batch") &&
     request.method === "POST"
   ) {
     const headers = new Headers(request.headers);
