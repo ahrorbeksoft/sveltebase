@@ -1,4 +1,4 @@
-> Historical proposal. Superseded by the current sync package API and PLAN.md implementation; do not use these examples for new integrations.
+> Historical proposal. Superseded by the current sync package API and implementation evidence in `docs/plan-audit.md`; do not use these examples for new integrations.
 
 # Sync Package Suggestion: PocketBase-Style Rules
 

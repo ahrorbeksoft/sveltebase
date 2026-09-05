@@ -4,7 +4,7 @@ Audit date: 2026-09-05
 
 The implementation is complete and the full local `release:verify` gate passed
 on 2026-09-05 with Node 24.20.0 and Bun 1.4.2. This matrix records the evidence
-and explicit contract decisions behind the completed `PLAN.md` checklist.
+and explicit contract decisions behind the completed implementation.
 Publication and remote CI execution were not performed.
 
 ## Evidence boundaries
