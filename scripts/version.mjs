@@ -1,81 +1,78 @@
-import { join } from "node:path";
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   getRootDir,
   getWorkspacePackages,
   readJson,
   sortWorkspacePackages,
-  writeJson
-} from "./workspace-tools.mjs";
+  writeJson,
+} from './workspace-tools.mjs';
+import { resolveNextVersion } from './release-tools.mjs';
 
-const [target] = process.argv.slice(2);
+export { resolveNextVersion } from './release-tools.mjs';
 
-if (!target) {
-  console.error("Usage: bun run ./scripts/version.mjs <patch|minor|major|x.y.z>");
-  process.exit(1);
-}
+export function versionWorkspace(target) {
+  if (!target) {
+    throw new Error(
+      'Usage: bun run ./scripts/version.mjs <patch|minor|major|x.y.z>',
+    );
+  }
 
-const rootDir = getRootDir();
-const rootManifestPath = join(rootDir, "package.json");
-const rootManifest = readJson(rootManifestPath);
-const workspacePackages = sortWorkspacePackages(getWorkspacePackages());
-const nextVersion = resolveNextVersion(rootManifest.version, target);
-const workspaceNames = new Set(workspacePackages.map((pkg) => pkg.manifest.name));
+  const rootDir = getRootDir();
+  const rootManifestPath = join(rootDir, 'package.json');
+  const rootManifest = readJson(rootManifestPath);
+  const workspacePackages = sortWorkspacePackages(getWorkspacePackages());
+  const nextVersion = resolveNextVersion(rootManifest.version, target);
+  const workspaceNames = new Set(
+    workspacePackages.map((pkg) => pkg.manifest.name),
+  );
 
-rootManifest.version = nextVersion;
-writeJson(rootManifestPath, rootManifest);
+  rootManifest.version = nextVersion;
+  writeJson(rootManifestPath, rootManifest);
 
-for (const pkg of workspacePackages) {
-  const manifest = pkg.manifest;
-  manifest.version = nextVersion;
+  for (const pkg of workspacePackages) {
+    const manifest = pkg.manifest;
+    manifest.version = nextVersion;
 
-  for (const fieldName of [
-    "dependencies",
-    "devDependencies",
-    "peerDependencies",
-    "optionalDependencies"
-  ]) {
-    const deps = manifest[fieldName];
+    for (const fieldName of [
+      'dependencies',
+      'devDependencies',
+      'peerDependencies',
+      'optionalDependencies',
+    ]) {
+      const deps = manifest[fieldName];
 
-    if (!deps) {
-      continue;
-    }
+      if (!deps) {
+        continue;
+      }
 
-    for (const depName of Object.keys(deps)) {
-      if (workspaceNames.has(depName)) {
-        deps[depName] = nextVersion;
+      for (const depName of Object.keys(deps)) {
+        if (
+          workspaceNames.has(depName) &&
+          !String(deps[depName]).startsWith('workspace:')
+        ) {
+          deps[depName] = nextVersion;
+        }
       }
     }
+    writeJson(pkg.manifestPath, manifest);
   }
 
-  writeJson(pkg.manifestPath, manifest);
+  console.log(`Updated root and workspace packages to ${nextVersion}`);
+  console.log(
+    'The lockfile must now be regenerated with bun install; release verification requires bun install --frozen-lockfile.',
+  );
+  return nextVersion;
 }
 
-console.log(`Updated root and workspace packages to ${nextVersion}`);
-
-function resolveNextVersion(currentVersion, input) {
-  if (/^\d+\.\d+\.\d+$/.test(input)) {
-    return input;
-  }
-
-  const match = currentVersion.match(/^(\d+)\.(\d+)\.(\d+)$/);
-
-  if (!match) {
-    throw new Error(`Invalid current version: ${currentVersion}`);
-  }
-
-  const [, majorText, minorText, patchText] = match;
-  const major = Number(majorText);
-  const minor = Number(minorText);
-  const patch = Number(patchText);
-
-  switch (input) {
-    case "patch":
-      return `${major}.${minor}.${patch + 1}`;
-    case "minor":
-      return `${major}.${minor + 1}.0`;
-    case "major":
-      return `${major + 1}.0.0`;
-    default:
-      throw new Error(`Unsupported version target: ${input}`);
+if (
+  process.argv[1] &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  try {
+    versionWorkspace(process.argv[2]);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
   }
 }

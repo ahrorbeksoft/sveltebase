@@ -17,15 +17,62 @@ body {
 
 body {
   min-height: 100vh;
-  padding: 24px;
+  padding: 2rem;
 }
 
-
-
-a {
-  color: inherit;
+main {
+  display: grid;
+  gap: 1rem;
+  margin: 0 auto;
+  max-width: 48rem;
 }
 
-#app {
-  min-height: 100vh;
+header,
+section {
+  border: 1px solid #d8d8d8;
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin-block: 0 0.75rem;
+}
+
+h3 {
+  font-size: 1rem;
+}
+
+button {
+  cursor: pointer;
+  font: inherit;
+  padding: 0.4rem 0.75rem;
+}
+
+.actions,
+.locale-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+dl {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+dl div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+dt {
+  font-weight: 700;
+}
+
+dd {
+  margin: 0;
 }

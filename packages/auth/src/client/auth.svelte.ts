@@ -1,109 +1,50 @@
-import type { SyncClient } from "@sveltebase/sync/client";
-import { liveQuery } from "dexie";
 import {
   createAuthErrorCodec,
   type AuthErrorCodec,
   type AuthErrorInput,
   type SerializableErrorConstructor,
-} from "../errors.js";
-import type { AuthSession } from "../index.js";
+} from '../errors.js';
+import type { AuthSession } from '../index.js';
 
-/**
- * Value or getter used to keep auth state connected to SvelteKit load data.
- */
 export type MaybeGetter<T> = T | (() => T);
 
-/** When / whether to reconnect the sync client after login. */
-export type AuthReconnectPolicy = boolean | "if-connected";
+/** Optional bridge. Auth never imports a database or transport implementation. */
+export interface AuthSyncAdapter<
+  User extends { id: string },
+  Claims extends Record<string, unknown>,
+> {
+  start?(session: AuthSession<User, Claims>): void | Promise<void>;
+  stop?(): void | Promise<void>;
+  purgeAccount?(subject: string): void | Promise<void>;
+  getConnectivity?(): string;
+  onSessionInvalidated?(callback: () => void): void | (() => void);
+}
 
-/**
- * Client-side auth state options.
- *
- * The cookie is the session source of truth. When a sync client is attached,
- * the configured profile table provides live invalidation and profile refresh.
- */
 export interface AuthClientConfig<
   User extends { id: string } = { id: string },
   Claims extends Record<string, unknown> = Record<string, never>,
 > {
-  /**
-   * Optional sync client or dynamic wrapper used for profile verification.
-   */
-  syncClient?: SyncClient<any> | any;
-  verifyTable?: string;
-  verifyUser?: (sessionUser: User, syncedUser: any) => boolean;
-  /**
-   * Base path for auth route handlers.
-   * @default "/api/auth"
-   */
   routesBase?: string;
-  /** Error classes to restore from failed auth route responses. */
   errorClasses?: readonly SerializableErrorConstructor[];
+  sync?: AuthSyncAdapter<User, Claims>;
+  fetch?: typeof fetch;
   onInvalidSession?: () => void | Promise<void>;
   onLogout?: () => void | Promise<void>;
   onSession?: (
     session: AuthSession<User, Claims> | null,
   ) => void | Promise<void>;
-  refreshWhenChanged?:
-    | boolean
-    | ((sessionUser: User, syncedUser: any) => boolean);
-  /**
-   * Default reconnect policy after login / TMA / Google.
-   * @default false
-   */
-  reconnect?: AuthReconnectPolicy;
+  onIntegrationError?: (error: unknown) => void;
 }
 
-function isBrowser() {
-  return typeof window !== "undefined";
-}
-
-function resolveConcreteSyncClient(sync: any): any | undefined {
-  if (!sync || typeof sync === "function") return undefined;
-  if (sync.isDynamicSyncClient === true) {
-    return sync.client;
-  }
-  return sync;
-}
-
-async function clearSyncData(sync: any) {
-  const concrete = resolveConcreteSyncClient(sync);
-  if (!concrete) return;
-  try {
-    // Prefer Dexie tables collection; never call .table() on a dynamic proxy.
-    const tables =
-      typeof concrete.tables !== "undefined"
-        ? Array.from(concrete.tables as Iterable<any>)
-        : [];
-    if (tables.length === 0) return;
-    await Promise.all(
-      tables.map((table: any) =>
-        typeof table?.clear === "function" ? table.clear() : Promise.resolve(),
-      ),
-    );
-  } catch (err) {
-    console.error("Failed to clear local database tables", err);
-  }
-}
-
-function disconnectSync(sync: any) {
-  try {
-    sync?.disconnect?.();
-  } catch {
-    // already torn down
-  }
-}
+const EMPTY_CLAIMS: Record<string, never> = Object.freeze({});
 
 async function readAuthError(response: Response, codec: AuthErrorCodec) {
   const text = await response.text();
-
-  if (!text) {
+  if (!text)
     return codec.deserialize({
-      code: "HttpError",
-      message: `Auth request failed with status ${response.status}`,
+      code: 'HttpError',
+      message: `Auth request failed (${response.status})`,
     });
-  }
-
   try {
     return codec.deserialize(JSON.parse(text) as AuthErrorInput);
   } catch {
@@ -111,595 +52,357 @@ async function readAuthError(response: Response, codec: AuthErrorCodec) {
   }
 }
 
-function resolveReconnect(
-  policy: AuthReconnectPolicy | undefined,
-  syncClient: any,
-): boolean {
-  const resolved = policy ?? false;
-  if (resolved === true) return true;
-  if (resolved === false) return false;
-  // "if-connected"
-  const concrete = resolveConcreteSyncClient(syncClient);
-  if (!concrete) return false;
-  return concrete.status === "connected" || concrete.status === "connecting";
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-const EMPTY_CLAIMS: Record<string, never> = Object.freeze({});
-
-/**
- * Svelte-reactive client auth with cookie profile, session claims, and optional
- * live verification against a synced profile table.
- */
 export class AuthClientState<
   User extends { id: string },
   Claims extends Record<string, unknown> = Record<string, never>,
 > {
-  #userGetter = $state<MaybeGetter<User | null>>(null);
-  #claimsGetter = $state<MaybeGetter<Claims | null>>(null);
+  #initialUser: MaybeGetter<User | null> = null;
+  #initialClaims: MaybeGetter<Claims | null | undefined> = null;
   #localUser = $state<User | null | undefined>(undefined);
-  #localClaims = $state<Claims | null | undefined>(undefined);
-  #syncClient?: any;
-  #syncClientGetter?: () => any;
-  #syncClientGetterCleanup?: () => void;
-  #verifySubscription?: { unsubscribe(): void };
-  #syncClientChangeUnsubscribe?: () => void;
-  #verifyTable: string;
-  #verifyUser: (sessionUser: User, syncedUser: any) => boolean;
-  #refreshWhenChanged?:
-    | boolean
-    | ((sessionUser: User, syncedUser: any) => boolean);
-  #verificationReady = false;
-  #syncVerificationPromise?: Promise<AuthSession<User, Claims> | null>;
+  #localClaims = $state<Claims | undefined>(undefined);
+  #ready = $state(false);
+  #refreshing = $state(false);
+  #generation = 0;
+  #syncTransition: Promise<void> = Promise.resolve();
+  #refreshPromise?: Promise<AuthSession<User, Claims> | null>;
+  #disposed = false;
   #routesBase: string;
-  #errorCodec: AuthErrorCodec;
+  #codec: AuthErrorCodec;
+  #sync?: AuthSyncAdapter<User, Claims>;
+  #fetch: typeof fetch;
+  #unsubscribeInvalidation?: () => void;
+  #activeRequest?: AbortController;
   #onInvalidSession?: () => void | Promise<void>;
   #onLogout?: () => void | Promise<void>;
   #onSession?: (
     session: AuthSession<User, Claims> | null,
   ) => void | Promise<void>;
-  #defaultReconnect: AuthReconnectPolicy;
-  #isVerifying = $state(false);
-  #isReady = $state(false);
-  #initialized = $state(false);
-  #lastResolvedUserId: string | null | undefined;
-  #ranNoSyncInitVerification = false;
-  #noSyncInitVerificationPromise?: Promise<void>;
+  #onIntegrationError?: (error: unknown) => void;
 
-  constructor(config?: AuthClientConfig<User, Claims>) {
-    this.#routesBase = config?.routesBase ?? "/api/auth";
-    this.#errorCodec = createAuthErrorCodec(config?.errorClasses);
-    this.#onInvalidSession = config?.onInvalidSession;
-    this.#onLogout = config?.onLogout;
-    this.#onSession = config?.onSession;
-    this.#defaultReconnect = config?.reconnect ?? false;
-    this.#verifyTable = config?.verifyTable ?? "users";
-    this.#verifyUser =
-      config?.verifyUser ??
-      ((sessionUser, syncedUser) =>
-        String(sessionUser.id) === String(syncedUser?.id));
-    this.#refreshWhenChanged = config?.refreshWhenChanged;
-    if (config?.syncClient) {
-      this.setClient(config.syncClient);
-    }
+  constructor(config: AuthClientConfig<User, Claims> = {}) {
+    this.#routesBase = config.routesBase ?? '/api/auth';
+    this.#codec = createAuthErrorCodec(config.errorClasses);
+    this.#sync = config.sync;
+    this.#fetch = config.fetch ?? globalThis.fetch;
+    this.#onInvalidSession = config.onInvalidSession;
+    this.#onLogout = config.onLogout;
+    this.#onSession = config.onSession;
+    this.#onIntegrationError = config.onIntegrationError;
+    const unsubscribe = this.#sync?.onSessionInvalidated?.(
+      () => void this.invalidate(),
+    );
+    if (typeof unsubscribe === 'function')
+      this.#unsubscribeInvalidation = unsubscribe;
   }
 
   get user(): User | null {
-    if (this.#localUser !== undefined) {
-      return this.#localUser;
-    }
-    const val = this.#userGetter;
-    return typeof val === "function" ? (val as () => User | null)() : val;
-  }
-
-  set user(value: User | null) {
-    this.#localUser = value;
+    if (this.#localUser !== undefined) return this.#localUser;
+    const source = this.#initialUser;
+    return typeof source === 'function' ? source() : source;
   }
 
   get claims(): Claims {
-    try {
-      if (this.#localClaims !== undefined) {
-        return (this.#localClaims ?? (EMPTY_CLAIMS as Claims)) as Claims;
-      }
-      const val = this.#claimsGetter;
-      const resolved =
-        typeof val === "function"
-          ? (val as () => Claims | null | undefined)()
-          : val;
-      if (resolved && typeof resolved === "object") {
-        return resolved as Claims;
-      }
-      return EMPTY_CLAIMS as Claims;
-    } catch {
-      return EMPTY_CLAIMS as Claims;
-    }
-  }
-
-  set claims(value: Claims) {
-    this.#localClaims =
-      value && typeof value === "object" ? value : (EMPTY_CLAIMS as Claims);
+    if (this.#localClaims !== undefined) return this.#localClaims;
+    const source = this.#initialClaims;
+    const value = typeof source === 'function' ? source() : source;
+    return value ?? (EMPTY_CLAIMS as Claims);
   }
 
   get session(): AuthSession<User, Claims> | null {
     const user = this.user;
-    if (!user) return null;
-    return { user, claims: this.claims };
+    return user ? { subject: user.id, user, claims: this.claims } : null;
   }
 
-  get sessionUser(): (User & Claims) | null {
-    const user = this.user;
-    if (!user) return null;
-    return { ...user, ...this.claims };
+  get isReady() {
+    return this.#ready;
+  }
+  get isAuthenticated() {
+    return this.#ready && this.user !== null;
+  }
+  get isRefreshing() {
+    return this.#refreshing;
+  }
+  get connectivity() {
+    return this.#sync?.getConnectivity?.() ?? 'unavailable';
   }
 
-  get isReady(): boolean {
-    return this.#isReady;
-  }
-
-  get isVerifying(): boolean {
-    return this.#isVerifying;
-  }
-
-  get isAuthenticated(): boolean {
-    return this.#isReady && this.user !== null;
-  }
-
+  /** Initializes from request/component-owned SSR data without I/O. */
   init(
     user: MaybeGetter<User | null>,
     claims?: MaybeGetter<Claims | null | undefined>,
-  ) {
-    this.#initialized = true;
-    this.#userGetter = user;
-    this.#claimsGetter = (claims ?? null) as MaybeGetter<Claims | null>;
-    this.#isReady = false;
+  ): void {
+    if (this.#disposed) throw new Error('Auth client is disposed');
+    this.#initialUser = user;
+    this.#initialClaims = claims ?? null;
     this.#localUser = undefined;
     this.#localClaims = undefined;
-
-    $effect(() => {
-      const serverUser =
-        typeof this.#userGetter === "function"
-          ? (this.#userGetter as () => User | null)()
-          : this.#userGetter;
-
-      const resolvedUserId = serverUser ? String(serverUser.id) : null;
-      if (this.#lastResolvedUserId !== resolvedUserId) {
-        this.#lastResolvedUserId = resolvedUserId;
-        this.#ranNoSyncInitVerification = false;
-        this.#noSyncInitVerificationPromise = undefined;
-        this.#isReady = false;
-        this.#localUser = undefined;
-        this.#localClaims = undefined;
-        this.#verificationReady = false;
-        this.#syncVerificationPromise = undefined;
-      }
-
-      void this.ensureReady();
-    });
-
-    void this.ensureReady();
+    this.#ready = true;
+    const session = this.session;
+    const generation = ++this.#generation;
+    if (session && typeof window !== 'undefined')
+      this.#transitionSync(generation, null, session);
   }
 
-  /**
-   * Attach or replace the sync client used for live session verification.
-   */
-  setClient(syncClient?: any | (() => any)): this {
-    if (typeof syncClient === "function" && !syncClient.isDynamicSyncClient) {
-      this.#syncClientGetterCleanup?.();
-      this.#syncClientGetter = syncClient as () => any;
-      try {
-        this.#syncClientGetterCleanup = $effect.root(() => {
-          $effect(() => {
-            const next = (this.#syncClientGetter as () => any)();
-            this.#bindSyncClient(next ?? undefined);
-          });
-        });
-      } catch {
-        this.#bindSyncClient((syncClient as () => any)() ?? undefined);
-      }
-      return this;
-    }
-
-    this.#syncClientGetterCleanup?.();
-    this.#syncClientGetterCleanup = undefined;
-    this.#syncClientGetter = undefined;
-    this.#bindSyncClient(syncClient);
-    return this;
-  }
-
-  #bindSyncClient(syncClient?: any) {
-    if (this.#syncClient === syncClient) return;
-
-    this.#verifySubscription?.unsubscribe();
-    this.#verifySubscription = undefined;
-    this.#syncClientChangeUnsubscribe?.();
-    this.#syncClientChangeUnsubscribe = undefined;
-    this.#syncClient = syncClient;
-    this.#verificationReady = false;
-    this.#syncVerificationPromise = undefined;
-
-    const onClientChange = syncClient?.onClientChange as
-      | ((callback: () => void) => () => void)
-      | undefined;
-    if (onClientChange) {
-      this.#syncClientChangeUnsubscribe = onClientChange(() => {
-        this.#verifySubscription?.unsubscribe();
-        this.#verifySubscription = undefined;
-        this.#verificationReady = false;
-        this.#syncVerificationPromise = undefined;
-        this.setupSyncVerification();
-        void this.ensureReady();
-      });
-    }
-
-    if (this.#initialized) {
-      this.setupSyncVerification();
-      void this.ensureReady();
-    }
-  }
-
-  private setupSyncVerification() {
-    if (!isBrowser() || this.#verifySubscription) return;
-    const concrete = resolveConcreteSyncClient(this.#syncClient);
-    if (!concrete) return;
-
-    const observable = liveQuery(() =>
-      concrete.table(this.#verifyTable).toArray(),
-    );
-    this.#verifySubscription = observable.subscribe({
-      next: (rows: any[]) => {
-        const activeUser = this.user;
-        if (!activeUser || this.#isVerifying || !this.#verificationReady)
-          return;
-
-        const syncedUser = rows.find((row) =>
-          this.#verifyUser(activeUser, row),
-        );
-        if (!syncedUser) {
-          void this.handleInvalidSession();
-          return;
-        }
-
-        if (!this.#refreshWhenChanged) return;
-        const shouldRefresh =
-          this.#refreshWhenChanged === true
-            ? JSON.stringify(activeUser) !== JSON.stringify(syncedUser)
-            : this.#refreshWhenChanged(activeUser, syncedUser);
-        if (shouldRefresh) {
-          void this.refresh().catch((error) => {
-            console.warn(
-              "Failed to refresh auth session after sync change.",
-              error,
-            );
-          });
-        }
-      },
-      error: (error) => {
-        console.warn("WebSocket session verification failed.", error);
-        void this.handleInvalidSession();
-      },
-    });
-  }
-
-  private applySession(
-    session: AuthSession<User, Claims> | null,
-    options?: { notify?: boolean },
-  ) {
-    if (!session) {
-      this.#localUser = null;
-      this.#localClaims = EMPTY_CLAIMS as Claims;
-    } else {
-      this.#localUser = session.user;
-      this.#localClaims = session.claims ?? (EMPTY_CLAIMS as Claims);
-    }
-    if (options?.notify !== false) {
-      void this.#onSession?.(session);
-    }
-  }
-
-  private parseSessionResponse(data: any): AuthSession<User, Claims> {
-    if (data && typeof data === "object" && "user" in data) {
-      return {
-        user: data.user as User,
-        claims: (data.claims ?? {}) as Claims,
-      };
+  #parseSession(value: unknown): AuthSession<User, Claims> {
+    if (
+      !isRecord(value) ||
+      typeof value.subject !== 'string' ||
+      !isRecord(value.user) ||
+      typeof value.user.id !== 'string' ||
+      value.user.id !== value.subject ||
+      !isRecord(value.claims)
+    ) {
+      throw new Error('Invalid auth session response');
     }
     return {
-      user: data as User,
-      claims: {} as Claims,
+      subject: value.subject,
+      user: value.user as User,
+      claims: value.claims as Claims,
     };
   }
 
-  private hasUsableSyncClient(syncClient = this.#syncClient): boolean {
-    return Boolean(resolveConcreteSyncClient(syncClient));
+  #apply(session: AuthSession<User, Claims> | null): void {
+    this.#localUser = session?.user ?? null;
+    this.#localClaims = session?.claims ?? (EMPTY_CLAIMS as Claims);
+    this.#ready = true;
+    void this.#onSession?.(session);
   }
 
-  private async verifySyncedSession(
-    session: AuthSession<User, Claims> | null,
-    options?: { reconnect?: boolean },
-  ): Promise<AuthSession<User, Claims> | null> {
-    if (!session) return null;
+  #transitionSync(
+    generation: number,
+    previous: AuthSession<User, Claims> | null,
+    next: AuthSession<User, Claims> | null,
+    purge = false,
+  ): void {
+    this.#syncTransition = this.#syncTransition
+      .then(async () => {
+        if (this.#disposed || generation !== this.#generation) return;
+        await this.#sync?.stop?.();
+        if (this.#disposed || generation !== this.#generation) return;
+        if (purge && previous)
+          await this.#sync?.purgeAccount?.(previous.subject);
+        if (this.#disposed || generation !== this.#generation) return;
+        if (next) await this.#sync?.start?.(next);
+      })
+      .catch((error) => this.#onIntegrationError?.(error));
+  }
 
-    const concrete = resolveConcreteSyncClient(this.#syncClient);
-    if (!concrete?.resyncTable) return session;
+  #beginRequest(): { generation: number; controller: AbortController } {
+    this.#activeRequest?.abort();
+    const controller = new AbortController();
+    this.#activeRequest = controller;
+    return { generation: ++this.#generation, controller };
+  }
 
-    this.setupSyncVerification();
-    this.#isVerifying = true;
+  #finishRequest(controller: AbortController): void {
+    if (this.#activeRequest === controller) this.#activeRequest = undefined;
+  }
+
+  async #post(
+    path: string,
+    body?: unknown,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    const fetcher = this.#fetch;
+    return fetcher(`${this.#routesBase}/${path}`, {
+      method: 'POST',
+      signal,
+      ...(body !== undefined
+        ? {
+            body: JSON.stringify(body),
+            headers: { 'Content-Type': 'application/json' },
+          }
+        : {}),
+    });
+  }
+
+  async #login(
+    path: string,
+    body: unknown,
+  ): Promise<AuthSession<User, Claims>> {
+    const { generation, controller } = this.#beginRequest();
+    const previous = this.session;
     try {
-      const rows = await concrete.resyncTable(this.#verifyTable, options);
-      const syncedUser = rows.find((row: any) =>
-        this.#verifyUser(session.user, row),
+      const response = await this.#post(path, body, controller.signal);
+      if (!response.ok) throw await readAuthError(response, this.#codec);
+      const session = this.#parseSession(await response.json());
+      if (this.#disposed || generation !== this.#generation)
+        throw new Error('Authentication request was superseded');
+      this.#apply(session);
+      this.#transitionSync(
+        generation,
+        previous,
+        session,
+        previous?.subject !== session.subject,
       );
-      if (!syncedUser) {
-        await this.handleInvalidSession();
+      return session;
+    } finally {
+      this.#finishRequest(controller);
+    }
+  }
+
+  login<Body = unknown>(body: Body) {
+    return this.#login('login', body);
+  }
+  loginWithGoogle(credential: string) {
+    return this.#login('google', { credential });
+  }
+  loginWithTma(body: { initData: string } & Record<string, unknown>) {
+    return this.#login('tma', body);
+  }
+
+  async setClaims(claims: Claims): Promise<AuthSession<User, Claims> | null> {
+    const { generation, controller } = this.#beginRequest();
+    const previous = this.session;
+    try {
+      const response = await this.#post('claims', claims, controller.signal);
+      if (response.status === 401) {
+        if (generation === this.#generation) await this.invalidate();
         return null;
       }
-
-      const verified = {
-        user: syncedUser as User,
-        claims: session.claims,
-      };
-      this.applySession(verified);
-      this.#verificationReady = true;
-      this.#isReady = true;
-      return verified;
-    } catch (error) {
-      await this.handleInvalidSession();
-      throw error;
+      if (!response.ok) throw await readAuthError(response, this.#codec);
+      const session = this.#parseSession(await response.json());
+      if (this.#disposed || generation !== this.#generation)
+        return this.session;
+      this.#apply(session);
+      this.#transitionSync(generation, previous, session);
+      return session;
     } finally {
-      this.#isVerifying = false;
+      this.#finishRequest(controller);
     }
   }
 
-  /** Resyncs the configured profile table and verifies the active session. */
-  async verifySync(options?: {
-    reconnect?: boolean;
-  }): Promise<AuthSession<User, Claims> | null> {
-    const session = this.session;
-    if (!session || !this.hasUsableSyncClient()) return session;
-    if (this.#syncVerificationPromise) return this.#syncVerificationPromise;
-
-    this.#syncVerificationPromise = this.verifySyncedSession(session, options);
-    try {
-      return await this.#syncVerificationPromise;
-    } finally {
-      this.#syncVerificationPromise = undefined;
-    }
-  }
-
-  private async ensureReady() {
-    if (!this.#initialized) return;
-
-    const activeUser = this.user;
-    if (!activeUser) {
-      this.#isReady = true;
-      this.#ranNoSyncInitVerification = true;
-      return;
-    }
-
-    if (this.hasUsableSyncClient()) {
-      this.setupSyncVerification();
-      if (!this.#verificationReady) {
-        try {
-          await this.verifySync();
-        } catch (error) {
-          console.warn("Initial sync session verification failed.", error);
+  refresh(): Promise<AuthSession<User, Claims> | null> {
+    if (this.#refreshPromise) return this.#refreshPromise;
+    this.#refreshing = true;
+    const operation = this.#doRefresh();
+    this.#refreshPromise = operation;
+    void operation
+      .finally(() => {
+        if (this.#refreshPromise === operation) {
+          this.#refreshPromise = undefined;
+          this.#refreshing = false;
         }
-      }
-      this.#isReady = true;
-      this.#ranNoSyncInitVerification = true;
-      return;
-    }
-
-    // A dynamic wrapper may not have context yet. Its onClientChange callback
-    // starts verification as soon as the concrete client is created.
-    if (this.#syncClient) {
-      this.#isReady = true;
-      return;
-    }
-
-    if (!isBrowser()) {
-      this.#isReady = true;
-      return;
-    }
-
-    // No sync attached (owner/admin): optional one-shot HTTP refresh.
-    if (
-      this.#ranNoSyncInitVerification ||
-      this.#noSyncInitVerificationPromise
-    ) {
-      return;
-    }
-
-    this.#isVerifying = true;
-    this.#noSyncInitVerificationPromise = (async () => {
-      try {
-        await this.refresh();
-      } catch (err) {
-        console.warn("Initial auth refresh verification failed.", err);
-      } finally {
-        this.#ranNoSyncInitVerification = true;
-        this.#isReady = true;
-        this.#isVerifying = false;
-        this.#noSyncInitVerificationPromise = undefined;
-      }
-    })();
-
-    await this.#noSyncInitVerificationPromise;
+      })
+      .catch(() => undefined);
+    return operation;
   }
 
-  private async handleInvalidSession() {
-    if (!this.user && !this.#verificationReady) return;
-    this.applySession(null, { notify: false });
-    this.#verificationReady = false;
-    this.#verifySubscription?.unsubscribe();
-    this.#verifySubscription = undefined;
-    const invalid = this.#onInvalidSession?.();
-    if (invalid && typeof invalid.then === "function") {
-      await invalid.catch((hookErr) => {
-        console.error("onInvalidSession hook failed", hookErr);
-      });
-    }
-    await this.#onLogout?.();
-    this.#isReady = true;
-    this.#ranNoSyncInitVerification = true;
-    if (this.#syncClient) {
-      await clearSyncData(this.#syncClient);
-      disconnectSync(this.#syncClient);
-    }
-  }
-
-  private afterAuthSuccess(
-    session: AuthSession<User, Claims>,
-    options?: { reconnect?: AuthReconnectPolicy },
-  ): Promise<AuthSession<User, Claims>> {
-    this.applySession(session);
-    this.#isReady = true;
-    this.#ranNoSyncInitVerification = true;
-
-    const shouldReconnect = resolveReconnect(
-      options?.reconnect ?? this.#defaultReconnect,
-      this.#syncClient,
-    );
-    return (async () => {
-      const verified = await this.verifySyncedSession(session, {
-        reconnect: shouldReconnect,
-      });
-      if (!verified) throw new Error("Invalid session");
-      return verified;
-    })();
-  }
-
-  async login<Body = unknown>(
-    body: Body,
-    options?: { reconnect?: AuthReconnectPolicy },
-  ): Promise<AuthSession<User, Claims>> {
-    const response = await fetch(`${this.#routesBase}/login`, {
-      method: "POST",
-      body: JSON.stringify(body),
-      headers: { "Content-Type": "application/json" },
-    });
-    if (!response.ok) {
-      throw await readAuthError(response, this.#errorCodec);
-    }
-
-    const session = this.parseSessionResponse(await response.json());
-    return await this.afterAuthSuccess(session, options);
-  }
-
-  async loginWithGoogle(
-    credential: string,
-    options?: { reconnect?: AuthReconnectPolicy },
-  ): Promise<AuthSession<User, Claims> | null> {
-    const response = await fetch(`${this.#routesBase}/google`, {
-      method: "POST",
-      body: JSON.stringify({ credential }),
-      headers: { "Content-Type": "application/json" },
-    });
-    if (!response.ok) {
-      throw await readAuthError(response, this.#errorCodec);
-    }
-
-    const session = this.parseSessionResponse(await response.json());
-    return await this.afterAuthSuccess(session, options);
-  }
-
-  async loginWithTma(
-    body: { initData: string } & Record<string, unknown>,
-    options?: { reconnect?: AuthReconnectPolicy },
-  ): Promise<AuthSession<User, Claims>> {
-    const response = await fetch(`${this.#routesBase}/tma`, {
-      method: "POST",
-      body: JSON.stringify(body),
-      headers: { "Content-Type": "application/json" },
-    });
-    if (!response.ok) {
-      throw await readAuthError(response, this.#errorCodec);
-    }
-
-    const session = this.parseSessionResponse(await response.json());
-    return await this.afterAuthSuccess(session, options);
-  }
-
-  async setClaims(
-    claims: Claims,
-    options?: { reconnect?: AuthReconnectPolicy },
-  ): Promise<AuthSession<User, Claims> | null> {
-    const response = await fetch(`${this.#routesBase}/claims`, {
-      method: "POST",
-      body: JSON.stringify(claims),
-      headers: { "Content-Type": "application/json" },
-    });
-    if (response.status === 401) {
-      await this.handleInvalidSession();
-      return null;
-    }
-    if (!response.ok) {
-      throw await readAuthError(response, this.#errorCodec);
-    }
-
-    const session = this.parseSessionResponse(await response.json());
-    this.applySession(session);
-
-    const shouldReconnect = resolveReconnect(
-      options?.reconnect ?? true,
-      this.#syncClient,
-    );
-    if (shouldReconnect) {
-      try {
-        resolveConcreteSyncClient(this.#syncClient)?.reconnect?.({
-          force: true,
-        });
-      } catch {
-        // ignore
-      }
-    }
-
-    this.#isReady = true;
-    return session;
-  }
-
-  async refresh(): Promise<AuthSession<User, Claims> | null> {
-    const response = await fetch(`${this.#routesBase}/refresh`, {
-      method: "POST",
-    });
-    if (response.status === 401) {
-      await this.handleInvalidSession();
-      return null;
-    }
-    if (!response.ok) {
-      throw await readAuthError(response, this.#errorCodec);
-    }
-
-    const session = this.parseSessionResponse(await response.json());
-    this.applySession(session);
-    const verified = await this.verifySyncedSession(session);
-    this.#isReady = true;
-    this.#ranNoSyncInitVerification = true;
-    return verified;
-  }
-
-  async logout() {
-    this.applySession(null, { notify: false });
-    this.#verificationReady = false;
-    this.#verifySubscription?.unsubscribe();
-    this.#verifySubscription = undefined;
-    this.#isReady = true;
-    this.#ranNoSyncInitVerification = true;
+  async #doRefresh(): Promise<AuthSession<User, Claims> | null> {
+    const { generation, controller } = this.#beginRequest();
     try {
-      await fetch(`${this.#routesBase}/logout`, { method: "POST" });
-    } catch {
-      // ignore network failure
+      const response = await this.#post(
+        'refresh',
+        undefined,
+        controller.signal,
+      );
+      if (response.status === 401) {
+        if (generation === this.#generation) await this.invalidate();
+        return null;
+      }
+      if (!response.ok) throw await readAuthError(response, this.#codec);
+      const session = this.#parseSession(await response.json());
+      if (this.#disposed || generation !== this.#generation)
+        return this.session;
+      const previous = this.session;
+      this.#apply(session);
+      this.#transitionSync(
+        generation,
+        previous,
+        session,
+        previous?.subject !== session.subject,
+      );
+      return session;
+    } finally {
+      this.#finishRequest(controller);
     }
-    if (this.#syncClient) {
-      await clearSyncData(this.#syncClient);
-      disconnectSync(this.#syncClient);
+  }
+
+  async invalidate(): Promise<void> {
+    this.#activeRequest?.abort();
+    this.#activeRequest = undefined;
+    ++this.#generation;
+    const previous = this.session;
+    try {
+      await this.#sync?.stop?.();
+    } catch (error) {
+      this.#onIntegrationError?.(error);
     }
+    this.#apply(null);
+    await this.#onInvalidSession?.();
+    if (previous) await this.#sync?.purgeAccount?.(previous.subject);
     await this.#onLogout?.();
+  }
+
+  /** Server logout failure is surfaced and the prior local session is restored. */
+  async logout(options: { purge?: boolean } = {}): Promise<void> {
+    const { generation, controller } = this.#beginRequest();
+    const previous = this.session;
+    await this.#sync?.stop?.();
+    let response: Response;
+    try {
+      response = await this.#post('logout', undefined, controller.signal);
+    } catch (error) {
+      if (generation === this.#generation && previous)
+        void Promise.resolve(this.#sync?.start?.(previous)).catch((cause) =>
+          this.#onIntegrationError?.(cause),
+        );
+      this.#finishRequest(controller);
+      throw error;
+    }
+    if (!response.ok) {
+      if (generation === this.#generation && previous)
+        void Promise.resolve(this.#sync?.start?.(previous)).catch((cause) =>
+          this.#onIntegrationError?.(cause),
+        );
+      this.#finishRequest(controller);
+      throw await readAuthError(response, this.#codec);
+    }
+    if (this.#disposed || generation !== this.#generation) {
+      this.#finishRequest(controller);
+      return;
+    }
+    if (options.purge && previous)
+      await this.#sync?.purgeAccount?.(previous.subject);
+    this.#apply(null);
+    await this.#onLogout?.();
+    this.#finishRequest(controller);
+  }
+
+  /** Explicit offline/local logout. The cookie remains until the server can be reached. */
+  async logoutLocal(options: { purge?: boolean } = {}): Promise<void> {
+    this.#activeRequest?.abort();
+    this.#activeRequest = undefined;
+    ++this.#generation;
+    const previous = this.session;
+    await this.#sync?.stop?.();
+    if (options.purge && previous)
+      await this.#sync?.purgeAccount?.(previous.subject);
+    this.#apply(null);
+    await this.#onLogout?.();
+  }
+
+  dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    this.#activeRequest?.abort();
+    this.#activeRequest = undefined;
+    ++this.#generation;
+    this.#unsubscribeInvalidation?.();
+    this.#unsubscribeInvalidation = undefined;
+    void Promise.resolve(this.#sync?.stop?.()).catch((error) =>
+      this.#onIntegrationError?.(error),
+    );
   }
 }
 
 export function createAuth<
   User extends { id: string },
   Claims extends Record<string, unknown> = Record<string, never>,
->(config?: AuthClientConfig<User, Claims>): AuthClientState<User, Claims> {
+>(config?: AuthClientConfig<User, Claims>) {
   return new AuthClientState<User, Claims>(config);
 }

@@ -1,16 +1,16 @@
-import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 
-const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 export function getRootDir() {
   return rootDir;
 }
 
 export function readJson(filePath) {
-  return JSON.parse(readFileSync(filePath, "utf8"));
+  return JSON.parse(readFileSync(filePath, 'utf8'));
 }
 
 export function writeJson(filePath, value) {
@@ -18,12 +18,12 @@ export function writeJson(filePath, value) {
 }
 
 export function getWorkspacePackages() {
-  const rootPackage = readJson(join(rootDir, "package.json"));
+  const rootPackage = readJson(join(rootDir, 'package.json'));
   const patterns = rootPackage.workspaces ?? [];
   const packages = [];
 
   for (const pattern of patterns) {
-    if (!pattern.endsWith("/*")) {
+    if (!pattern.endsWith('/*')) {
       throw new Error(`Unsupported workspace pattern: ${pattern}`);
     }
 
@@ -39,7 +39,7 @@ export function getWorkspacePackages() {
       }
 
       const dir = join(baseDir, entry.name);
-      const manifestPath = join(dir, "package.json");
+      const manifestPath = join(dir, 'package.json');
 
       if (!existsSync(manifestPath)) {
         continue;
@@ -47,20 +47,38 @@ export function getWorkspacePackages() {
 
       const manifest = readJson(manifestPath);
 
+      if (!manifest.name || typeof manifest.name !== 'string') {
+        throw new Error(
+          `Workspace manifest ${manifestPath} is missing a package name.`,
+        );
+      }
+
       packages.push({
         dir,
         manifest,
-        manifestPath
+        manifestPath,
       });
     }
+  }
+
+  const names = new Set();
+  for (const pkg of packages) {
+    if (names.has(pkg.manifest.name)) {
+      throw new Error(`Duplicate workspace package name: ${pkg.manifest.name}`);
+    }
+    names.add(pkg.manifest.name);
   }
 
   return packages;
 }
 
 export function sortWorkspacePackages(packages) {
-  const nameToPackage = new Map(packages.map((pkg) => [pkg.manifest.name, pkg]));
-  const dependents = new Map(packages.map((pkg) => [pkg.manifest.name, new Set()]));
+  const nameToPackage = new Map(
+    packages.map((pkg) => [pkg.manifest.name, pkg]),
+  );
+  const dependents = new Map(
+    packages.map((pkg) => [pkg.manifest.name, new Set()]),
+  );
   const indegree = new Map(packages.map((pkg) => [pkg.manifest.name, 0]));
 
   for (const pkg of packages) {
@@ -68,7 +86,7 @@ export function sortWorkspacePackages(packages) {
       ...pkg.manifest.dependencies,
       ...pkg.manifest.optionalDependencies,
       ...pkg.manifest.peerDependencies,
-      ...pkg.manifest.devDependencies
+      ...pkg.manifest.devDependencies,
     };
 
     for (const depName of Object.keys(deps)) {
@@ -91,7 +109,9 @@ export function sortWorkspacePackages(packages) {
     const current = queue.shift();
     ordered.push(current);
 
-    for (const dependentName of [...dependents.get(current.manifest.name)].sort()) {
+    for (const dependentName of [
+      ...dependents.get(current.manifest.name),
+    ].sort()) {
       indegree.set(dependentName, indegree.get(dependentName) - 1);
 
       if (indegree.get(dependentName) === 0) {
@@ -102,19 +122,33 @@ export function sortWorkspacePackages(packages) {
   }
 
   if (ordered.length !== packages.length) {
-    throw new Error("Workspace dependency cycle detected.");
+    const cycleNames = packages
+      .filter((pkg) => indegree.get(pkg.manifest.name) > 0)
+      .map((pkg) => pkg.manifest.name)
+      .sort();
+    throw new Error(
+      `Workspace dependency cycle detected: ${cycleNames.join(', ')}`,
+    );
   }
 
   return ordered;
 }
 
-export function runCommand(command, args, cwd) {
+export function runCommand(command, args, cwd = rootDir) {
   const result = spawnSync(command, args, {
     cwd,
-    stdio: "inherit"
+    stdio: 'inherit',
   });
 
+  if (result.status === null && result.error) {
+    throw new Error(`Failed to start ${command}: ${result.error.message}`, {
+      cause: result.error,
+    });
+  }
+
   if (result.status !== 0) {
-    process.exit(result.status ?? 1);
+    throw new Error(
+      `${command} ${args.join(' ')} failed with exit code ${result.status ?? 1}.`,
+    );
   }
 }

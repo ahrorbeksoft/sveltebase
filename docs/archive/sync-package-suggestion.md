@@ -1,3 +1,5 @@
+> Historical proposal. Superseded by the current sync package API and PLAN.md implementation; do not use these examples for new integrations.
+
 # Sync Package Suggestion: PocketBase-Style Rules
 
 ## Problem
@@ -46,7 +48,7 @@ The application still owns the business rules.
 
 ```ts
 export const groupSync = definePolicySync<Group, User, CrmContext>({
-  channel: (ctx) => resolveChannel(ctx, "groups"),
+  channel: (ctx) => resolveChannel(ctx, 'groups'),
   table: groups,
   id: groups.id,
   updatedAt: groups.updatedAt,
@@ -55,18 +57,18 @@ export const groupSync = definePolicySync<Group, User, CrmContext>({
 
   rules: {
     list: (app) => {
-      if (app.role.type === "owner") {
+      if (app.role.type === 'owner') {
         return eq(groups.branchId, app.role.branchId);
       }
 
-      if (app.role.type === "teacher") {
+      if (app.role.type === 'teacher') {
         return and(
           eq(groups.branchId, app.role.branchId),
           eq(groups.teacherId, app.role.id),
         );
       }
 
-      if (app.role.type === "student") {
+      if (app.role.type === 'student') {
         return sql`exists (
           select 1
           from student_subscriptions ss
@@ -80,21 +82,21 @@ export const groupSync = definePolicySync<Group, User, CrmContext>({
 
     create: (app, data) => {
       return (
-        hasPermission(app.role, "groupPermissions", "create") &&
+        hasPermission(app.role, 'groupPermissions', 'create') &&
         data.branchId === app.role.branchId
       );
     },
 
     update: (app, original, changes) => {
-      if (!hasPermission(app.role, "groupPermissions", "update")) return false;
+      if (!hasPermission(app.role, 'groupPermissions', 'update')) return false;
       if (original.branchId !== app.role.branchId) return false;
-      if ("branchId" in changes) return false;
+      if ('branchId' in changes) return false;
       return true;
     },
 
     delete: (app, original) => {
       return (
-        hasPermission(app.role, "groupPermissions", "delete") &&
+        hasPermission(app.role, 'groupPermissions', 'delete') &&
         original.branchId === app.role.branchId
       );
     },
@@ -141,13 +143,8 @@ fetch: async (ctx, since) => {
   return db
     .select()
     .from(table)
-    .where(
-      and(
-        listWhere,
-        since ? gt(updatedAt, since) : undefined,
-      ),
-    );
-}
+    .where(and(listWhere, since ? gt(updatedAt, since) : undefined));
+};
 ```
 
 This turns row visibility into the security boundary for sync snapshots and reconnects.
@@ -161,13 +158,13 @@ update: async (ctx, id, changes) => {
   const app = await context(ctx);
 
   const original = await loadRowById(app.db, table, idColumn, id);
-  if (!original) throw new Error("Not found");
+  if (!original) throw new Error('Not found');
 
   const visible = await rowMatchesListRule(app, original);
-  if (!visible) throw new Error("Forbidden");
+  if (!visible) throw new Error('Forbidden');
 
   const allowed = await rules.update?.(app, original, changes);
-  if (!allowed) throw new Error("Forbidden");
+  if (!allowed) throw new Error('Forbidden');
 
   const [updated] = await app.db
     .update(table)
@@ -176,7 +173,7 @@ update: async (ctx, id, changes) => {
     .returning();
 
   return updated;
-}
+};
 ```
 
 The important part is that update rules receive `original`, because the original row must come from the server database.
@@ -215,7 +212,7 @@ list: (app) => sql`exists (
   from role_visible_group_edges edge
   where edge.group_id = ${groups.id}
   and edge.role_id = ${app.role.id}
-)`
+)`;
 ```
 
 This gives the PocketBase feel without creating a full rule parser.

@@ -1,428 +1,156 @@
-import type { SyncPlatform } from "./index.js";
+import {
+  parseServerMessage,
+  SYNC_PROTOCOL_VERSION,
+  type SyncChange,
+} from '../protocol.js';
+import type { SyncMetric, SyncMetrics, SyncPlatform } from './contracts.js';
 
-/**
- * Auth object returned by a sync websocket auth resolver.
- *
- * Return `null` or `undefined` for unauthenticated requests. If
- * `allowUnauthenticated` is false, that will reject the websocket.
- */
-export type SyncAuthResult<TAuth> = TAuth | null | undefined;
-
-/**
- * Internal header used to forward trusted auth data to the Durable Object.
- *
- * Public request handlers delete this header before processing user requests so
- * clients cannot spoof auth.
- */
-export const INTERNAL_AUTH_HEADER = "x-sveltebase-sync-auth";
-
-/**
- * Payload type expected by `publishEvent` for each mutation action.
- */
-export type PublishEventData<
-  TRecord,
-  TAction extends "create" | "update" | "delete",
-> = TAction extends "create"
-  ? TRecord
-  : TAction extends "update"
-    ? Partial<TRecord>
-    : Partial<TRecord> | undefined;
-
-/**
- * Type-safe function for publishing one server-side row change.
- *
- * `channel` may include a suffix such as `"todos:team-1"` when the server
- * handler uses prefix fallback or dynamic channel names.
- */
-export type PublishFn<TSchema extends Record<string, unknown>> = <
-  TChannel extends keyof TSchema & string,
-  TAction extends "create" | "update" | "delete",
->(
-  channel: TChannel | `${TChannel}:${string}`,
-  action: TAction,
-  key: string | undefined,
-  data: PublishEventData<TSchema[TChannel], TAction>,
-) => Promise<void>;
-
-/**
- * Type-safe function for publishing multiple row changes for one channel.
- */
-export type BulkPublishFn<TSchema extends Record<string, unknown>> = <
-  TChannel extends keyof TSchema & string,
->(
-  channel: TChannel | `${TChannel}:${string}`,
-  changes: Array<{
-    action: "create" | "update" | "delete";
-    key?: string;
-    data?: any;
-  }>,
-) => Promise<void>;
-
-/** Alias kept for older imports. */
-export type PublishEventFn<TSchema extends Record<string, unknown>> =
-  PublishFn<TSchema>;
-
-/** Alias kept for older imports. */
-export type PublishBulkEventFn<TSchema extends Record<string, unknown>> =
-  BulkPublishFn<TSchema>;
-
-/**
- * Function for notifying clients that a channel should be resynced.
- *
- * Use this when server code knows something changed but does not have
- * row-level payloads.
- */
-export type PublishChangeEventFn<TSchema extends Record<string, unknown>> = <
-  TChannel extends keyof TSchema & string,
->(
-  channel: TChannel | `${TChannel}:${string}`,
-) => Promise<void>;
-
-/**
- * Function for notifying clients that a channel must be fully refetched.
- */
-export type PublishResetEventFn<TSchema extends Record<string, unknown>> = <
-  TChannel extends keyof TSchema & string,
->(
-  channel: TChannel | `${TChannel}:${string}`,
-  topics?: string[] | "all",
-) => Promise<void>;
-
-const GLOBAL_PLATFORM_KEY = "__sveltebase_sync_platform__";
-const DEFAULT_SYNC_ENGINE_BINDING = "SYNC_ENGINE";
-
-type PublisherRuntime = {
+export const INTERNAL_AUTH_HEADER = 'x-sveltebase-sync-auth';
+export type { SyncAuthResult } from './contracts.js';
+export type PublishChange = {
+  channel: string;
+  change: SyncChange;
+  cursor: number;
+  revision: number;
+  routingRow?: unknown;
+};
+export type PublisherOptions = {
   platform: SyncPlatform;
-  syncEngineBinding: string;
+  syncEngineBinding?: string;
+  shard?: string | ((channel: string) => string);
+  metrics?: SyncMetrics;
+};
+export type SyncPublisher = {
+  change(event: PublishChange): Promise<void>;
+  changes(events: PublishChange[]): Promise<void>;
+  resync(
+    channel: string,
+    options?: { reset?: boolean; topics?: string[] | 'all' },
+  ): Promise<void>;
+  revokeSubject(subject: string, shardKey?: string): Promise<void>;
 };
 
-/**
- * Checks whether the Vite dev broker has been installed on `globalThis`.
- */
-function hasDevBroker() {
-  const globalObject = globalThis as unknown as Record<string, unknown>;
-  return Boolean(globalObject.__sveltebase_sync_dev_broker__);
-}
+type SyncEngineNamespace = {
+  idFromName(name: string): unknown;
+  get(id: unknown): {
+    fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  };
+};
 
-/**
- * Stores the production publish target for later `publishEvent` calls.
- *
- * Runtime adapters call this before handling requests so application code can
- * publish to the configured Durable Object without passing `env` each time.
- */
-export function configurePublisherPlatform(
-  platform: SyncPlatform,
-  syncEngineBinding = DEFAULT_SYNC_ENGINE_BINDING,
-) {
-  const globalObject = globalThis as unknown as Record<
-    string,
-    PublisherRuntime | undefined
-  >;
-  globalObject[GLOBAL_PLATFORM_KEY] = { platform, syncEngineBinding };
-}
-
-/**
- * Reads the publish runtime registered by the current adapter.
- */
-function getPublisherRuntime() {
-  const globalObject = globalThis as unknown as Record<
-    string,
-    PublisherRuntime | undefined
-  >;
-  return globalObject[GLOBAL_PLATFORM_KEY];
-}
-
-/**
- * Sends a publish payload to the configured Durable Object instance.
- */
-async function publishToDurableObject(
-  platform: SyncPlatform,
-  syncEngineBinding: string,
-  pathname:
-    | "/broadcast"
-    | "/broadcast-batch"
-    | "/broadcast-change"
-    | "/broadcast-reset"
-    | "/broadcast-reset-batch",
-  body: unknown,
-) {
-  const namespace = platform.env[syncEngineBinding] as
-    | DurableObjectNamespace
-    | undefined;
-  if (!namespace) {
-    throw new Error(
-      `Missing ${syncEngineBinding} Durable Object binding`,
-    );
-  }
-
-  const id = namespace.idFromName("global");
-  const stub = namespace.get(id);
-  const response = await stub.fetch(`https://sync.internal${pathname}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    throw new Error(await response.text());
+function report(metrics: SyncMetrics | undefined, metric: SyncMetric) {
+  try {
+    metrics?.(metric);
+  } catch {
+    // Observability must never change publishing behavior.
   }
 }
 
-/**
- * Sends a publish payload to the in-memory Vite dev broker.
- */
-async function publishToDevBroker(
-  pathname:
-    | "/broadcast"
-    | "/broadcast-batch"
-    | "/broadcast-change"
-    | "/broadcast-reset"
-    | "/broadcast-reset-batch",
-  body: any,
-) {
-  const devEngine = await import("./dev-engine.js");
-
-  if (pathname === "/broadcast-reset") {
-    await devEngine.broadcastChannelReset(
-      String(body.channel),
-      Array.isArray(body.topics) ? body.topics.map(String) : "all",
-    );
-    return;
-  }
-
-  if (pathname === "/broadcast-reset-batch") {
-    await devEngine.broadcastChannelResetBatch(
-      Array.isArray(body.resets) ? body.resets : [],
-    );
-    return;
-  }
-
-  if (pathname === "/broadcast-change") {
-    await devEngine.broadcastChannelChange(String(body.channel));
-    return;
-  }
-
-  if (pathname === "/broadcast-batch") {
-    await devEngine.broadcastExternalBatchChange(
-      String(body.channel),
-      Array.isArray(body.changes) ? body.changes : [],
-    );
-    return;
-  }
-
-  await devEngine.broadcastExternalChange(
-    String(body.channel),
-    body.action,
-    body.key,
-    body.data,
-  );
+function validEvent(event: PublishChange) {
+  if (!event.channel || event.channel.length > 256)
+    throw new Error('Invalid publish channel');
+  if (
+    !Number.isSafeInteger(event.cursor) ||
+    event.cursor < 0 ||
+    !Number.isSafeInteger(event.revision) ||
+    event.revision < 0
+  )
+    throw new Error('Invalid publish cursor or revision');
+  if (!event.change.key || event.change.key.length > 128)
+    throw new Error('Invalid publish key');
+  if (
+    !parseServerMessage(
+      JSON.stringify({
+        type: 'change',
+        channel: event.channel,
+        change: event.change,
+        cursor: event.cursor,
+        revision: event.revision,
+        v: SYNC_PROTOCOL_VERSION,
+      }),
+    )
+  )
+    throw new Error('Invalid publish change');
 }
 
-/**
- * Dispatches a publish payload to production Durable Object or dev broker.
- */
-async function publish(
-  pathname:
-    | "/broadcast"
-    | "/broadcast-batch"
-    | "/broadcast-change"
-    | "/broadcast-reset"
-    | "/broadcast-reset-batch",
-  body: unknown,
-) {
-  const runtime = getPublisherRuntime();
-
-  if (runtime?.platform.env[runtime.syncEngineBinding]) {
-    await publishToDurableObject(
-      runtime.platform,
-      runtime.syncEngineBinding,
-      pathname,
-      body,
-    );
-    return;
-  }
-
-  if (hasDevBroker()) {
-    await publishToDevBroker(pathname, body);
-    return;
-  }
-
-  // No Durable Object binding and no Vite broker yet. Fan-out is best-effort:
-  // DB mutations already committed, and clients resync on next connect.
-  // Common on the login path in Vite before any `/api/sync` socket opens.
-  console.warn(
-    "Missing sync publisher target: publish skipped (use createSyncAppWorker() in production or syncDevPlugin() in Vite dev)",
-  );
-}
-
-/**
- * Creates a typed publisher for single row changes.
- *
- * @example
- * ```ts
- * const publish = createPublisher<{ todos: Todo }>();
- * await publish("todos", "update", todo.id, { title: todo.title });
- * ```
- */
-export function createPublisher<
-  TSchema extends Record<string, unknown>,
->(): PublishFn<TSchema>;
-
-export function createPublisher() {
-  return publishEvent;
-}
-
-/**
- * Publishes one server-side row change to connected sync clients.
- *
- * This does not write to your database. Call it after your own server code has
- * already created, updated, or deleted the row.
- */
-export async function publishEvent<
-  TSchema extends Record<string, unknown>,
-  TChannel extends keyof TSchema & string,
-  TAction extends "create" | "update" | "delete",
->(
-  channel: TChannel | `${TChannel}:${string}`,
-  action: TAction,
-  key: string | undefined,
-  data: PublishEventData<TSchema[TChannel], TAction>,
-): Promise<void>;
-
-export async function publishEvent(
-    channel: string,
-    action: "create" | "update" | "delete",
-    key: string | undefined,
-    data: any,
-): Promise<void> {
-  await publish("/broadcast", {
-    channel: String(channel),
-    action,
-    key,
-    data,
-  });
-}
-
-/**
- * Creates a typed publisher for batch row changes.
- */
-export function createBulkPublisher<
-  TSchema extends Record<string, unknown>,
->(): BulkPublishFn<TSchema>;
-
-export function createBulkPublisher() {
-  return publishBulkEvent;
-}
-
-/**
- * Publishes multiple server-side row changes for one channel.
- *
- * If the server handler defines `broadcastTopics`, each change is routed
- * independently by the broker before it is sent.
- */
-export async function publishBulkEvent<
-  TSchema extends Record<string, unknown>,
-  TChannel extends keyof TSchema & string,
->(
-  channel: TChannel | `${TChannel}:${string}`,
-  changes: Array<{
-    action: "create" | "update" | "delete";
-    key?: string;
-    data?: any;
-  }>,
-): Promise<void>;
-
-export async function publishBulkEvent(
-    channel: string,
-    changes: Array<{
-      action: "create" | "update" | "delete";
-      key?: string;
-      data?: any;
-    }>,
-): Promise<void> {
-  await publish("/broadcast-batch", {
-    channel: String(channel),
-    changes,
-  });
-}
-
-/**
- * Creates a typed publisher that asks clients to resync a channel.
- */
-export function createPublishChangeEvent<
-  TSchema extends Record<string, unknown>,
->(): PublishChangeEventFn<TSchema>;
-
-export function createPublishChangeEvent() {
-  return publishChangeEvent;
-}
-
-/**
- * Notifies connected clients that a channel changed and should be resynced.
- *
- * Use this when publishing row-level payloads would be expensive or impossible.
- */
-export async function publishChangeEvent<
-  TSchema extends Record<string, unknown>,
-  TChannel extends keyof TSchema & string,
->(channel: TChannel | `${TChannel}:${string}`): Promise<void>;
-
-export async function publishChangeEvent(channel: string): Promise<void> {
-  await publish("/broadcast-change", {
-    channel: String(channel),
-  });
-}
-
-/**
- * Creates a typed publisher that asks clients to fully replace a channel.
- */
-export function createPublishResetEvent<
-  TSchema extends Record<string, unknown>,
->(): PublishResetEventFn<TSchema>;
-
-export function createPublishResetEvent() {
-  return publishResetEvent;
-}
-
-/**
- * Notifies connected clients that a channel's visible set changed.
- *
- * Clients fetch without `since` and replace the local table. Pass `topics` to
- * target only affected live connections; omit it to reset every subscriber.
- */
-export async function publishResetEvent<
-  TSchema extends Record<string, unknown>,
-  TChannel extends keyof TSchema & string,
->(
-  channel: TChannel | `${TChannel}:${string}`,
-  topics?: string[] | "all",
-): Promise<void>;
-
-export async function publishResetEvent(
-  channel: string,
-  topics: string[] | "all" = "all",
-): Promise<void> {
-  await publish("/broadcast-reset", {
-    channel: String(channel),
-    topics,
-  });
-}
-
-/**
- * Publishes several scoped channel resets through one sync-engine request.
- */
-export async function publishResetEvents(
-  resets: Array<{
-    channel: string;
-    topics?: string[] | "all";
-  }>,
-): Promise<void> {
-  if (resets.length === 0) return;
-
-  await publish("/broadcast-reset-batch", {
-    resets: resets.map((reset) => ({
-      channel: String(reset.channel),
-      topics: reset.topics ?? "all",
-    })),
-  });
+export function createSyncPublisher(options: PublisherOptions): SyncPublisher {
+  const binding = options.syncEngineBinding ?? 'SYNC_ENGINE';
+  const namespace = options.platform.env[binding] as
+    SyncEngineNamespace | undefined;
+  if (!namespace) throw new Error(`Missing ${binding} Durable Object binding`);
+  const shard = (channel: string) =>
+    typeof options.shard === 'function'
+      ? options.shard(channel)
+      : (options.shard ?? 'global');
+  const send = async (path: string, channel: string, body: unknown) => {
+    const shardName = shard(channel);
+    if (!shardName || shardName.length > 128)
+      throw new Error('Invalid sync shard');
+    report(options.metrics, {
+      name: 'publish',
+      count: 1,
+      operation: 'publish',
+      channel,
+    });
+    report(options.metrics, {
+      name: 'broker-write',
+      count: 1,
+      operation: 'publish',
+      channel,
+    });
+    const response = await namespace
+      .get(namespace.idFromName(shardName))
+      .fetch(`https://sync.internal${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    if (!response.ok)
+      throw new Error(`Sync publish failed (${response.status})`);
+  };
+  return {
+    async change(event) {
+      validEvent(event);
+      await send('/internal/change', event.channel, event);
+    },
+    async changes(events) {
+      if (!Array.isArray(events) || events.length < 1 || events.length > 1_000)
+        throw new Error('Publish batch must contain 1 to 1000 events');
+      for (const event of events) validEvent(event);
+      const groups = new Map<string, PublishChange[]>();
+      for (const event of events) {
+        const key = shard(event.channel);
+        const group = groups.get(key);
+        if (group) group.push(event);
+        else groups.set(key, [event]);
+      }
+      for (const group of groups.values())
+        await send('/internal/changes', group[0]!.channel, { events: group });
+    },
+    async resync(channel, reset = {}) {
+      if (!channel || channel.length > 256)
+        throw new Error('Invalid publish channel');
+      if (
+        reset.topics !== undefined &&
+        reset.topics !== 'all' &&
+        (!Array.isArray(reset.topics) ||
+          reset.topics.length > 256 ||
+          reset.topics.some((topic) => !topic || topic.length > 256))
+      )
+        throw new Error('Invalid publish topics');
+      await send('/internal/resync', channel, {
+        channel,
+        reset: reset.reset === true,
+        topics: reset.topics ?? 'all',
+      });
+    },
+    async revokeSubject(subject, shardKey = '') {
+      if (!subject || subject.length > 256)
+        throw new Error('Invalid sync subject');
+      if (typeof options.shard === 'function' && !shardKey)
+        throw new Error(
+          'A shard key is required to revoke a subject with functional sharding',
+        );
+      await send('/internal/revoke', shardKey, { subject });
+    },
+  };
 }

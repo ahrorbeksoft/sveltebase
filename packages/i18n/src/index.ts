@@ -1,26 +1,41 @@
 export {
   createI18n,
+  getI18n,
+  provideI18n,
   getTranslations,
-  getFormat
-} from "./create-i18n.js";
+  getFormat,
+} from './create-i18n.svelte.js';
 
 export type {
   CreateI18nReturn,
+  CreateI18nOptions,
   CurrentLanguage,
   Format,
   I18nInstance,
   LocaleCode,
+  LocaleStorage,
   MessageKey,
-  RegisteredMessages,
   Translate,
-  TranslationValues
-} from "./create-i18n.js";
-
-export type { MaybeGetter } from "@sveltebase/state";
+} from './create-i18n.svelte.js';
 
 export type {
+  Clock,
+  Formatter,
+  FormatterOptions,
   FormatOptions,
   LanguageDefinition,
   Messages,
-  MessageValue
-} from "./utils.js";
+  MessageValue,
+  TranslationValues,
+  Translator,
+  TranslatorOptions,
+} from './core.js';
+
+export {
+  createFormatter,
+  createTranslator,
+  getLanguage,
+  getLocaleCodes,
+  resolveLocale,
+  validateLanguages,
+} from './core.js';

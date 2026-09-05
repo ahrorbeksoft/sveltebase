@@ -1,663 +1,589 @@
-import type { SyncHandler, SyncContext, SyncPlatform } from "./index.js";
-import { serializeSyncError } from "../errors.js";
-import { parseSyncMessage } from "../protocol.js";
+import { serializeSyncError } from '../errors.js';
+import {
+  parseClientMessage,
+  parseServerMessage,
+  SYNC_PROTOCOL_VERSION,
+  type SyncChange,
+  type SyncClientMessage,
+  type SyncServerMessage,
+  type SyncSubscription,
+} from '../protocol.js';
+import type { PublishChange } from './handler.js';
+import type {
+  MutationOutcome,
+  SyncConnectionAuth,
+  SyncContext,
+  SyncHandler,
+  SyncMetrics,
+  SyncPlatform,
+} from './index.js';
 
-/**
- * Transport-agnostic connection wrapper used by the sync broker.
- *
- * Cloudflare Durable Objects and the Vite dev websocket server both implement
- * this interface so the broker can handle auth, subscriptions, and messages
- * without caring which runtime owns the socket.
- */
 export interface ISyncConnection {
-  /** Sends one already-serialized protocol message to the connected client. */
   send(data: string): void;
-  /** Closes the underlying websocket. */
   close(code?: number, reason?: string): void;
-  /** Returns the auth object resolved during websocket connection setup. */
-  getAuth(): any;
-  /** Updates the auth object for this live connection. */
-  setAuth(auth: any): void;
-  /** Returns the legacy identity for this connection. */
-  getIdentity(): string | null;
-  /** Updates the legacy identity for this connection. */
-  setIdentity(identity: string | null): void;
-  /** Returns topics used for live broadcast routing. */
-  getTopics(): Set<string>;
-  /** Replaces topics used for live broadcast routing. */
-  setTopics(topics: Iterable<string>): void;
-  /** Returns the mutable set of channel names this client is subscribed to. */
+  getConnectionAuth(): SyncConnectionAuth | null;
+  setConnectionAuth(auth: SyncConnectionAuth | null): void;
   getSubscribedChannels(): Set<string>;
-  /** Original request headers used to rebuild handler context. */
   readonly headers: Headers;
-  /** Original request URL used to rebuild handler context. */
   readonly url: string;
 }
 
-/**
- * Routes sync protocol messages between connected clients and channel handlers.
- *
- * The broker owns connection bookkeeping, authorization calls, validation, and
- * topic-routed broadcasting. It is shared by Cloudflare production runtime and local
- * Vite dev runtime.
- */
+type PendingSubscription = { messages: string[] };
+const MAX_CONNECTION_QUEUE = 64;
+const MAX_BUFFERED_CHANGES = 256;
+
+function validateOutcome(
+  message: Extract<SyncClientMessage, { type: 'mutate' }>,
+  outcome: MutationOutcome,
+) {
+  if (
+    !Number.isSafeInteger(outcome.cursor) ||
+    outcome.cursor < 0 ||
+    !Number.isSafeInteger(outcome.revision) ||
+    outcome.revision < 0
+  )
+    throw new Error('Mutation returned an invalid cursor or revision');
+  if (
+    message.action !== 'delete' &&
+    (!outcome.data ||
+      typeof outcome.data !== 'object' ||
+      (outcome.data as { id?: unknown }).id !== outcome.change.key)
+  )
+    throw new Error('Create and update mutations must return a canonical row');
+  if (
+    !parseServerMessage(
+      JSON.stringify({
+        type: 'change',
+        channel: message.channel,
+        change: outcome.change,
+        cursor: outcome.cursor,
+        revision: outcome.revision,
+        v: SYNC_PROTOCOL_VERSION,
+      }),
+    )
+  )
+    throw new Error('Mutation returned an invalid change');
+}
+
 export class SyncBroker {
   private handlers = new Map<string, SyncHandler>();
   private dynamicHandlers: SyncHandler[] = [];
-  private connections: Set<ISyncConnection> = new Set();
-  /**
-   * Per-connection promise chain so concurrent websocket deliveries still run
-   * handlers in arrival order. Without this, two rapid mutates (e.g. create
-   * subscription then create invoice) can interleave at `await` points and
-   * trip foreign-key constraints on the later write.
-   */
+  private connections = new Set<ISyncConnection>();
   private connectionQueues = new WeakMap<ISyncConnection, Promise<void>>();
+  private queueDepth = new WeakMap<ISyncConnection, number>();
+  private pendingSubscriptions = new WeakMap<
+    ISyncConnection,
+    Map<string, PendingSubscription>
+  >();
+  private readonly metrics?: SyncMetrics;
 
-  /**
-   * Creates a broker with the initial set of channel handlers.
-   *
-   * @param handlers Handlers returned by `defineSync`.
-   */
-  constructor(handlers: SyncHandler[]) {
+  constructor(handlers: SyncHandler[], metrics?: SyncMetrics) {
+    this.metrics = metrics
+      ? (metric) => {
+          try {
+            metrics(metric);
+          } catch {
+            // Observability must never change sync behavior.
+          }
+        }
+      : undefined;
     this.setHandlers(handlers);
   }
 
-  private sendReject(
-    conn: ISyncConnection,
-    id: string,
-    error: unknown,
-    channel?: string,
-  ) {
-    conn.send(
-      JSON.stringify({
-        type: "reject",
-        id,
-        ...(channel ? { channel } : {}),
-        error: serializeSyncError(error),
-      }),
-    );
-  }
-
-  /**
-   * Replaces the active handler registry.
-   *
-   * Called by the dev plugin on module reload so new handler code is used by
-   * existing websocket connections.
-   */
-  public setHandlers(handlers: SyncHandler[]) {
-    this.handlers.clear();
-    this.dynamicHandlers = [];
-
-    for (const h of handlers) {
-      if (typeof h.config.channel === "string") {
-        this.handlers.set(h.config.channel, h);
-      } else {
-        this.dynamicHandlers.push(h);
-      }
+  setHandlers(handlers: SyncHandler[]) {
+    const statics = new Map<string, SyncHandler>();
+    const dynamic: SyncHandler[] = [];
+    for (const handler of handlers) {
+      if (typeof handler.config.channel === 'string') {
+        if (statics.has(handler.config.channel))
+          throw new Error(`Duplicate sync channel: ${handler.config.channel}`);
+        statics.set(handler.config.channel, handler);
+      } else dynamic.push(handler);
     }
+    this.handlers = statics;
+    this.dynamicHandlers = dynamic;
   }
 
-  /**
-   * Starts tracking a newly accepted websocket connection.
-   */
-  public registerConnection(conn: ISyncConnection) {
+  registerConnection(conn: ISyncConnection) {
     this.connections.add(conn);
+    this.pendingSubscriptions.set(conn, new Map());
   }
-
-  /**
-   * Stops tracking a websocket connection and prevents future broadcasts to it.
-   */
-  public removeConnection(conn: ISyncConnection) {
+  removeConnection(conn: ISyncConnection) {
     this.connections.delete(conn);
+    this.pendingSubscriptions.delete(conn);
+  }
+  revokeSubject(subject: string) {
+    for (const conn of this.connections)
+      if (conn.getConnectionAuth()?.subject === subject) {
+        try {
+          conn.close(4001, 'Authorization revoked');
+        } catch {
+          // The connection is removed even if the transport is already closed.
+        }
+        this.removeConnection(conn);
+      }
+  }
+  private active(conn: ISyncConnection) {
+    if (!this.connections.has(conn)) return false;
+    const expiresAt = conn.getConnectionAuth()?.expiresAt;
+    if (expiresAt !== undefined && expiresAt <= Date.now()) {
+      try {
+        conn.close(4001, 'Authorization expired');
+      } catch {
+        // The connection is removed even if the transport is already closed.
+      }
+      this.removeConnection(conn);
+      return false;
+    }
+    return true;
   }
 
-  /**
-   * Builds the handler context for a client-originated subscribe or mutation.
-   *
-   * Auth is read from the connection because the worker resolved it before the
-   * Durable Object received the socket.
-   */
-  private createConnectionContext(
+  private send(conn: ISyncConnection, message: SyncServerMessage) {
+    conn.send(JSON.stringify({ ...message, v: SYNC_PROTOCOL_VERSION }));
+  }
+  private reject(
+    conn: ISyncConnection,
+    error: unknown,
+    correlation: { id?: string; requestId?: string; channel?: string } = {},
+  ) {
+    this.send(conn, {
+      type: 'reject',
+      ...correlation,
+      error: serializeSyncError(error),
+      v: SYNC_PROTOCOL_VERSION,
+    });
+  }
+  private context(
     conn: ISyncConnection,
     platform: SyncPlatform,
-    request?: Request,
+    request: Request,
     cache = new Map<string, unknown>(),
   ): SyncContext {
-    const authUser = conn.getAuth();
-    const identity = conn.getIdentity();
-    const topics = conn.getTopics();
-
+    const auth = conn.getConnectionAuth();
     return {
       platform,
-      request: request ?? new Request(conn.url, { headers: conn.headers }),
-      auth: authUser
-        ? {
-            user: authUser,
-            identity,
-            topics: Array.from(topics),
-          }
-        : null,
-      identity,
-      topics,
+      request,
+      auth,
+      subject: auth?.subject ?? null,
+      topics: new Set(auth?.topics ?? []),
       cache,
+      metrics: this.metrics,
     };
   }
-
-  /**
-   * Builds a handler context for server-originated publish events.
-   *
-   * External events have no active client auth, but still receive platform and
-   * request data for database/env access inside broadcast topic callbacks.
-   */
-  private createExternalContext(
+  private externalContext(
     platform: SyncPlatform,
-    request?: Request,
+    request = new Request('https://sync.internal/'),
   ): SyncContext {
     return {
       platform,
-      request: request ?? new Request("https://sync.internal/broadcast"),
+      request,
       auth: null,
-      identity: null,
+      subject: null,
       topics: new Set(),
-      cache: new Map<string, unknown>(),
+      cache: new Map(),
+      metrics: this.metrics,
     };
   }
-
-  /**
-   * Finds the handler responsible for a channel.
-   *
-   * Matching tries exact static channels first, then dynamic channel resolvers,
-   * then a prefix fallback so `todos:123` can use a static `todos` handler.
-   */
   private findHandler(
     channel: string,
     ctx: SyncContext,
   ): SyncHandler | undefined {
-    const handler = this.handlers.get(channel);
-    if (handler) return handler;
-
-    for (const h of this.dynamicHandlers) {
+    const exact = this.handlers.get(channel);
+    if (exact) return exact;
+    for (const handler of this.dynamicHandlers) {
       try {
-        if (h.resolveChannel(ctx) === channel) return h;
+        if (handler.resolveChannel(ctx) === channel) return handler;
       } catch {
-        // Ignore handlers that cannot resolve for this connection context.
+        /* inaccessible context */
       }
     }
-
-    const colonIndex = channel.indexOf(":");
-    if (colonIndex !== -1) {
-      const prefix = channel.substring(0, colonIndex);
-      const prefixHandler = this.handlers.get(prefix);
-      if (prefixHandler) return prefixHandler;
-    }
-
     return undefined;
   }
-
-  /**
-   * Finds a handler for an external publish event.
-   *
-   * Dynamic handlers may need a real connection context to resolve their
-   * channel, so subscribed connections are checked when the external context
-   * alone cannot identify a handler.
-   */
-  private findExternalHandler(
-    channel: string,
-    platform: SyncPlatform,
-    request?: Request,
-  ): SyncHandler | undefined {
-    const externalCtx = this.createExternalContext(platform, request);
-    const handler = this.findHandler(channel, externalCtx);
-    if (handler) return handler;
-
-    for (const conn of this.connections) {
-      if (!conn.getSubscribedChannels().has(channel)) continue;
-
-      const connCtx = this.createConnectionContext(conn, platform);
-      const connHandler = this.findHandler(channel, connCtx);
-      if (connHandler) return connHandler;
-    }
-
-    return undefined;
+  private findExternalHandler(channel: string) {
+    const exact = this.handlers.get(channel);
+    if (exact) return exact;
+    return this.dynamicHandlers.find((handler) =>
+      handler.config.matchChannel?.(channel),
+    );
   }
 
-  /**
-   * Handles one client websocket message, serialized per connection.
-   *
-   * Concurrent `webSocketMessage` / `ws.on("message")` deliveries still process
-   * in order so dependent mutations (parent row then child FK) cannot race.
-   */
-  public async handleMessage(
+  async handleMessage(
     conn: ISyncConnection,
-    rawMessage: string,
+    raw: string,
     platform: SyncPlatform,
     request: Request,
   ) {
+    const depth = (this.queueDepth.get(conn) ?? 0) + 1;
+    if (depth > MAX_CONNECTION_QUEUE) {
+      conn.close(1009, 'Message queue limit exceeded');
+      this.removeConnection(conn);
+      return;
+    }
+    this.queueDepth.set(conn, depth);
     const previous = this.connectionQueues.get(conn) ?? Promise.resolve();
     const run = previous
       .catch(() => undefined)
-      .then(() => this.processMessage(conn, rawMessage, platform, request));
+      .then(() => this.process(conn, raw, platform, request))
+      .finally(() =>
+        this.queueDepth.set(
+          conn,
+          Math.max(0, (this.queueDepth.get(conn) ?? 1) - 1),
+        ),
+      );
     this.connectionQueues.set(conn, run);
     await run;
   }
 
-  /**
-   * Handles one parsed client websocket message.
-   *
-   * `subscribe` runs `authorize`, fetches a snapshot, and records the channel.
-   * `mutate` validates data, runs the configured write handler, acknowledges the
-   * sender, then broadcasts the change to topic-matched subscribers.
-   */
-  private async processMessage(
+  private async process(
     conn: ISyncConnection,
-    rawMessage: string,
+    raw: string,
     platform: SyncPlatform,
     request: Request,
   ) {
-    const msg = parseSyncMessage(rawMessage);
-    if (!msg) return;
-
-    const ctx = this.createConnectionContext(conn, platform, request);
-
+    const msg = parseClientMessage(raw);
+    if (!msg) {
+      this.reject(conn, new Error('Invalid sync frame'));
+      return;
+    }
+    if (!this.active(conn)) return;
+    const ctx = this.context(conn, platform, request);
     try {
-      switch (msg.type) {
-        case "ping":
-          conn.send("pong");
-          break;
-
-        case "subscribe": {
-          await this.processSubscribe(conn, ctx, msg);
-          break;
-        }
-
-        case "subscribe-batch": {
-          // The batch is one queued connection operation, so mutations sent
-          // after it still wait for every initial snapshot. Individual channel
-          // fetches can run concurrently and share the same per-batch cache.
-          await Promise.all(
-            msg.subscriptions.map(async (subscription) => {
-              try {
-                await this.processSubscribe(conn, ctx, subscription);
-              } catch (error) {
-                console.error(
-                  `SyncBroker: error subscribing to ${subscription.channel}:`,
-                  error,
-                );
-                this.sendReject(conn, "subscribe", error, subscription.channel);
-              }
-            }),
-          );
-          break;
-        }
-
-        case "unsubscribe":
-          conn.getSubscribedChannels().delete(msg.channel);
-          break;
-
-        case "mutate": {
-          const handler = this.findHandler(msg.channel, ctx);
-          if (!handler) {
-            this.sendReject(
-              conn,
-              msg.id,
-              new Error(`No handler for channel: ${msg.channel}`),
-            );
-            return;
-          }
-
-          // Authorize mutation
-          if (handler.config.authorize) {
-            await handler.config.authorize(ctx);
-          }
-
-          let result: any;
-          if (msg.action === "create") {
-            if (handler.config.validate?.create) {
-              msg.data = handler.config.validate.create.parse(msg.data);
-            }
-            if (!handler.config.create) {
-              throw new Error(
-                `Forbidden: Create operation not supported on channel ${msg.channel}`,
-              );
-            }
-            result = await handler.config.create(ctx, msg.data);
-          } else if (msg.action === "update") {
-            if (handler.config.validate?.update) {
-              msg.data = handler.config.validate.update.parse(msg.data);
-            }
-            if (!handler.config.update) {
-              throw new Error(
-                `Forbidden: Update operation not supported on channel ${msg.channel}`,
-              );
-            }
-            result = await handler.config.update(ctx, msg.key!, msg.data);
-          } else if (msg.action === "delete") {
-            if (!handler.config.delete) {
-              throw new Error(
-                `Forbidden: Delete operation not supported on channel ${msg.channel}`,
-              );
-            }
-            await handler.config.delete(ctx, msg.key!);
-            result = { id: msg.key };
-          }
-
-          // Send Ack back to sender
-          conn.send(
-            JSON.stringify({
-              type: "ack",
-              id: msg.id,
-              data: result,
-            }),
-          );
-
-          // Broadcast changes to other subscribers
-          await this.broadcastChange(
-            msg.channel,
-            msg.action,
-            msg.key || result?.id,
-            result,
-            msg.id,
-            handler,
-            ctx,
-          );
-          break;
-        }
+      if (msg.type === 'ping') {
+        this.send(conn, {
+          type: 'pong',
+          ...(msg.nonce ? { nonce: msg.nonce } : {}),
+          v: SYNC_PROTOCOL_VERSION,
+        });
+        return;
       }
-    } catch (err: any) {
-      console.error(
-        `SyncBroker: error handling message type=${msg.type}:`,
-        err,
-      );
-      if (msg.type === "subscribe") {
-        this.sendReject(conn, "subscribe", err, msg.channel);
-      } else if (msg.type === "mutate") {
-        this.sendReject(conn, msg.id, err);
+      if (msg.type === 'unsubscribe') {
+        conn.getSubscribedChannels().delete(msg.channel);
+        this.pendingSubscriptions.get(conn)?.delete(msg.channel);
+        return;
       }
+      if (msg.type === 'subscribe') {
+        await this.subscribe(conn, ctx, msg);
+        return;
+      }
+      if (msg.type === 'subscribe-batch') {
+        const channels = msg.subscriptions.map((item) => item.channel);
+        if (new Set(channels).size !== channels.length)
+          throw new Error('Duplicate channel in subscription batch');
+        await Promise.all(
+          msg.subscriptions.map((sub) =>
+            this.subscribe(conn, { ...ctx, cache: ctx.cache }, sub).catch(
+              (error) =>
+                this.reject(conn, error, {
+                  requestId: sub.requestId,
+                  channel: sub.channel,
+                }),
+            ),
+          ),
+        );
+        return;
+      }
+      await this.mutate(conn, ctx, msg);
+    } catch (error) {
+      if (msg.type === 'mutate')
+        this.reject(conn, error, { id: msg.id, channel: msg.channel });
+      else if (msg.type === 'subscribe')
+        this.reject(conn, error, {
+          requestId: msg.requestId,
+          channel: msg.channel,
+        });
     }
   }
 
-  private async processSubscribe(
+  private async subscribe(
     conn: ISyncConnection,
     ctx: SyncContext,
-    subscription: {
-      channel: string;
-      since?: number;
-      viewVersion?: string | number | null;
-    },
+    request: SyncSubscription,
   ) {
-    const handler = this.findHandler(subscription.channel, ctx);
-    if (!handler) {
-      throw new Error(
-        `No handler registered for channel: ${subscription.channel}`,
-      );
+    const handler = this.findHandler(request.channel, ctx);
+    if (!handler) throw new Error('Unknown sync channel');
+    const pendingMap = this.pendingSubscriptions.get(conn) ?? new Map();
+    this.pendingSubscriptions.set(conn, pendingMap);
+    pendingMap.set(request.channel, { messages: [] });
+    conn.getSubscribedChannels().delete(request.channel);
+    try {
+      await handler.config.authorize?.(ctx, 'subscribe');
+      if (!this.active(conn)) return;
+      this.metrics?.({
+        name: 'query',
+        count: 1,
+        operation: 'subscribe',
+        channel: request.channel,
+      });
+      const result = await handler.config.snapshot(ctx, {
+        cursor: request.cursor,
+        forceFull: request.forceFull === true,
+        limit: handler.config.snapshotLimit ?? 1_000,
+        viewVersion: request.viewVersion ?? null,
+      });
+      if (!this.active(conn)) return;
+      if (
+        !Number.isSafeInteger(result.cursor) ||
+        result.cursor < 0 ||
+        !Array.isArray(result.rows) ||
+        result.rows.length > (handler.config.snapshotLimit ?? 1_000)
+      )
+        throw new Error('Invalid snapshot result');
+      if (
+        result.mode === 'delta' &&
+        (request.forceFull || request.cursor === undefined)
+      )
+        throw new Error('A delta snapshot requires a valid client cursor');
+      const resultViewVersion =
+        result.viewVersion == null ? null : String(result.viewVersion);
+      const requestViewVersion = request.viewVersion ?? null;
+      if (result.mode === 'delta' && resultViewVersion !== requestViewVersion)
+        throw new Error('A delta snapshot cannot change the view version');
+      if (
+        request.cursor !== undefined &&
+        (result.cursor < request.cursor ||
+          (result.hasMore === true && result.cursor <= request.cursor))
+      )
+        throw new Error('Snapshot cursor did not advance');
+      this.metrics?.({
+        name: 'rows-read',
+        count: result.rows.length,
+        operation: 'subscribe',
+        channel: request.channel,
+      });
+      this.metrics?.({
+        name: 'snapshot-row',
+        count: result.rows.length,
+        operation: 'subscribe',
+        channel: request.channel,
+      });
+      const snapshot: SyncServerMessage = {
+        type: 'snapshot',
+        requestId: request.requestId,
+        channel: request.channel,
+        mode: result.mode,
+        rows: result.rows,
+        ...(result.events ? { events: result.events } : {}),
+        cursor: result.cursor,
+        ...(result.hasMore === undefined ? {} : { hasMore: result.hasMore }),
+        ...(result.viewVersion === undefined
+          ? {}
+          : {
+              viewVersion: resultViewVersion,
+            }),
+        v: SYNC_PROTOCOL_VERSION,
+      };
+      if (!parseServerMessage(JSON.stringify(snapshot)))
+        throw new Error('Snapshot contains invalid rows or events');
+      this.send(conn, snapshot);
+      conn.getSubscribedChannels().add(request.channel);
+      const pending = pendingMap.get(request.channel);
+      pendingMap.delete(request.channel);
+      for (const message of pending?.messages ?? []) conn.send(message);
+    } catch (error) {
+      pendingMap.delete(request.channel);
+      conn.getSubscribedChannels().delete(request.channel);
+      throw error;
     }
-
-    if (handler.config.authorize) {
-      await handler.config.authorize(ctx);
-    }
-
-    conn.getSubscribedChannels().add(subscription.channel);
-
-    const currentViewVersion = await this.resolveViewVersion(handler, ctx);
-    const clientViewVersion =
-      subscription.viewVersion == null ? null : String(subscription.viewVersion);
-    const forceFull = currentViewVersion !== clientViewVersion;
-    const data = await handler.config.fetch(
-      ctx,
-      forceFull ? undefined : subscription.since,
-    );
-
-    conn.send(
-      JSON.stringify({
-        type: "snapshot",
-        channel: subscription.channel,
-        data,
-        isDelta: subscription.since != null && !forceFull,
-        viewVersion: currentViewVersion,
-      }),
-    );
   }
 
-  /**
-   * Broadcasts one client mutation after resolving its target audience.
-   */
-  private async broadcastChange(
-    channel: string,
-    action: "create" | "update" | "delete",
-    key: string | undefined,
-    data: any,
-    mutationId: string,
-    handler: SyncHandler,
+  private async mutate(
+    conn: ISyncConnection,
     ctx: SyncContext,
+    msg: Extract<SyncClientMessage, { type: 'mutate' }>,
   ) {
-    const changeMsg = JSON.stringify({
-      type: "change",
-      channel,
-      action,
-      key,
-      data,
-      mutationId,
+    const handler = this.findHandler(msg.channel, ctx);
+    if (!handler || !handler.config.mutate || !handler.config.idempotency)
+      throw new Error('Mutation is not supported');
+    if (!ctx.subject)
+      throw new Error('Authenticated subject required for mutation');
+    await handler.config.authorize?.(ctx, 'mutate');
+    if (!this.active(conn)) return;
+    let data = msg.data;
+    if (msg.action === 'create' && handler.config.validate?.create)
+      data = handler.config.validate.create.parse(data);
+    if (msg.action === 'update' && handler.config.validate?.update)
+      data = handler.config.validate.update.parse(data);
+    this.metrics?.({
+      name: 'broker-read',
+      count: 1,
+      operation: 'mutation',
+      channel: msg.channel,
     });
-
-    const allowedTopics = await this.resolveBroadcastTopics(
-      handler,
+    const result = await handler.config.idempotency.execute(
       ctx,
-      action,
-      data,
+      { subject: ctx.subject, channel: msg.channel, mutationId: msg.id },
+      async (transaction) => {
+        this.metrics?.({
+          name: 'transaction-attempt',
+          count: 1,
+          operation: 'mutation',
+          channel: msg.channel,
+        });
+        const outcome = await handler.config.mutate!(
+          { ...ctx, cache: new Map(), transaction },
+          {
+            id: msg.id,
+            subject: ctx.subject!,
+            channel: msg.channel,
+            action: msg.action,
+            ...(msg.key ? { key: msg.key } : {}),
+            ...(data === undefined ? {} : { data }),
+          },
+        );
+        validateOutcome(msg, outcome);
+        return outcome;
+      },
     );
-
-    this.sendToScopedSubscribers(channel, changeMsg, allowedTopics);
+    const outcome = result.outcome;
+    validateOutcome(msg, outcome);
+    if (!this.active(conn)) return;
+    if (result.replayed)
+      this.metrics?.({
+        name: 'replay-hit',
+        count: 1,
+        operation: 'mutation',
+        channel: msg.channel,
+      });
+    else {
+      this.metrics?.({
+        name: 'write',
+        count: 1,
+        operation: 'mutation',
+        channel: msg.channel,
+      });
+      this.metrics?.({
+        name: 'broker-write',
+        count: 1,
+        operation: 'mutation',
+        channel: msg.channel,
+      });
+    }
+    this.send(conn, {
+      type: 'ack',
+      id: msg.id,
+      ...(outcome.data === undefined ? {} : { data: outcome.data }),
+      cursor: outcome.cursor,
+      revision: outcome.revision,
+      replayed: result.replayed,
+      v: SYNC_PROTOCOL_VERSION,
+    });
+    if (!result.replayed)
+      await this.broadcast(
+        {
+          channel: msg.channel,
+          change: outcome.change,
+          cursor: outcome.cursor,
+          revision: outcome.revision,
+          mutationId: msg.id,
+        },
+        handler,
+        ctx,
+        outcome.routingRow,
+      );
   }
 
-  /**
-   * Resolves the current view version for this connection and channel.
-   */
-  private async resolveViewVersion(
-    handler: SyncHandler,
-    ctx: SyncContext,
-  ): Promise<string | null> {
-    if (!handler.config.viewVersion) return null;
-
-    const value = await handler.config.viewVersion(ctx);
-    return value == null ? null : String(value);
-  }
-
-  /**
-   * Runs a handler broadcast topic callback and normalizes failures to an empty audience.
-   *
-   * Returning `[]` on errors is important because leaking data to every
-   * subscriber would be worse than dropping one broadcast.
-   */
-  private async resolveBroadcastTopics(
+  private async topics(
     handler: SyncHandler | undefined,
     ctx: SyncContext,
-    action: "create" | "update" | "delete",
-    data: any,
-  ) {
-    if (!handler || handler.config.broadcast === "none") return [];
-    if (handler.config.broadcast === "public") return "all";
+    change: SyncChange,
+    routingRow?: unknown,
+  ): Promise<Iterable<string> | 'all'> {
+    if (!handler || handler.config.broadcast === 'none') return [];
+    if (handler.config.broadcast === 'public') return 'all';
     if (!handler.config.broadcastTopics) return [];
-
     try {
-      return await handler.config.broadcastTopics(ctx, action, data);
-    } catch (e) {
-      console.error("SyncBroker: error resolving broadcast topics:", e);
+      return await handler.config.broadcastTopics(ctx, change, routingRow);
+    } catch {
       return [];
     }
   }
-
-  /**
-   * Sends a protocol message only to subscribers with an allowed topic.
-   */
-  private sendToScopedSubscribers(
+  private deliver(
     channel: string,
-    message: string,
-    allowedTopics: string[] | "all",
+    encoded: string,
+    allowed: Iterable<string> | 'all',
   ) {
+    const allowedSet = allowed === 'all' ? null : new Set(allowed);
     for (const conn of this.connections) {
-      if (!conn.getSubscribedChannels().has(channel)) continue;
-
-      if (allowedTopics !== "all") {
-        const topics = conn.getTopics();
-        let hit = false;
-        for (const topic of allowedTopics) {
-          if (topics.has(topic)) {
-            hit = true;
-            break;
-          }
-        }
-        if (!hit) continue;
-      }
-
+      if (!this.active(conn)) continue;
+      if (
+        allowedSet &&
+        !conn.getConnectionAuth()?.topics.some((topic) => allowedSet.has(topic))
+      )
+        continue;
+      const pending = this.pendingSubscriptions.get(conn)?.get(channel);
       try {
-        conn.send(message);
+        if (pending) {
+          if (pending.messages.length >= MAX_BUFFERED_CHANGES) {
+            conn.close(1009, 'Subscription buffer limit exceeded');
+            this.removeConnection(conn);
+          } else pending.messages.push(encoded);
+        } else if (conn.getSubscribedChannels().has(channel))
+          conn.send(encoded);
       } catch {
-        this.connections.delete(conn);
+        this.removeConnection(conn);
       }
     }
   }
-
-  /**
-   * Sends a message to every subscriber on a channel without topic filtering.
-   */
-  private sendToSubscribers(channel: string, message: string) {
-    for (const conn of this.connections) {
-      if (!conn.getSubscribedChannels().has(channel)) continue;
-
-      try {
-        conn.send(message);
-      } catch {
-        this.connections.delete(conn);
-      }
-    }
-  }
-
-  /**
-   * Notifies subscribers that a channel changed and should be resynced.
-   *
-   * This is used when external server code knows data changed but does not have
-   * row-level change payloads to publish.
-   */
-  public async handleExternalChannelChange(channel: string) {
-    const changeMsg = JSON.stringify({
-      type: "channel-change",
-      channel,
-    });
-
-    this.sendToSubscribers(channel, changeMsg);
-  }
-
-  /**
-   * Notifies subscribers that their local copy of a channel is no longer
-   * trustworthy and must be replaced with a full snapshot.
-   */
-  public async handleExternalChannelReset(
-    channel: string,
-    topics: string[] | "all" = "all",
+  private async broadcast(
+    event: PublishChange & { mutationId?: string },
+    handler: SyncHandler | undefined,
+    ctx: SyncContext,
+    routingRow?: unknown,
   ) {
-    const resetMsg = JSON.stringify({
-      type: "channel-reset",
-      channel,
-    });
-
-    this.sendToScopedSubscribers(channel, resetMsg, topics);
+    const allowed = await this.topics(handler, ctx, event.change, routingRow);
+    const message: SyncServerMessage = {
+      type: 'change',
+      channel: event.channel,
+      change: event.change,
+      cursor: event.cursor,
+      revision: event.revision,
+      ...(event.mutationId ? { mutationId: event.mutationId } : {}),
+      v: SYNC_PROTOCOL_VERSION,
+    };
+    this.deliver(event.channel, JSON.stringify(message), allowed);
   }
 
-  /** Sends several channel resets without requiring one internal request per channel. */
-  public async handleExternalChannelResetBatch(
-    resets: Array<{
-      channel: string;
-      topics?: string[] | "all";
-    }>,
-  ) {
-    for (const reset of resets) {
-      await this.handleExternalChannelReset(reset.channel, reset.topics ?? "all");
-    }
-  }
-
-  /**
-   * Broadcasts one server-originated row change to topic-matched subscribers.
-   *
-   * Called by `publishEvent` in production and by the dev broker during Vite
-   * development.
-   */
-  public async handleExternalChange(
-    channel: string,
-    action: "create" | "update" | "delete",
-    key: string | undefined,
-    data: any,
+  async handleExternalChange(
+    event: PublishChange,
     platform: SyncPlatform = { env: {} },
     request?: Request,
   ) {
-    const changeMsg = JSON.stringify({
-      type: "change",
-      channel,
-      action,
-      key,
-      data,
-    });
-
-    const ctx = this.createExternalContext(platform, request);
-    const handler = this.findExternalHandler(channel, platform, request);
-    const allowedTopics = await this.resolveBroadcastTopics(
+    const handler = this.findExternalHandler(event.channel);
+    await this.broadcast(
+      event,
       handler,
-      ctx,
-      action,
-      data,
+      this.externalContext(platform, request),
+      event.routingRow,
     );
-
-    this.sendToScopedSubscribers(channel, changeMsg, allowedTopics);
   }
-
-  /**
-   * Broadcasts a batch of server-originated row changes.
-   *
-   * If the handler broadcasts scoped row payloads, each row is routed
-   * independently to avoid leaking one row to users who should only receive
-   * another row in the batch.
-   */
-  public async handleExternalBatchChange(
-    channel: string,
-    changes: Array<{
-      action: "create" | "update" | "delete";
-      key?: string;
-      data?: any;
-    }>,
+  async handleExternalChanges(
+    events: PublishChange[],
     platform: SyncPlatform = { env: {} },
     request?: Request,
   ) {
-    const ctx = this.createExternalContext(platform, request);
-    const handler = this.findExternalHandler(channel, platform, request);
-
-    if (handler?.config.broadcast === "public") {
-      const batchMsg = JSON.stringify({
-        type: "batch",
-        channel,
-        changes,
-      });
-      this.sendToScopedSubscribers(channel, batchMsg, "all");
-      return;
+    const context = this.externalContext(platform, request);
+    for (const event of events) {
+      const handler = this.findExternalHandler(event.channel);
+      await this.broadcast(event, handler, context, event.routingRow);
     }
-
-    // Resolve each change independently. A batch can contain rows with
-    // different audiences, and unioning those audiences would leak data.
-    for (const change of changes) {
-      const changeMsg = JSON.stringify({
-        type: "change",
-        channel,
-        action: change.action,
-        key: change.key,
-        data: change.data,
-      });
-
-      const allowedTopics = await this.resolveBroadcastTopics(
-        handler,
-        ctx,
-        change.action,
-        change.data,
-      );
-
-      this.sendToScopedSubscribers(channel, changeMsg, allowedTopics);
-    }
+  }
+  async handleExternalChannelChange(
+    channel: string,
+    reset = false,
+    topics: Iterable<string> | 'all' = 'all',
+  ) {
+    const message = JSON.stringify({
+      type: reset ? 'channel-reset' : 'channel-change',
+      channel,
+      v: SYNC_PROTOCOL_VERSION,
+    });
+    this.deliver(channel, message, topics);
+    this.metrics?.({
+      name: 'reset',
+      count: 1,
+      operation: 'publish',
+      channel,
+      reason: reset ? 'visibility' : 'change',
+    });
   }
 }

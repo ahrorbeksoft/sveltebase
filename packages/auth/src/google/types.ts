@@ -3,14 +3,14 @@
  */
 export interface GoogleData {
   iss: string;
-  azp: string;
+  azp?: string;
   aud: string;
   sub: string;
-  email: string;
-  email_verified: boolean;
+  email?: string;
+  email_verified?: boolean;
   nonce?: string;
   nbf?: number;
-  name: string;
+  name?: string;
   picture?: string;
   given_name?: string;
   family_name?: string;
@@ -24,14 +24,7 @@ export interface GoogleData {
  */
 export interface CredentialResponse {
   credential?: string;
-  select_by?:
-    | 'auto'
-    | 'user'
-    | 'user_1tap'
-    | 'user_2tap'
-    | 'btn_confirm'
-    | 'btn_confirm_1tap'
-    | 'btn_confirm_2tap';
+  select_by?: string;
 }
 
 /**
@@ -121,7 +114,11 @@ export interface CodeClientConfig {
  * Non-OAuth popup or browser error from Google Identity Services.
  */
 export interface NonOAuthError {
-  type: 'popup_closed' | 'popup_blocked_by_browser' | 'unknown';
+  type:
+    | 'popup_closed'
+    | 'popup_failed_to_open'
+    | 'popup_blocked_by_browser'
+    | 'unknown';
 }
 
 /**
@@ -136,8 +133,10 @@ export interface GoogleLoginOptions {
   overrideScope?: boolean;
   ux_mode?: 'popup' | 'redirect';
   redirect_uri?: string;
-  onSuccess?: (response: any) => void;
-  onError?: (error: any) => void;
+  onSuccess?: (response: TokenResponse | CodeResponse) => void;
+  onError?: (
+    error: TokenResponse | CodeResponse | NonOAuthError | Error,
+  ) => void;
   onNonOAuthError?: (error: NonOAuthError) => void;
 }
 
@@ -157,32 +156,10 @@ export interface MomentNotification {
   isDisplayMoment: () => boolean;
   isDisplayed: () => boolean;
   isNotDisplayed: () => boolean;
-  getNotDisplayedReason: () =>
-    | 'browser_not_supported'
-    | 'unknown_reason'
-    | 'opt_out'
-    | 'user_cancel'
-    | 'suppressed_by_user'
-    | 'unregistered_origin'
-    | 'unknown_sharing_id'
-    | 'third_party_cookies_disabled'
-    | 'iss_missing'
-    | 'client_id_missing'
-    | 'credential_disabled'
-    | 'secure_context_required'
-    | 'hd_required';
+  getNotDisplayedReason: () => string;
   isSkippedMoment: () => boolean;
-  getSkippedReason: () =>
-    | 'auto_cancel'
-    | 'user_cancel'
-    | 'tap_outside'
-    | 'iss_missing';
+  getSkippedReason: () => string;
   isDismissedMoment: () => boolean;
-  getDismissedReason: () =>
-    | 'credential_returned'
-    | 'cancel_called'
-    | 'flow_restarted'
-    | 'user_cancel'
-    | 'tap_outside';
+  getDismissedReason: () => string;
   getMomentType: () => 'display' | 'skipped' | 'dismissed';
 }

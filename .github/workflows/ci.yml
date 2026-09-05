@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Release quality gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install the locked dependency graph
+        run: bun install --frozen-lockfile
+
+      - name: Install Chromium for browser and end-to-end tests
+        run: bunx playwright install --with-deps chromium
+
+      - name: Run release quality gates
+        run: bun run release:verify

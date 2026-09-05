@@ -1,300 +1,312 @@
-import { DurableObject } from "cloudflare:workers";
-import { deserializeConnectionAuth } from "./auth.js";
-import { SyncBroker, type ISyncConnection } from "./broker.js";
-import { INTERNAL_AUTH_HEADER } from "./handler.js";
-import type { SyncHandler, SyncPlatform } from "./index.js";
+import { DurableObject } from 'cloudflare:workers';
+import { parseServerMessage, SYNC_PROTOCOL_VERSION } from '../protocol.js';
+import {
+  deserializeConnectionAuth,
+  type SerializedConnectionAuth,
+} from './auth.js';
+import { SyncBroker, type ISyncConnection } from './broker.js';
+import { INTERNAL_AUTH_HEADER, type PublishChange } from './handler.js';
+import type {
+  SyncConnectionAuth,
+  SyncHandler,
+  SyncMetrics,
+  SyncPlatform,
+} from './index.js';
 
 type SyncEngineEnv = Record<string, unknown>;
+type SocketAttachment = {
+  version: 1;
+  auth: SerializedConnectionAuth | null;
+  channels: string[];
+  url: string;
+};
+const object = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+const finite = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 
-/**
- * Cloudflare Durable Object implementation of a broker connection.
- *
- * It keeps websocket transport details plus the auth and identity forwarded by
- * the public worker before the connection reached the Durable Object.
- */
-class CloudflareSyncConnection implements ISyncConnection {
-  private ws: WebSocket;
-  private auth: any = null;
-  private identity: string | null = null;
-  private topics = new Set<string>();
-  private subscribedChannels = new Set<string>();
-  public readonly headers: Headers;
-  public readonly url: string;
-
-  /**
-   * Creates a connection wrapper around the accepted server websocket.
-   */
-  constructor(ws: WebSocket, request: Request) {
-    this.ws = ws;
-    this.headers = new Headers(request.headers);
-    this.url = request.url;
+class PersistentSet extends Set<string> {
+  constructor(
+    values: Iterable<string>,
+    private readonly changed: () => void,
+  ) {
+    super();
+    for (const value of values) Set.prototype.add.call(this, value);
   }
-
-  /** Sends one protocol message to the browser websocket. */
-  send(data: string) {
-    try {
-      this.ws.send(data);
-    } catch {
-      // Ignore sending to closed sockets
+  override add(value: string) {
+    const result = super.add(value);
+    this.changed();
+    return result;
+  }
+  override delete(value: string) {
+    const result = super.delete(value);
+    if (result) this.changed();
+    return result;
+  }
+  override clear() {
+    if (this.size) {
+      super.clear();
+      this.changed();
     }
-  }
-
-  /** Closes the browser websocket. */
-  close(code?: number, reason?: string) {
-    try {
-      this.ws.close(code, reason);
-    } catch {
-      // Ignore errors on close
-    }
-  }
-
-  /** Returns the auth object forwarded by the public worker. */
-  getAuth() {
-    return this.auth;
-  }
-
-  /** Updates the auth object stored on this live connection. */
-  setAuth(newAuth: any) {
-    this.auth = newAuth;
-  }
-
-  /** Returns the legacy identity for this connection. */
-  getIdentity() {
-    return this.identity;
-  }
-
-  /** Updates the legacy identity for this connection. */
-  setIdentity(identity: string | null) {
-    this.identity = identity;
-  }
-
-  /** Returns topics used for live broadcast routing. */
-  getTopics() {
-    return this.topics;
-  }
-
-  /** Replaces topics used for live broadcast routing. */
-  setTopics(topics: Iterable<string>) {
-    this.topics = new Set(topics);
-  }
-
-  /** Returns the mutable set of channels this connection subscribed to. */
-  getSubscribedChannels() {
-    return this.subscribedChannels;
   }
 }
 
-/**
- * Base Durable Object that owns the production sync broker.
- *
- * The exported `SyncEngine` class extends this and supplies the current handler
- * list. Cloudflare calls `fetch`, `webSocketMessage`, `webSocketClose`, and
- * `webSocketError` as Durable Object lifecycle entry points.
- */
+class CloudflareSyncConnection implements ISyncConnection {
+  private auth: SyncConnectionAuth | null;
+  private channels: PersistentSet;
+  readonly headers = new Headers();
+  readonly url: string;
+  constructor(
+    private readonly ws: WebSocket,
+    attachment: SocketAttachment,
+  ) {
+    this.auth = attachment.auth
+      ? {
+          subject: attachment.auth.subject,
+          user: attachment.auth.user,
+          claims: attachment.auth.claims,
+          topics: attachment.auth.topics,
+          expiresAt: attachment.auth.expiresAt,
+        }
+      : null;
+    this.url = attachment.url;
+    this.channels = new PersistentSet(attachment.channels, () =>
+      this.persist(),
+    );
+  }
+  private persist() {
+    const auth = this.auth;
+    const attachment: SocketAttachment = {
+      version: 1,
+      auth: auth
+        ? {
+            subject: auth.subject,
+            user: auth.user,
+            claims: auth.claims,
+            topics: auth.topics,
+            expiresAt: auth.expiresAt,
+          }
+        : null,
+      channels: [...this.channels],
+      url: this.url,
+    };
+    this.ws.serializeAttachment(attachment);
+  }
+  send(data: string) {
+    this.ws.send(data);
+  }
+  close(code?: number, reason?: string) {
+    this.ws.close(code, reason);
+  }
+  getConnectionAuth() {
+    return this.auth;
+  }
+  setConnectionAuth(auth: SyncConnectionAuth | null) {
+    this.auth = auth;
+    this.persist();
+  }
+  getSubscribedChannels() {
+    return this.channels;
+  }
+}
+
+function attachment(value: unknown): SocketAttachment | null {
+  if (
+    !object(value) ||
+    value.version !== 1 ||
+    typeof value.url !== 'string' ||
+    !Array.isArray(value.channels) ||
+    !value.channels.every((item) => typeof item === 'string')
+  )
+    return null;
+  const auth = value.auth === null ? null : value.auth;
+  if (
+    auth !== null &&
+    (!object(auth) ||
+      typeof auth.subject !== 'string' ||
+      !Array.isArray(auth.topics))
+  )
+    return null;
+  return value as SocketAttachment;
+}
+function publishEvent(value: unknown): PublishChange | null {
+  if (
+    !object(value) ||
+    typeof value.channel !== 'string' ||
+    !object(value.change) ||
+    !finite(value.cursor) ||
+    !finite(value.revision)
+  )
+    return null;
+  const event = value as unknown as PublishChange;
+  return parseServerMessage(
+    JSON.stringify({
+      type: 'change',
+      channel: event.channel,
+      change: event.change,
+      cursor: event.cursor,
+      revision: event.revision,
+      v: SYNC_PROTOCOL_VERSION,
+    }),
+  )
+    ? event
+    : null;
+}
+
 export class SyncEngineBase extends DurableObject<SyncEngineEnv> {
   protected broker: SyncBroker;
-  private connMap = new Map<WebSocket, CloudflareSyncConnection>();
-
-  /**
-   * Creates the broker for this Durable Object instance.
-   */
+  private connections = new Map<WebSocket, CloudflareSyncConnection>();
   constructor(
     ctx: DurableObjectState,
     env: SyncEngineEnv,
     handlers: SyncHandler[],
+    metrics?: SyncMetrics,
   ) {
     super(ctx, env);
-    this.broker = new SyncBroker(handlers);
+    this.broker = new SyncBroker(handlers, metrics);
+    for (const ws of ctx.getWebSockets()) {
+      const saved = attachment(ws.deserializeAttachment());
+      if (!saved) {
+        try {
+          ws.close(1008, 'Invalid socket state');
+        } catch {
+          /* already closed */
+        }
+        continue;
+      }
+      const conn = new CloudflareSyncConnection(ws, saved);
+      this.connections.set(ws, conn);
+      this.broker.registerConnection(conn);
+    }
   }
 
-  /**
-   * Handles internal requests forwarded by the public worker.
-   *
-   * `/websocket` accepts websocket upgrades. `/broadcast`, `/broadcast-batch`,
-   * and `/broadcast-change` are internal endpoints used by publish helpers.
-   */
   async fetch(request: Request) {
     const url = new URL(request.url);
-
-    if (url.pathname === "/websocket") {
+    if (url.pathname === '/internal/websocket')
       return this.connectWebSocket(request);
-    }
-
-    if (url.pathname === "/broadcast" && request.method === "POST") {
-      try {
-        const body = (await request.json()) as any;
-        const { channel, action, key, data } = body;
-        await this.broker.handleExternalChange(
-          channel,
-          action,
-          key,
-          data,
-          { env: this.env as Record<string, unknown> },
+    if (
+      request.method !== 'POST' ||
+      request.headers.get('content-type')?.split(';', 1)[0]?.trim() !==
+        'application/json'
+    )
+      return new Response('Not found', { status: 404 });
+    try {
+      const body: unknown = await request.json();
+      const runtime: SyncPlatform = {
+        env: this.env as Record<string, unknown>,
+      };
+      if (url.pathname === '/internal/change') {
+        const event = publishEvent(body);
+        if (!event) return new Response('Invalid event', { status: 400 });
+        await this.broker.handleExternalChange(event, runtime, request);
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname === '/internal/changes') {
+        if (
+          !object(body) ||
+          !Array.isArray(body.events) ||
+          body.events.length < 1 ||
+          body.events.length > 1_000
+        )
+          return new Response('Invalid events', { status: 400 });
+        const events = body.events.map(publishEvent);
+        if (events.some((event) => !event))
+          return new Response('Invalid events', { status: 400 });
+        await this.broker.handleExternalChanges(
+          events as PublishChange[],
+          runtime,
           request,
         );
         return new Response(null, { status: 204 });
-      } catch (err: any) {
-        return new Response(err.message || "Error processing broadcast", {
-          status: 400,
-        });
       }
-    }
-
-    if (url.pathname === "/broadcast-batch" && request.method === "POST") {
-      try {
-        const body = (await request.json()) as any;
-        const { channel, changes } = body;
-        await this.broker.handleExternalBatchChange(
-          channel,
-          changes,
-          { env: this.env as Record<string, unknown> },
-          request,
+      if (url.pathname === '/internal/resync') {
+        if (
+          !object(body) ||
+          typeof body.channel !== 'string' ||
+          !body.channel ||
+          body.channel.length > 256 ||
+          typeof body.reset !== 'boolean' ||
+          !(
+            body.topics === 'all' ||
+            (Array.isArray(body.topics) &&
+              body.topics.length <= 256 &&
+              body.topics.every(
+                (topic) =>
+                  typeof topic === 'string' &&
+                  topic.length > 0 &&
+                  topic.length <= 256,
+              ))
+          )
+        )
+          return new Response('Invalid resync', { status: 400 });
+        await this.broker.handleExternalChannelChange(
+          body.channel,
+          body.reset,
+          body.topics as string[] | 'all',
         );
         return new Response(null, { status: 204 });
-      } catch (err: any) {
-        return new Response(err.message || "Error processing batch broadcast", {
-          status: 400,
-        });
       }
-    }
-
-    if (url.pathname === "/broadcast-change" && request.method === "POST") {
-      try {
-        const body = (await request.json()) as any;
-        const { channel } = body;
-        await this.broker.handleExternalChannelChange(String(channel));
+      if (url.pathname === '/internal/revoke') {
+        if (
+          !object(body) ||
+          typeof body.subject !== 'string' ||
+          !body.subject ||
+          body.subject.length > 256
+        )
+          return new Response('Invalid subject', { status: 400 });
+        this.broker.revokeSubject(body.subject);
         return new Response(null, { status: 204 });
-      } catch (err: any) {
-        return new Response(err.message || "Error processing change broadcast", {
-          status: 400,
-        });
       }
+    } catch {
+      return new Response('Invalid request', { status: 400 });
     }
-
-    if (url.pathname === "/broadcast-reset" && request.method === "POST") {
-      try {
-        const body = (await request.json()) as any;
-        const { channel, topics } = body;
-        await this.broker.handleExternalChannelReset(
-          String(channel),
-          Array.isArray(topics) ? topics.map(String) : "all",
-        );
-        return new Response(null, { status: 204 });
-      } catch (err: any) {
-        return new Response(err.message || "Error processing reset broadcast", {
-          status: 400,
-        });
-      }
-    }
-
-    if (url.pathname === "/broadcast-reset-batch" && request.method === "POST") {
-      try {
-        const body = (await request.json()) as any;
-        const resets = Array.isArray(body.resets) ? body.resets : [];
-        await this.broker.handleExternalChannelResetBatch(
-          resets.map((reset: any) => ({
-            channel: String(reset.channel),
-            topics: Array.isArray(reset.topics)
-              ? reset.topics.map(String)
-              : "all",
-          })),
-        );
-        return new Response(null, { status: 204 });
-      } catch (err: any) {
-        return new Response(err.message || "Error processing reset batch", {
-          status: 400,
-        });
-      }
-    }
-
-    return new Response("Not found", { status: 404 });
+    return new Response('Not found', { status: 404 });
   }
 
-  /**
-   * Accepts a websocket upgrade and registers it with the broker.
-   *
-   * Forwarded auth is decoded from the internal header and stored on the
-   * connection before subscriptions or mutations can arrive.
-   */
   private connectWebSocket(request: Request) {
-    if (request.headers.get("Upgrade") !== "websocket") {
-      return new Response("Expected Upgrade: websocket", { status: 426 });
-    }
-
+    if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket')
+      return new Response('Expected Upgrade: websocket', { status: 426 });
+    const authValue = request.headers.get(INTERNAL_AUTH_HEADER);
+    const auth = deserializeConnectionAuth(authValue);
     const [client, server] = Object.values(new WebSocketPair());
-
+    const saved: SocketAttachment = {
+      version: 1,
+      auth,
+      channels: [],
+      url: request.url,
+    };
+    server.serializeAttachment(saved);
     this.ctx.acceptWebSocket(server);
-
-    const conn = new CloudflareSyncConnection(server, request);
-
-    const forwardedAuth = deserializeConnectionAuth(
-      request.headers.get(INTERNAL_AUTH_HEADER),
-    );
-    if (forwardedAuth) {
-      conn.setAuth(forwardedAuth.auth);
-      conn.setIdentity(forwardedAuth.identity);
-      conn.setTopics(forwardedAuth.topics ?? []);
-    }
-
-    this.connMap.set(server, conn);
+    const conn = new CloudflareSyncConnection(server, saved);
+    this.connections.set(server, conn);
     this.broker.registerConnection(conn);
-
-    return new Response(null, {
-      status: 101,
-      webSocket: client,
-    });
+    return new Response(null, { status: 101, webSocket: client });
   }
 
-  /**
-   * Durable Object websocket message entry point.
-   *
-   * Rebuilds a Request and platform object, then delegates protocol handling to
-   * the broker.
-   */
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-    const conn = this.connMap.get(ws);
-    if (!conn) return;
-
-    if (typeof message !== "string") return;
-
-    const request = new Request(conn.url, {
-      headers: conn.headers,
-    });
-    const platform: SyncPlatform = {
-      env: this.env as Record<string, unknown>,
-    };
+    const conn = this.connections.get(ws);
+    if (!conn || typeof message !== 'string') return;
     await this.broker.handleMessage(
       conn,
       message,
-      platform,
-      request,
+      { env: this.env as Record<string, unknown> },
+      new Request(conn.url),
     );
   }
-
-  /**
-   * Durable Object websocket close entry point.
-   */
   webSocketClose(ws: WebSocket, code: number, reason: string) {
-    const conn = this.connMap.get(ws);
-    if (conn) {
-      this.broker.removeConnection(conn);
-      this.connMap.delete(ws);
-    }
+    this.remove(ws);
     try {
       ws.close(code, reason);
     } catch {
-      // Ignore
+      /* closed */
     }
   }
-
-  /**
-   * Durable Object websocket error entry point.
-   */
   webSocketError(ws: WebSocket) {
-    const conn = this.connMap.get(ws);
-    if (conn) {
-      this.broker.removeConnection(conn);
-      this.connMap.delete(ws);
-    }
+    this.remove(ws);
+  }
+  private remove(ws: WebSocket) {
+    const conn = this.connections.get(ws);
+    if (conn) this.broker.removeConnection(conn);
+    this.connections.delete(ws);
   }
 }

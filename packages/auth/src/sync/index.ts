@@ -1,55 +1,41 @@
-import {
-  getVerifiedSessionFromRequest,
-  mergeSessionUser,
-} from "../index.js";
-import type { SyncPlatform } from "@sveltebase/sync";
+import { getSessionPayloadFromRequest } from '../index.js';
 
-/**
- * Creates a sync websocket auth resolver backed by the signed session cookie.
- *
- * Returns the **merged** profile + claims object so handlers can read claims
- * like `activeRoleId` on `ctx.auth.user` without a separate claims field.
- *
- * The returned function can be passed to `syncDevPlugin`, `syncEngineRoute`, or
- * `createSyncAppWorker`. It marks unauthenticated websockets as forbidden and
- * uses `user.id` as the default identity.
- */
+export type AuthSyncPlatform = { env: Record<string, unknown> };
+
+/** Cookie resolver for sync adapters. Identity always comes from the signed subject. */
 export function sessionCookieAuth<
   User extends { id: string },
   Claims extends Record<string, unknown> = Record<string, never>,
->(options?: {
-  secret?: string | ((platform: SyncPlatform) => string | undefined);
-  secretBinding?: string;
-  cookieName?: string;
-  identity?: (
-    user: User & Claims,
-  ) => string | number | bigint | null | undefined;
-}) {
-  const resolver = async (request: Request, platform: SyncPlatform) => {
-    const secretBinding = options?.secretBinding ?? "JWT_SECRET";
+>(
+  options: {
+    secret?: string | ((platform: AuthSyncPlatform) => string | undefined);
+    secretBinding?: string;
+    cookieName?: string;
+  } = {},
+) {
+  const resolver = async (request: Request, platform: AuthSyncPlatform) => {
+    const binding = options.secretBinding ?? 'JWT_SECRET';
     const secret =
-      typeof options?.secret === "function"
+      typeof options.secret === 'function'
         ? options.secret(platform)
-        : (options?.secret ?? platform.env[secretBinding]);
-    if (!secret) {
-      throw new Error(`Missing ${secretBinding} binding for sync auth`);
+        : (options.secret ?? platform.env[binding]);
+    if (typeof secret !== 'string' || secret.length === 0) {
+      throw new Error(`Missing or invalid ${binding} binding for sync auth`);
     }
-
-    const session = await getVerifiedSessionFromRequest<User, Claims>(
+    const session = await getSessionPayloadFromRequest<User, Claims>(
       request,
-      String(secret),
-      options?.cookieName,
+      secret,
+      options.cookieName,
     );
-
     if (!session) return null;
-
-    return mergeSessionUser(session.user, session.claims);
+    return {
+      subject: session.subject,
+      user: session.user,
+      claims: session.claims,
+      expiresAt: session.exp * 1000,
+    };
   };
-
-  return Object.assign(resolver, {
-    allowUnauthenticated: false,
-    identity:
-      options?.identity ??
-      ((user: User & Claims) => user.id),
-  });
+  return Object.assign(resolver, { allowUnauthenticated: false as const });
 }
+
+export type { AuthSyncAdapter } from '../client/auth.svelte.js';

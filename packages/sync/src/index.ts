@@ -1,43 +1,25 @@
-export { SyncClient, createLiveQuery, createSyncClient } from "./client/index.js";
-export { SerializableError } from "./errors.js";
+export {
+  SerializableError,
+  createErrorCodec,
+  serializeSyncError,
+} from './errors.js';
 export type {
-  DynamicSyncClient,
-  DynamicSyncClientOptions,
-  DynamicSyncContextInput,
-  LiveQueryState,
-  MaybeGetter,
-} from "./client/index.js";
-export type {
+  ErrorCodec,
   SerializableErrorConstructor,
   SyncErrorInput,
   SyncErrorPayload,
-} from "./errors.js";
+} from './errors.js';
 export {
-  createBulkPublisher,
-  createPublishChangeEvent,
-  createPublishResetEvent,
-  createPublisher,
-  defineSync,
-  publishBulkEvent,
-  publishChangeEvent,
-  publishEvent,
-  publishResetEvent,
-  publishResetEvents,
-} from "./server/index.js";
+  parseClientMessage,
+  parseServerMessage,
+  parseSyncMessage,
+  SYNC_PROTOCOL_LIMITS,
+  SYNC_PROTOCOL_VERSION,
+} from './protocol.js';
 export type {
-  BulkPublishFn,
-  PublishChangeEventFn,
-  PublishBulkEventFn,
-  PublishEventData,
-  PublishEventFn,
-  PublishFn,
-  PublishResetEventFn,
-  ResolveTopics,
-  SyncAuthResult,
-  SyncConnectionAuth,
-  SyncContext,
-  SyncHandler,
-  SyncHandlerConfig,
-  SyncPlatform,
-} from "./server/index.js";
-export type { SyncMessage } from "./protocol.js";
+  SyncChange,
+  SyncClientMessage,
+  SyncMessage,
+  SyncServerMessage,
+  SyncSubscription,
+} from './protocol.js';

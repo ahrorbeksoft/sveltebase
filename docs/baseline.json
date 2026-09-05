@@ -1,0 +1,259 @@
+{
+  "recorded": "2026-09-05",
+  "node": "24.20.0",
+  "bun": "1.1.26",
+  "initial_worktree": {
+    "modified": [
+      "apps/web/package.json",
+      "package.json",
+      "packages/auth/package.json",
+      "packages/i18n/package.json",
+      "packages/state/package.json",
+      "packages/sync/package.json",
+      "packages/utils/package.json"
+    ],
+    "untracked": ["PLAN.md", "continue.md"]
+  },
+  "baseline_checks": {
+    "build": {
+      "exitCode": 127,
+      "reason": "Dependencies not installed: svelte-package command not found"
+    },
+    "check": {
+      "exitCode": 127,
+      "reason": "Dependencies not installed: svelte-package command not found"
+    },
+    "lint": {
+      "exitCode": 127,
+      "reason": "Dependencies not installed: svelte-package command not found"
+    }
+  },
+  "packages": {
+    "package.json": {
+      "name": "sveltebase-workspace",
+      "version": "2.0.1",
+      "devDependencies": {
+        "@cloudflare/workers-types": "^4.20260617.1",
+        "@sveltejs/package": "^2.5.7",
+        "@sveltejs/vite-plugin-svelte": "^7.1.2",
+        "@types/node": "^25.9.3",
+        "@types/ws": "^8.18.1",
+        "publint": "^0.3.18",
+        "svelte": "^5.55.9",
+        "svelte-check": "^4.4.8",
+        "tsup": "^8.5.1",
+        "typescript": "^6.0.2",
+        "vite": "^8.0.8",
+        "wrangler": "^4.101.0",
+        "zod": "^4.4.3"
+      },
+      "scripts": {
+        "build": "bun run ./scripts/run-workspace-script.mjs build",
+        "check": "bun run build && bun run ./scripts/run-workspace-script.mjs check",
+        "lint": "bun run build && bun run ./scripts/run-workspace-script.mjs lint",
+        "clean": "bun run ./scripts/run-workspace-script.mjs clean",
+        "dev:web": "bun run --filter @sveltebase/web dev",
+        "build:web": "bun run --filter @sveltebase/web build",
+        "check:web": "bun run --filter @sveltebase/web check",
+        "release:version": "bun run ./scripts/version.mjs",
+        "release:publish": "bun run build && bun run ./scripts/publish.mjs",
+        "release": "bun run ./scripts/publish-all.mjs"
+      }
+    },
+    "packages/auth/package.json": {
+      "name": "@sveltebase/auth",
+      "version": "2.0.1",
+      "exports": {
+        ".": {
+          "types": "./dist/index.d.ts",
+          "svelte": "./dist/index.js",
+          "default": "./dist/index.js"
+        },
+        "./client": {
+          "types": "./dist/client/index.d.ts",
+          "svelte": "./dist/client/index.js",
+          "default": "./dist/client/index.js"
+        },
+        "./server": {
+          "types": "./dist/server/index.d.ts",
+          "default": "./dist/server/index.js"
+        },
+        "./sveltekit": {
+          "types": "./dist/sveltekit/index.d.ts",
+          "default": "./dist/sveltekit/index.js"
+        },
+        "./sync": {
+          "types": "./dist/sync/index.d.ts",
+          "default": "./dist/sync/index.js"
+        },
+        "./google": {
+          "types": "./dist/google/index.d.ts",
+          "svelte": "./dist/google/index.js",
+          "default": "./dist/google/index.js"
+        },
+        "./telegram": {
+          "types": "./dist/telegram/index.d.ts",
+          "default": "./dist/telegram/index.js"
+        }
+      },
+      "peerDependencies": {
+        "svelte": "^5.0.0",
+        "@sveltejs/kit": "^2.0.0",
+        "@sveltebase/sync": "2.0.1"
+      },
+      "devDependencies": {
+        "@types/google.accounts": "^0.0.14"
+      },
+      "scripts": {
+        "build": "svelte-package --input ./src --output ./dist --tsconfig ./tsconfig.package.json",
+        "check": "tsc --project tsconfig.json --noEmit",
+        "clean": "rm -rf dist"
+      }
+    },
+    "packages/utils/package.json": {
+      "name": "@sveltebase/utils",
+      "version": "2.0.1",
+      "exports": {
+        ".": {
+          "types": "./dist/index.d.ts",
+          "svelte": "./dist/index.js",
+          "default": "./dist/index.js"
+        }
+      },
+      "dependencies": {
+        "esm-env": "^1.2.2"
+      },
+      "peerDependencies": {
+        "svelte": "^5.0.0",
+        "svelte-sonner": "^1.1.1"
+      },
+      "devDependencies": {
+        "svelte-sonner": "^1.1.1"
+      },
+      "scripts": {
+        "build": "svelte-package --input ./src --output ./dist",
+        "check": "tsc --project tsconfig.json --noEmit",
+        "lint": "bun run build && publint --strict --pack npm",
+        "clean": "rm -rf dist"
+      }
+    },
+    "packages/state/package.json": {
+      "name": "@sveltebase/state",
+      "version": "2.0.1",
+      "exports": {
+        ".": {
+          "types": "./dist/index.d.ts",
+          "svelte": "./dist/index.js",
+          "default": "./dist/index.js"
+        }
+      },
+      "dependencies": {
+        "@sveltebase/utils": "2.0.1"
+      },
+      "peerDependencies": {
+        "svelte": "^5.0.0"
+      },
+      "scripts": {
+        "build": "svelte-package --input ./src --output ./dist --tsconfig ./tsconfig.package.json",
+        "check": "tsc --project tsconfig.json --noEmit",
+        "lint": "bun run build && publint --strict --pack npm",
+        "clean": "rm -rf dist"
+      }
+    },
+    "packages/sync/package.json": {
+      "name": "@sveltebase/sync",
+      "version": "2.0.1",
+      "exports": {
+        ".": {
+          "types": "./dist/index.d.ts",
+          "svelte": "./dist/index.js",
+          "default": "./dist/index.js"
+        },
+        "./client": {
+          "types": "./dist/client/index.d.ts",
+          "svelte": "./dist/client/index.js",
+          "default": "./dist/client/index.js"
+        },
+        "./server": {
+          "types": "./dist/server/index.d.ts",
+          "default": "./dist/server/index.js"
+        },
+        "./server/dev-engine": {
+          "types": "./dist/server/dev-engine.d.ts",
+          "default": "./dist/server/dev-engine.js"
+        },
+        "./sveltekit": {
+          "types": "./dist/sveltekit/index.d.ts",
+          "default": "./dist/sveltekit/index.js"
+        },
+        "./cloudflare": {
+          "types": "./dist/cloudflare/index.d.ts",
+          "default": "./dist/cloudflare/index.js"
+        },
+        "./vite": {
+          "types": "./dist/vite.d.ts",
+          "default": "./dist/vite.js"
+        }
+      },
+      "dependencies": {
+        "dexie": "^4.0.8",
+        "ws": "^8.18.3"
+      },
+      "peerDependencies": {
+        "svelte": "^5.0.0",
+        "@sveltejs/kit": "^2.0.0"
+      },
+      "scripts": {
+        "build": "svelte-package --input ./src --output ./dist",
+        "check": "tsc --project tsconfig.json --noEmit",
+        "clean": "rm -rf dist"
+      }
+    },
+    "packages/i18n/package.json": {
+      "name": "@sveltebase/i18n",
+      "version": "2.0.1",
+      "exports": {
+        ".": {
+          "types": "./dist/index.d.ts",
+          "default": "./dist/index.js"
+        }
+      },
+      "dependencies": {
+        "@sveltebase/state": "2.0.1",
+        "use-intl": "^4.9.1"
+      },
+      "peerDependencies": {
+        "svelte": "^5.0.0"
+      },
+      "scripts": {
+        "build": "tsup src/index.ts --format esm --dts --clean",
+        "check": "tsc --project tsconfig.json --noEmit",
+        "lint": "bun run build && publint --strict --pack npm",
+        "clean": "rm -rf dist"
+      }
+    },
+    "apps/web/package.json": {
+      "name": "@sveltebase/web",
+      "version": "2.0.1",
+      "dependencies": {
+        "@sveltebase/i18n": "2.0.1",
+        "svelte": "^5.55.9"
+      },
+      "devDependencies": {
+        "@sveltejs/adapter-auto": "^7.0.1",
+        "@sveltejs/kit": "^2.60.1",
+        "@sveltejs/vite-plugin-svelte": "^7.1.2",
+        "svelte-check": "^4.4.8",
+        "typescript": "^6.0.2",
+        "vite": "^8.0.8"
+      },
+      "scripts": {
+        "dev": "vite dev",
+        "build": "vite build",
+        "preview": "vite preview",
+        "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+        "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+      }
+    }
+  }
+}

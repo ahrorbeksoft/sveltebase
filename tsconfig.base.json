@@ -5,35 +5,20 @@
     "moduleResolution": "Bundler",
     "baseUrl": ".",
     "paths": {
-      "@sveltebase/utils": [
-        "packages/utils/src/index.ts"
+      "@sveltebase/utils": ["packages/utils/src/index.ts"],
+      "@sveltebase/utils/cookies": ["packages/utils/src/cookies.ts"],
+      "@sveltebase/utils/notifications": [
+        "packages/utils/src/notifications.ts"
       ],
-      "@sveltebase/state": [
-        "packages/state/src/index.ts"
-      ],
-      "@sveltebase/i18n": [
-        "packages/i18n/src/index.ts"
-      ],
-      "@sveltebase/sync": [
-        "packages/sync/src/index.ts"
-      ],
-      "@sveltebase/sync/server": [
-        "packages/sync/src/server/index.ts"
-      ],
-      "@sveltebase/sync/sveltekit": [
-        "packages/sync/src/sveltekit/index.ts"
-      ],
-      "@sveltebase/sync/cloudflare": [
-        "packages/sync/src/cloudflare/index.ts"
-      ],
-      "@sveltebase/instant": [
-        "packages/instant/src/index.ts"
-      ]
+      "@sveltebase/utils/async": ["packages/utils/src/async.svelte.ts"],
+      "@sveltebase/state": ["packages/state/src/index.ts"],
+      "@sveltebase/i18n": ["packages/i18n/src/index.ts"],
+      "@sveltebase/sync": ["packages/sync/src/index.ts"],
+      "@sveltebase/sync/server": ["packages/sync/src/server/index.ts"],
+      "@sveltebase/sync/sveltekit": ["packages/sync/src/sveltekit/index.ts"],
+      "@sveltebase/sync/cloudflare": ["packages/sync/src/cloudflare/index.ts"]
     },
-    "lib": [
-      "ES2022",
-      "DOM"
-    ],
+    "lib": ["ES2022", "DOM"],
     "strict": true,
     "declaration": true,
     "declarationMap": true,
@@ -43,6 +28,8 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "ignoreDeprecations": "6.0"
+    "ignoreDeprecations": "6.0",
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
   }
 }

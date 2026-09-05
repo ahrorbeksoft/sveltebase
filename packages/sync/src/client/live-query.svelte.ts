@@ -1,9 +1,10 @@
-import { liveQuery } from "dexie";
+import { liveQuery } from 'dexie';
 
 export type LiveQueryState<T> = {
   data?: T;
   isLoading: boolean;
-  error?: any;
+  error?: unknown;
+  dispose(): void;
 };
 
 /**
@@ -29,28 +30,31 @@ export function createLiveQuery<T>(
     data: undefined,
     isLoading: true,
     error: undefined,
+    dispose: () => {},
   });
 
-  $effect(() => {
-    dependencies?.();
+  const dispose = $effect.root(() => {
+    $effect(() => {
+      dependencies?.();
+      query.data = undefined;
+      query.error = undefined;
+      query.isLoading = true;
 
-    return liveQuery(querier).subscribe(
-      (value) => {
-        query.error = undefined;
-
-        if (value !== undefined) {
+      const subscription = liveQuery(querier).subscribe(
+        (value) => {
           query.data = value;
+          query.error = undefined;
           query.isLoading = false;
-        } else {
-          query.isLoading = true;
-        }
-      },
-      (error) => {
-        query.error = error;
-        query.isLoading = false;
-      },
-    ).unsubscribe;
+        },
+        (error) => {
+          query.error = error;
+          query.isLoading = false;
+        },
+      );
+      return () => subscription.unsubscribe();
+    });
   });
+  query.dispose = dispose;
 
   return query;
 }

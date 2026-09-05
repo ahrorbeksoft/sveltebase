@@ -1,0 +1,49 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignore": ["**/dist/**"],
+  "ignoreDependencies": ["cloudflare"],
+  "ignoreIssues": {
+    "packages/auth/package.json": ["optionalPeerDependencies"],
+    "packages/sync/package.json": ["optionalPeerDependencies"]
+  },
+  "workspaces": {
+    ".": {
+      "sveltekit": false,
+      "entry": ["scripts/*.mjs", "*.config.{ts,js}", "tests/**/*.ts"],
+      "project": [
+        "scripts/**/*.{mjs,ts}",
+        "*.config.{ts,js}",
+        "tests/**/*.{ts,svelte}"
+      ]
+    },
+    "packages/auth": {
+      "svelte": true,
+      "entry": ["src/**/index.ts", "tests/**/*.{ts,svelte}"],
+      "project": ["src/**/*.{ts,svelte}", "tests/**/*.{ts,svelte}"]
+    },
+    "packages/sync": {
+      "svelte": true,
+      "entry": ["src/**/index.ts", "*.test.ts", "tests/**/*.ts"],
+      "project": ["src/**/*.{ts,svelte}", "*.test.ts", "tests/**/*.ts"]
+    },
+    "packages/state": {
+      "svelte": true,
+      "entry": ["*.test.ts", "type-tests/**/*.ts"],
+      "project": ["src/**/*.{ts,svelte}", "*.test.ts", "type-tests/**/*.ts"]
+    },
+    "packages/utils": {
+      "svelte": true,
+      "entry": ["*.test.ts", "type-tests/**/*.ts"],
+      "project": ["src/**/*.{ts,svelte}", "*.test.ts", "type-tests/**/*.ts"]
+    },
+    "packages/i18n": {
+      "svelte": true,
+      "entry": ["src/index.ts", "*.test.ts", "typecheck.ts"],
+      "project": ["src/**/*.{ts,svelte}", "*.test.ts"]
+    },
+    "apps/web": {
+      "entry": ["src/routes/**/*.{svelte,ts}"],
+      "project": ["src/**/*.{svelte,ts}"]
+    }
+  }
+}

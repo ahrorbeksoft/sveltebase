@@ -15,7 +15,7 @@ export type SyncErrorInput = SyncErrorPayload | string;
  * Base class for errors that should preserve their code across sync requests.
  */
 export class SerializableError extends Error {
-  static readonly code: string = "SerializableError";
+  static readonly code: string = 'SerializableError';
   public readonly code: string;
 
   constructor(message: string, code?: string) {
@@ -40,8 +40,8 @@ export type ErrorCodec = {
   deserialize(error: SyncErrorInput): SerializableError;
 };
 
-const UNKNOWN_ERROR_CODE = "UnknownError";
-const UNKNOWN_ERROR_MESSAGE = "Unknown error";
+const UNKNOWN_ERROR_CODE = 'UnknownError';
+const UNKNOWN_ERROR_MESSAGE = 'Unknown error';
 
 /**
  * Converts a thrown value into the small payload understood by the sync wire
@@ -58,14 +58,12 @@ export function serializeSyncError(error: unknown): SyncErrorPayload {
 
   return {
     code: UNKNOWN_ERROR_CODE,
-    message: error instanceof Error && error.message
-      ? error.message
-      : UNKNOWN_ERROR_MESSAGE,
+    message: UNKNOWN_ERROR_MESSAGE,
   };
 }
 
 function normalizeError(error: SyncErrorInput): SyncErrorPayload {
-  if (typeof error === "string") {
+  if (typeof error === 'string') {
     return {
       code: UNKNOWN_ERROR_CODE,
       message: error,
@@ -73,12 +71,14 @@ function normalizeError(error: SyncErrorInput): SyncErrorPayload {
   }
 
   return {
-    code: typeof error?.code === "string" && error.code
-      ? error.code
-      : UNKNOWN_ERROR_CODE,
-    message: typeof error?.message === "string"
-      ? error.message
-      : UNKNOWN_ERROR_MESSAGE,
+    code:
+      typeof error?.code === 'string' && error.code
+        ? error.code
+        : UNKNOWN_ERROR_CODE,
+    message:
+      typeof error?.message === 'string'
+        ? error.message
+        : UNKNOWN_ERROR_MESSAGE,
   };
 }
 

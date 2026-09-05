@@ -1,7 +1,8 @@
 {
   "name": "@sveltebase/i18n",
-  "version": "1.7.11",
+  "version": "2.0.1",
   "type": "module",
+  "sideEffects": false,
   "publishConfig": {
     "access": "public"
   },
@@ -15,14 +16,17 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "default": "./dist/core.js"
     }
   },
   "dependencies": {
-    "@sveltebase/state": "1.7.11",
-    "use-intl": "^4.9.1"
+    "intl-messageformat": "11.2.0"
   },
   "peerDependencies": {
-    "svelte": "^5.0.0"
+    "svelte": ">=5.46.4 <6"
   },
   "repository": {
     "type": "git",
@@ -34,9 +38,13 @@
   },
   "homepage": "https://github.com/ahrorbeksoft/sveltebase/tree/main/packages/i18n",
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean",
+    "build": "tsup src/index.ts src/core.ts --format esm --dts --clean",
     "check": "tsc --project tsconfig.json --noEmit",
+    "test": "vitest run --config ../../vitest.config.ts packages/i18n",
     "lint": "bun run build && publint --strict --pack npm",
     "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "svelte": "5.57.0"
   }
 }

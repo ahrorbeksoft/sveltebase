@@ -5,8 +5,15 @@
  * `"connecting"`, `"connected"`, and `"disconnected"` without importing the
  * class directly.
  */
+export type SyncConnectionStatus =
+  'stopped' | 'connecting' | 'connected' | 'waiting';
+
 export class ConnectionStatus {
-  private _value = $state<"connecting" | "connected" | "disconnected">("connecting");
+  private _value = $state<SyncConnectionStatus>('stopped');
+
+  constructor(initial: SyncConnectionStatus = 'stopped') {
+    this._value = initial;
+  }
 
   /** Current websocket status. */
   get value() {
@@ -14,7 +21,7 @@ export class ConnectionStatus {
   }
 
   /** Updates the reactive websocket status. */
-  set value(newValue: "connecting" | "connected" | "disconnected") {
+  set value(newValue: SyncConnectionStatus) {
     this._value = newValue;
   }
 }

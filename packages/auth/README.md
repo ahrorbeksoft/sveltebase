@@ -1,331 +1,146 @@
 # @sveltebase/auth
 
-Session cookies, SvelteKit auth routes, reactive client state, and Google sign-in for Svelte 5 apps. Plays nicely with `@sveltebase/sync` for real-time session checks.
-
-## Install
-
-```bash
-bun add @sveltebase/auth
-```
-
-Peer deps: Svelte 5, SvelteKit. Install `@sveltebase/sync` if you use client verification or websocket auth.
-
-## How sessions work
-
-A session is an HMAC-SHA256 JWT stored in an HTTP-only cookie (`sf_session` by default). The payload separates **profile** from **claims**:
-
-```ts
-{
-  user: { id: "…", /* profile fields mirrored in verifyTable */ },
-  claims: { activeRoleId?: "…", /* session-only state */ },
-  exp?: number
-}
-```
-
-Claims are for things that are not columns on the user row (active role, tenant, etc.). Profile refresh preserves claims. Keep the signing secret private and stable — rotating it logs everyone out. The cookie is **signed, not encrypted**, so don’t put secrets in the snapshot.
+Signed cookie sessions, SvelteKit route adapters, a Svelte 5 client, and Google and Telegram verification. Auth has no database, IndexedDB, or sync dependency.
 
 ## Entry points
 
-| Import | What it’s for |
-| --- | --- |
-| `@sveltebase/auth` | JWT helpers, cookie parsing, shared errors |
-| `@sveltebase/auth/server` | `createServerAuth` |
-| `@sveltebase/auth/sveltekit` | Auth API routes (`login`, `refresh`, `claims`, `google`, `tma`) |
-| `@sveltebase/auth/client` | Reactive client auth (`user` + `claims`) |
-| `@sveltebase/auth/sync` | Websocket auth for sync (merges claims onto auth user) |
-| `@sveltebase/auth/google` | Google Identity Services UI + server verify |
-| `@sveltebase/auth/telegram` | Telegram Mini App `verifyInitData` + helpers |
+| Import                           | Purpose                                                                               |
+| -------------------------------- | ------------------------------------------------------------------------------------- |
+| `@sveltebase/auth`               | Neutral session types, JOSE-backed JWT helpers, request-cookie parsing, public errors |
+| `@sveltebase/auth/server`        | Cookie session lifecycle; no SvelteKit type dependency                                |
+| `@sveltebase/auth/sveltekit`     | Validated SvelteKit HTTP routes                                                       |
+| `@sveltebase/auth/client`        | Request/component-scoped reactive client                                              |
+| `@sveltebase/auth/sync`          | Optional typed adapter and signed-cookie sync resolver                                |
+| `@sveltebase/auth/google`        | Google Identity Services browser UI                                                   |
+| `@sveltebase/auth/google/server` | Neutral ID-token decoding and server verification                                     |
+| `@sveltebase/auth/telegram`      | Telegram Mini App verification and browser accessors                                  |
 
-## Server setup
+## Session model and expiration
 
 ```ts
-// src/lib/server/auth.ts
-import { createServerAuth } from "@sveltebase/auth/server";
-import type { User } from "$lib/types";
+type AuthSession<User, Claims> = {
+  subject: string;
+  user: User;
+  claims: Claims;
+};
+```
 
-type Claims = { activeRoleId?: string };
+`subject` is the trusted identity and always equals the signed `user.id`. Claims remain separate and can never overwrite identity. Cookies use a version-2 payload with required finite integer `iat` and `exp` fields; old session formats are deliberately invalid.
 
-export const auth = createServerAuth<User, Claims>({
-  secret: process.env.JWT_SECRET!
-  // cookieName: "sf_session",  // optional
-  // cookieOptions: { secure: false }  // for local HTTP
+```ts
+import { createServerAuth } from '@sveltebase/auth/server';
+
+const auth = createServerAuth<User, Claims>({
+  secret: env.JWT_SECRET,
+  cookieOptions: {
+    path: '/',
+    domain: '.example.com', // optional
+    secure: true,
+    httpOnly: true,
+    sameSite: 'lax',
+    maxAge: 60 * 60 * 24 * 30,
+  },
 });
 ```
 
-Defaults: cookie `sf_session`, `path: "/"`, `httpOnly: true`, `secure: true`, `sameSite: "lax"`.
+The default lifetime is 30 days. Per-call `maxAge` takes precedence over `expires`, and `maxAge: 0` expires immediately. An `expires`-only default disables the default `maxAge`. Refresh and claims updates preserve the existing JWT deadline unless given a new lifetime. Cookie path/domain are configuration-owned, so logout always deletes the same cookie login created.
 
-### Methods
+Valid signed-cookie verification does no source-database work. `getSession`, request helpers, client status reads, and reactive rerenders perform zero source reads and writes. Use the route `getUser` callback only when an authoritative profile/revocation check is needed.
 
-```ts
-await auth.login(cookies, user, { claims: { activeRoleId }, maxAge: 60 * 60 * 24 * 30 });
-const session = await auth.getSession(cookies); // { user, claims } | null
-const user = await auth.getUser(cookies);       // profile only
-await auth.setClaims(cookies, { activeRoleId: "…" });
-await auth.refresh(cookies, user);              // preserves claims
-auth.logout(cookies);
-```
-
-- **login** — signs profile + claims, writes the cookie, returns `{ user, claims }`
-- **getSession** / **getUser** / **getClaims** — verify the cookie
-- **setClaims** — update claims without reloading the profile
-- **refresh** — re-signs with a fresh profile; claims are preserved unless overridden
-- **logout** — deletes the cookie
+`getSessionPayloadFromRequest` returns the verified versioned payload, including its signed `exp`. Most application code should use `getSessionFromRequest`; transport adapters that must enforce the same deadline can convert `exp` from seconds to an `expiresAt` millisecond timestamp. `sessionCookieAuth` performs that conversion automatically.
 
 ## SvelteKit routes
 
-Mount auth actions at a dynamic route:
-
 ```ts
-// src/routes/api/auth/[auth]/+server.ts
-import { createAuthRoutes } from "@sveltebase/auth/sveltekit";
-import { auth } from "$lib/server/auth";
+import { createAuthRoutes } from '@sveltebase/auth/sveltekit';
 
 export const { GET, POST } = createAuthRoutes({
   auth,
-
-  login: async (credentials, event) => {
-    const user = await verifyCredentials(credentials, event);
-    if (!user) throw new Error("Invalid credentials");
-    return user;
+  login: async (untrustedBody, event) => authenticate(untrustedBody),
+  getUser: async (subject, event) => users.findById(subject),
+  setClaims: async (untrustedClaims, event, current) => {
+    // Validate allowed fields and authorize this subject's transition.
+    return claimsSchema.parse(untrustedClaims);
   },
-
-  getUser: async (userId) => findUserById(userId),
-
-  // optional Google login
-  google: {
-    clientId: env.GOOGLE_CLIENT_ID,
-    getUser: async (profile, event) => findOrCreateFromGoogle(profile)
-  }
 });
 ```
 
-| Action | Method | What it does |
-| --- | --- | --- |
-| `/login` | POST | Runs `login`, sets cookie, returns `{ user, claims }` |
-| `/logout` | POST | Clears cookie (204) |
-| `/refresh` | POST | Reloads **profile** via `getUser`; preserves claims |
-| `/claims` | POST | Updates claims (`setClaims` callback optional) |
-| `/google` | POST | Verifies Google ID token, runs `google.getUser` |
-| `/tma` | POST | Verifies Telegram initData, runs `tma.getUser` |
+Routes are `login`, `logout`, `refresh`, `claims`, `google`, and `tma`. Mutations require a same-origin `Origin` header. Add exact `trustedOrigins` for intentional cross-origin clients, or set `allowRequestsWithoutOrigin` for trusted non-browser callers. Routes with bodies require `application/json` and valid JSON.
 
-Login callbacks may return a plain profile or `{ user, claims }`.
+`/claims` returns 404 unless `setClaims` is configured. The package rejects arrays, primitives, non-JSON values, excessive nesting, and reserved identity/JWT fields before the callback. The callback owns the application field allowlist and authorization policy. Unexpected failures return a generic message; provide `logger.error` for server diagnostics. Extend `SerializableError` only for messages deliberately safe to return.
 
-Missing callbacks return 404 for that action. Request bodies are JSON (parse failures become `{}`).
+## Client lifecycle
 
-**Errors:** SvelteKit `HttpError` keeps its status; app `SerializableError` subclasses return `{ code, message }` with status 400; other errors are 500.
-
-## Client auth
+Create one client per browser/request component tree. Construction has no network or browser-storage side effects.
 
 ```ts
-// src/lib/auth.ts
-import { createAuth } from "@sveltebase/auth/client";
+import { createAuth } from '@sveltebase/auth/client';
 
-export const auth = createAuth<User, Claims>({
-  routesBase: "/api/auth",
-  verifyTable: "users", // optional: sync table for live verification
-  reconnect: "if-connected" // default — do not abort a first connect after login
+const auth = createAuth<User, Claims>({ routesBase: '/api/auth' });
+auth.init(
+  () => data.user,
+  () => data.claims,
+);
+
+await auth.login(credentials); // resolves after the HTTP session succeeds
+await auth.refresh(); // concurrent calls share one request
+await auth.setClaims({ role: 'admin' });
+await auth.logout(); // server failure is surfaced; state is retained
+await auth.logoutLocal(); // explicit offline choice; server cookie remains
+auth.dispose();
+```
+
+Readiness, authentication, refresh activity, and connectivity are separate: `isReady`, `isAuthenticated`, `isRefreshing`, and `connectivity`. Generation guards prevent stale login/refresh responses from restoring a logged-out session or replacing a newer account.
+
+### Optional sync integration
+
+Pass a small adapter; auth never imports the sync package or Dexie.
+
+```ts
+const auth = createAuth<User, Claims>({
+  sync: {
+    stop: () => sync.stop(),
+    start: () => sync.start(),
+    purgeAccount: (subject) => sync.purgeAccount(subject),
+    getConnectivity: () => sync.status,
+  },
 });
 ```
 
-Initialize from server load data in a root layout:
+HTTP login resolves independently of sync startup. Account transitions are serialized as stop, optional old-account purge, then start. Transport failure is reported through `onIntegrationError`; it does not invalidate the session. Purging is opt-in on logout because offline pending work may be valuable.
 
-```svelte
-<script lang="ts">
-  import { auth } from "$lib/auth";
+For a sync server, `sessionCookieAuth()` returns `{ subject, user, claims, expiresAt }` from the signed cookie. It never flattens claims onto the user and never derives identity from claims; `expiresAt` lets the broker retire a socket at the signed session deadline.
 
-  let { data } = $props();
-  auth.init(() => data.user, () => data.claims);
-  // Always attach the dynamic client (not only when .client exists):
-  auth.setClient(app.sync);
-</script>
+## Google and Telegram
+
+Import `verifyIdToken` from `@sveltebase/auth/google/server`. It verifies RS256, issuer, exact audience, required claim types, `iat`/`nbf`/`exp` boundaries, and an optional expected nonce. Google keys are cached according to `Cache-Control: max-age` and refreshed once when an unknown key id indicates rotation. `decodeCredentials` only decodes and must not be used for authentication.
+
+`GoogleLogin` and `GoogleOneTapLogin` are independent children of `GoogleOAuthProvider`; both cancel prompts during teardown. Use the current SDK fields such as `hd` and numeric button `width`.
+
+`verifyInitData` follows [Telegram's official two-stage HMAC derivation](https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app), uses a timing-safe comparison, rejects duplicate or malformed fields, and enforces non-negative finite `maxAgeSeconds` and `clockSkewSeconds`. Telegram's page specifies the algorithm but does not publish a complete bot-token/initData/expected-hash vector; the private regression suite records that provenance and checks a fixed vector independently produced with Node's `createHmac`.
+
+## Cost ledger
+
+| Operation                                         |               Source DB calls/rows/writes | Other work                                                        |
+| ------------------------------------------------- | ----------------------------------------: | ----------------------------------------------------------------- |
+| Verify cookie, initialize client, status/rerender |                                 0 / 0 / 0 | One local HMAC verification for server reads                      |
+| Login                                             |                       Application-defined | One cookie write; provider verification when configured           |
+| Claims update                                     |                          0 by the package | Application callback cost, one cookie write                       |
+| Refresh/revocation check                          | Application-defined single-subject lookup | Concurrent client refreshes coalesce; one cookie write on success |
+| Logout                                            |                                 0 / 0 / 0 | One cookie deletion; optional local account purge                 |
+| Sync connect/heartbeat                            |                                 0 / 0 / 0 | Adapter/transport work only                                       |
+
+Application query calls are not universal billing units: providers may bill per row/document and may retry transactions. Measure callback and provider work separately. Auth never scans or resyncs a users table. No subscriber-count fan-out or offline reconnect path adds source reads inside this package.
+
+## Development verification
+
+Use the repository-pinned runtimes and lockfile:
+
+```sh
+bun install --frozen-lockfile
+bun run --filter @sveltebase/auth check
+bun run --filter @sveltebase/auth test
+bun run --filter @sveltebase/auth build
 ```
 
-### State
-
-```ts
-auth.user;            // profile User | null
-auth.claims;          // Claims (e.g. { activeRoleId })
-auth.session;         // { user, claims } | null
-auth.sessionUser;     // flattened User & Claims | null
-auth.isReady;         // finished startup
-auth.isVerifying;     // refresh or sync check in progress
-auth.isAuthenticated; // ready && user != null
-```
-
-### Actions
-
-```ts
-await auth.login({ email, password }, { reconnect: false });
-await auth.loginWithGoogle(credential);
-await auth.loginWithTma({ initData, domain });
-await auth.setClaims({ activeRoleId }, { reconnect: true });
-await auth.refresh();
-await auth.logout(); // clears cookie + IDB + disconnects sync
-```
-
-If a sync client is attached, login/refresh wait for a matching row in `verifyTable` (profile only). When that row disappears or verification fails, the client clears the session, runs `onInvalidSession` / `onLogout`, wipes local tables, and disconnects.
-
-### Useful options
-
-```ts
-createAuth({
-  routesBase: "/api/auth",
-  syncClient,                    // enable table verification
-  verifyTable: "users",
-  verifyUser: (session, row) => String(session.id) === String(row.id),
-  onInvalidSession: () => goto("/login"),
-  refreshWhenChanged: true,      // re-refresh if synced row differs from session
-  errorClasses: [MyAuthError]    // restore custom error types from the API
-});
-```
-
-### Dynamic sync client
-
-If the sync client is created later from context:
-
-```svelte
-<script lang="ts">
-  import { auth } from "$lib/auth";
-  import { sync } from "$lib/sync-client.svelte";
-
-  let { data } = $props();
-
-  sync.setContext(() => ({ orgId: data.org.id }));
-  auth.setClient(sync);
-</script>
-```
-
-## Custom errors
-
-Throw structured errors from login callbacks and restore them on the client:
-
-```ts
-import { SerializableError } from "@sveltebase/auth";
-
-export class TranslatedError extends SerializableError {
-  static readonly code = "TranslatedError";
-  constructor(message: string) {
-    super(message);
-  }
-}
-```
-
-```ts
-// server
-if (!user) throw new TranslatedError("auth.invalid_credentials");
-
-// client
-createAuth({ errorClasses: [TranslatedError] });
-```
-
-Only `code` and `message` travel over the wire.
-
-## Sync websocket auth
-
-```ts
-import { sessionCookieAuth } from "@sveltebase/auth/sync";
-import { createSyncAppWorker, SyncEngine } from "@sveltebase/sync/cloudflare";
-
-export default createSyncAppWorker(app, {
-  handlers,
-  auth: sessionCookieAuth<User>(),
-  allowUnauthenticated: false
-});
-
-export { SyncEngine };
-```
-
-Options (all optional):
-
-- `secret` / `secretBinding` — signing key (default binding: `JWT_SECRET`)
-- `cookieName` — default `sf_session`
-- `identity` — defaults to `user.id` for the `user:…` topic
-
-## Telegram Mini App
-
-```ts
-import { verifyInitData } from "@sveltebase/auth/telegram";
-// or mount a first-class route:
-createAuthRoutes({
-  auth,
-  tma: {
-    getBotToken: async (event, body) => findBotToken(body.domain),
-    getUser: async (initData, event, body) => {
-      // map verified initData.user → your profile + claims
-      return { user, claims: { activeRoleId } };
-    },
-    maxAgeSeconds: 86_400
-  }
-});
-```
-
-```ts
-// client
-await auth.loginWithTma({ initData: Telegram.WebApp.initData, domain });
-```
-
-`verifyInitData` uses Web Crypto HMAC (works on Cloudflare Workers). It checks signature, `auth_date` age, and returns a typed payload.
-
-## Google sign-in
-
-Wrap the app (or login page) in the provider, then drop in a button:
-
-```svelte
-<script lang="ts">
-  import {
-    GoogleLogin,
-    GoogleOAuthProvider
-  } from "@sveltebase/auth/google";
-  import { auth } from "$lib/auth";
-
-  const clientId = "your-google-client-id";
-</script>
-
-<GoogleOAuthProvider {clientId}>
-  <GoogleLogin
-    onSuccess={(response) => {
-      if (response.credential) {
-        auth.loginWithGoogle(response.credential);
-      }
-    }}
-  />
-</GoogleOAuthProvider>
-```
-
-Also available:
-
-- **`GoogleOneTapLogin`** — One Tap prompt on load
-- **`createGoogleLogin()`** — OAuth2 access-token / auth-code flow (not for `loginWithGoogle`; that needs an ID token)
-- **`googleLogout()`** — clears Google auto-select only; still call `auth.logout()`
-- **`verifyIdToken({ credential, clientId })`** — server-side ID token verification (RS256, Google JWKS)
-- **`decodeCredentials(credential)`** — decode only, no verification — never use alone for auth
-
-Common button props: `theme`, `size`, `text`, `shape`, `width`, `locale`, `useOneTap`, `onError`.
-
-## Low-level JWT helpers
-
-Usually you go through `createServerAuth`. If you need them directly:
-
-```ts
-import {
-  signJWT,
-  verifyJWT,
-  signSessionPayload,
-  verifySessionPayload,
-  getUserFromCookie,
-  getUserFromRequest,
-  parseCookies
-} from "@sveltebase/auth";
-```
-
-## Security checklist
-
-- Keep secrets and Google client config on the server
-- Never trust `decodeCredentials` without `verifyIdToken`
-- Don’t put sensitive data in the signed user snapshot
-- Authorize data in sync handlers — topics are delivery only
-- Clear client sync data on logout / invalid session
-
-## License
-
-ISC
+The workspace release gate also runs Chromium lifecycle tests and validates the packed package in an isolated consumer.

@@ -1,23 +1,20 @@
 <script lang="ts">
   import { getGoogleOAuthContext } from './context.svelte.js';
-  import type { CredentialResponse, MomentNotification } from './types';
+  import type { CredentialResponse, MomentNotification } from './types.js';
 
   interface Props {
     onSuccess: (credentialResponse: CredentialResponse) => void;
     onError?: () => void;
     promptMomentNotification?: (notification: MomentNotification) => void;
     useOneTap?: boolean;
+    type?: 'standard' | 'icon';
     theme?: 'outline' | 'filled_blue' | 'filled_black';
     size?: 'small' | 'medium' | 'large';
-    text?: 'signin_with' | 'signup_with' | 'signin' | 'signup' | 'continue_with' | 'signin_with_google';
+    text?: 'signin_with' | 'signup_with' | 'signin' | 'continue_with';
     shape?: 'rectangular' | 'pill' | 'circle' | 'square';
     logo_alignment?: 'left' | 'center';
-    width?: string;
+    width?: number;
     locale?: string;
-    auto_select?: boolean;
-    cancel_on_tap_outside?: boolean;
-    nonce?: string;
-    hosted_domain?: string;
   }
 
   let {
@@ -25,6 +22,7 @@
     onError,
     promptMomentNotification,
     useOneTap = false,
+    type = 'standard',
     theme = 'outline',
     size = 'large',
     text = 'signin_with',
@@ -32,51 +30,45 @@
     logo_alignment = 'left',
     width,
     locale,
-    auto_select = false,
-    cancel_on_tap_outside = true,
-    nonce,
-    hosted_domain
   }: Props = $props();
 
   const ctx = getGoogleOAuthContext();
   let container = $state<HTMLDivElement | null>(null);
+  const handleCredential = (response: CredentialResponse) => {
+    if (response.credential) onSuccess(response);
+    else onError?.();
+  };
+
+  $effect(() => ctx.onCredential(handleCredential));
 
   $effect(() => {
-    if (!ctx.isLoaded || !container) return;
+    if (!ctx.isInitialized || !container) return;
 
     try {
-      window.google.accounts.id.initialize({
-        client_id: ctx.clientId,
-        callback: (response) => {
-          if (response.credential) {
-            onSuccess(response);
-          } else {
-            onError?.();
-          }
-        },
-        auto_select,
-        cancel_on_tap_outside,
-        nonce,
-        hosted_domain
-      });
-
       window.google.accounts.id.renderButton(container, {
+        type,
         theme,
         size,
         text,
         shape,
         logo_alignment,
         width,
-        locale
+        locale,
+        click_listener: () => ctx.activateCredentialListener(handleCredential),
       });
 
       if (useOneTap) {
+        ctx.activateCredentialListener(handleCredential);
         window.google.accounts.id.prompt(promptMomentNotification);
       }
     } catch (err) {
       console.error('Error initializing Google Login button:', err);
       onError?.();
     }
+    return () => {
+      // eslint-disable-next-line svelte/no-dom-manipulating -- Google owns the contents of this otherwise empty host.
+      container?.replaceChildren();
+    };
   });
 </script>
 

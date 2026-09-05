@@ -1,346 +1,202 @@
-import type { IncomingMessage } from "node:http";
-import { resolveIdentity } from "./auth.js";
-import { SyncBroker, type ISyncConnection } from "./broker.js";
-import type { ResolveTopics, SyncHandler, SyncPlatform } from "./index.js";
+import type { IncomingMessage } from 'node:http';
+import type { TLSSocket } from 'node:tls';
+import { SyncBroker, type ISyncConnection } from './broker.js';
+import { deserializeConnectionAuth, serializeConnectionAuth } from './auth.js';
+import type { PublishChange, SyncAuthResult } from './handler.js';
+import type {
+  ResolveTopics,
+  SyncConnectionAuth,
+  SyncHandler,
+  SyncMetrics,
+  SyncPlatform,
+} from './index.js';
 
-const GLOBAL_BROKER_KEY = "__sveltebase_sync_dev_broker__";
-const GLOBAL_PLATFORM_KEY = "__sveltebase_sync_dev_platform__";
-
-type DevBrokerState = {
-  broker: SyncBroker;
+export type DevSocket = {
+  readonly readyState: number;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  on(event: string, listener: (...args: unknown[]) => void): void;
+  off(event: string, listener: (...args: unknown[]) => void): void;
 };
-
-let devBroker: SyncBroker | null = null;
-
 export type SyncDevAuthOptions<TAuth = unknown> = {
-  /**
-   * Resolves auth for a local dev websocket request.
-   *
-   * Return `null` or `undefined` for guests.
-   */
   auth?: (
     request: Request,
     platform: SyncPlatform,
-  ) => Promise<TAuth | null | undefined> | TAuth | null | undefined;
-  /** Converts the auth object into the identity used for the default user topic. */
-  identity?: (auth: TAuth) => string | number | bigint | null | undefined;
-  /** Resolves connection topics used for live row-payload routing. */
+  ) => Promise<SyncAuthResult<TAuth>> | SyncAuthResult<TAuth>;
   topics?: ResolveTopics<TAuth>;
-  /** Whether unauthenticated local websocket clients may connect. */
   allowUnauthenticated?: boolean;
-  /** Platform object or resolver used by auth and handlers in dev. */
   platform?: SyncPlatform | (() => Promise<SyncPlatform> | SyncPlatform);
-  /** Optional Wrangler config path for `getPlatformProxy`. */
+  /** Explicit opt-in to a Wrangler platform proxy. No proxy is created by default. */
   wranglerConfigPath?: string;
+  metrics?: SyncMetrics;
 };
 
-/**
- * Stores the dev broker on `globalThis` so Vite module reloads can reuse it.
- */
-function setGlobalBroker(state: DevBrokerState) {
-  const globalObject = globalThis as unknown as Record<
-    string,
-    DevBrokerState | undefined
-  >;
-  globalObject[GLOBAL_BROKER_KEY] = state;
-}
-
-/**
- * Reads the shared dev broker from `globalThis`.
- */
-function getGlobalBroker() {
-  const globalObject = globalThis as unknown as Record<
-    string,
-    DevBrokerState | undefined
-  >;
-  return globalObject[GLOBAL_BROKER_KEY];
-}
-
-/**
- * Creates or updates the in-memory dev broker handlers.
- *
- * Called by the Vite plugin when a websocket connects and after handlers are
- * loaded through Vite SSR.
- */
-export function setHandlers(handlers: SyncHandler[]) {
-  const existing = getGlobalBroker();
-  if (!existing) {
-    const state = { broker: new SyncBroker(handlers) };
-    setGlobalBroker(state);
-    devBroker = state.broker;
-    return;
-  }
-
-  existing.broker.setHandlers(handlers);
-  devBroker = existing.broker;
-}
-
-/**
- * Returns the active dev broker or throws if the plugin has not initialized it.
- */
-function getDevBroker(): SyncBroker {
-  if (devBroker) return devBroker;
-
-  const existing = getGlobalBroker();
-  if (existing) {
-    devBroker = existing.broker;
-    return existing.broker;
-  }
-
-  throw new Error("Sync dev broker not initialized. Call setHandlers first.");
-}
-
-/**
- * Normalizes Node request header values to a single string.
- */
-function getHeaderValue(value: string | string[] | undefined) {
-  if (Array.isArray(value)) return value[0];
-  return value;
-}
-
-/**
- * Converts Node HTTP headers into a Fetch `Headers` object.
- */
-function headersFromIncomingMessage(req: IncomingMessage) {
+function request(incoming: IncomingMessage) {
   const headers = new Headers();
-  for (const [key, value] of Object.entries(req.headers)) {
-    if (value === undefined) continue;
-    if (Array.isArray(value)) {
-      for (const item of value) headers.append(key, item);
-      continue;
-    }
-    headers.set(key, value);
+  for (const [key, value] of Object.entries(incoming.headers)) {
+    if (Array.isArray(value))
+      value.forEach((item) => headers.append(key, item));
+    else if (value !== undefined) headers.set(key, value);
   }
-  return headers;
+  const protocol = (incoming.socket as TLSSocket | undefined)?.encrypted
+    ? 'https'
+    : 'http';
+  return new Request(
+    new URL(
+      incoming.url ?? '',
+      `${protocol}://${incoming.headers.host ?? 'localhost'}`,
+    ),
+    { headers },
+  );
 }
 
-/**
- * Builds a Fetch `Request` from Vite's websocket upgrade request.
- */
-function requestFromIncomingMessage(req: IncomingMessage) {
-  const host = getHeaderValue(req.headers.host) ?? "localhost";
-  const url = new URL(req.url ?? "", `http://${host}`);
-  return new Request(url.toString(), {
-    headers: headersFromIncomingMessage(req),
-  });
-}
-
-/**
- * Resolves the platform used in local dev auth and sync handlers.
- *
- * Prefer explicit `options.platform`, then a cached Wrangler platform proxy,
- * then an empty env fallback when Wrangler is unavailable.
- */
-async function resolvePlatform(options?: SyncDevAuthOptions) {
-  if (options?.platform) {
-    return typeof options.platform === "function"
-      ? await options.platform()
-      : options.platform;
-  }
-
-  const globalObject = globalThis as unknown as Record<
-    string,
-    { platform: SyncPlatform } | undefined
-  >;
-  const existing = globalObject[GLOBAL_PLATFORM_KEY];
-  if (existing) return existing.platform;
-
-  try {
-    const { getPlatformProxy } = await import("wrangler");
-    const proxy = await getPlatformProxy(
-      options?.wranglerConfigPath
-        ? { configPath: options.wranglerConfigPath }
-        : undefined,
-    );
-    const platform = proxy as unknown as SyncPlatform;
-    globalObject[GLOBAL_PLATFORM_KEY] = { platform };
-    return platform;
-  } catch {
-    const platform: SyncPlatform = { env: {} };
-    globalObject[GLOBAL_PLATFORM_KEY] = { platform };
-    return platform;
-  }
-}
-
-/**
- * Adds a Vite dev websocket client to the shared broker.
- *
- * The Vite plugin calls this after loading handlers. It resolves auth, creates
- * an `ISyncConnection`, then wires websocket events into the broker.
- */
-export async function addClient(
-  ws: {
-    send: (data: string) => void;
-    close: (code?: number, reason?: string) => void;
-    on: (event: string, listener: (...args: any[]) => void) => void;
-  },
-  req: IncomingMessage,
-  options?: SyncDevAuthOptions,
-): Promise<boolean> {
-  const broker = getDevBroker();
-  const request = requestFromIncomingMessage(req);
-  const platform = await resolvePlatform(options);
-  const subscribedChannels = new Set<string>();
-  let auth: any = null;
-  let identity: string | null = null;
-  let topics: string[] = [];
-
-  try {
-    if (options?.auth) {
-      auth = (await options.auth(request, platform)) ?? null;
-
-      if (!auth && options.allowUnauthenticated === false) {
-        ws.close(1008, "Unauthorized");
-        return false;
-      }
-
-      if (auth) {
-        identity = resolveIdentity(auth, options.identity);
-      }
-    }
-
-    if (identity) {
-      topics.push(`user:${identity}`);
-    }
-
-    if (options?.topics) {
-      const baseTopics = topics;
-      const topicCtx = {
-        platform,
-        request,
-        auth: auth
-          ? {
-              user: auth,
-              identity,
-              topics,
-            }
-          : null,
-        identity,
-        topics: new Set(baseTopics),
-        cache: new Map<string, unknown>(),
-      };
-      topics = Array.from(
-        new Set([...baseTopics, ...(await options.topics(topicCtx))]),
-      );
-    }
-  } catch (error) {
-    console.error("sync dev engine: websocket setup failed", error);
-    ws.close(1011, "Internal server error");
-    return false;
-  }
-
-  const conn: ISyncConnection = {
-    send(data) {
-      ws.send(data);
-    },
-    close(code, reason) {
-      ws.close(code, reason);
-    },
-    getAuth() {
-      return auth;
-    },
-    setAuth(newAuth) {
-      auth = newAuth;
-    },
-    getIdentity() {
-      return identity;
-    },
-    setIdentity(newIdentity) {
-      identity = newIdentity;
-    },
-    getTopics() {
-      return new Set(topics);
-    },
-    setTopics(newTopics) {
-      topics = Array.from(newTopics);
-    },
-    getSubscribedChannels() {
-      return subscribedChannels;
-    },
-    headers: request.headers,
-    url: request.url,
+/** One development runtime owns its broker, clients and optional platform proxy. */
+export function createDevEngine<TAuth = unknown>(
+  handlers: SyncHandler[],
+  options: SyncDevAuthOptions<TAuth> = {},
+) {
+  const broker = new SyncBroker(handlers, options.metrics);
+  const clients = new Set<() => void>();
+  let disposed = false;
+  let runtimePromise: Promise<SyncPlatform> | undefined;
+  let disposeProxy: (() => Promise<void>) | undefined;
+  const platform = (): Promise<SyncPlatform> => {
+    runtimePromise ??= (async () => {
+      if (options.platform)
+        return typeof options.platform === 'function'
+          ? options.platform()
+          : options.platform;
+      if (!options.wranglerConfigPath) return { env: {} };
+      const { getPlatformProxy } = await import('wrangler');
+      const proxy = await getPlatformProxy({
+        configPath: options.wranglerConfigPath,
+      });
+      disposeProxy = () => proxy.dispose();
+      return { env: proxy.env, context: proxy.ctx } as SyncPlatform;
+    })();
+    return runtimePromise;
   };
-
-  broker.registerConnection(conn);
-
-  ws.on("message", async (data: any) => {
-    const message = typeof data === "string" ? data : String(data);
-    try {
-      await broker.handleMessage(conn, message, platform, request);
-    } catch (err) {
-      console.error("sync dev engine: error handling message", err);
-    }
-  });
-
-  ws.on("close", () => {
-    broker.removeConnection(conn);
-  });
-
-  ws.on("error", () => {
-    broker.removeConnection(conn);
-  });
-
-  return true;
+  const alive = () => {
+    if (disposed) throw new Error('Sync development runtime is disposed');
+  };
+  return {
+    setHandlers(next: SyncHandler[]) {
+      alive();
+      broker.setHandlers(next);
+    },
+    async addClient(
+      ws: DevSocket,
+      incoming: IncomingMessage,
+    ): Promise<{ connected: boolean; dispose(): void }> {
+      alive();
+      let cancelled = false;
+      const cancel = () => {
+        cancelled = true;
+      };
+      ws.on('close', cancel);
+      ws.on('error', cancel);
+      const denied = () => {
+        ws.off('close', cancel);
+        ws.off('error', cancel);
+        ws.close(1008, 'Unauthorized');
+        return { connected: false, dispose() {} };
+      };
+      let req: Request;
+      let runtime: SyncPlatform;
+      let auth: SyncConnectionAuth<TAuth> | null;
+      try {
+        req = request(incoming);
+        runtime = await platform();
+        const resolved = options.auth ? await options.auth(req, runtime) : null;
+        if (!resolved && options.allowUnauthenticated !== true) return denied();
+        auth = resolved
+          ? { ...resolved, topics: [`subject:${resolved.subject}`] }
+          : null;
+        if (auth && options.topics) {
+          const topics = await options.topics({
+            platform: runtime,
+            request: req,
+            auth,
+            subject: auth.subject,
+            topics: new Set(auth.topics),
+            cache: new Map(),
+            metrics: options.metrics,
+          });
+          auth.topics = [...new Set([...auth.topics, ...topics])];
+        }
+        if (
+          auth &&
+          (!deserializeConnectionAuth(serializeConnectionAuth(auth)) ||
+            (auth.expiresAt !== undefined && auth.expiresAt <= Date.now()))
+        )
+          return denied();
+      } catch {
+        return denied();
+      }
+      ws.off('close', cancel);
+      ws.off('error', cancel);
+      if (cancelled || disposed || ws.readyState !== 1) return denied();
+      const channels = new Set<string>();
+      const connection: ISyncConnection = {
+        send: (data) => ws.send(data),
+        close: (code, reason) => ws.close(code, reason),
+        getConnectionAuth: () => auth,
+        setConnectionAuth: (next) => {
+          auth = next as SyncConnectionAuth<TAuth> | null;
+        },
+        getSubscribedChannels: () => channels,
+        headers: req.headers,
+        url: req.url,
+      };
+      const message = (...args: unknown[]) => {
+        void broker
+          .handleMessage(connection, String(args[0]), runtime, req)
+          .catch(() => dispose());
+      };
+      const dispose = () => {
+        broker.removeConnection(connection);
+        ws.off('message', message);
+        ws.off('close', dispose);
+        ws.off('error', dispose);
+        clients.delete(dispose);
+        if (ws.readyState === 1)
+          ws.close(1001, 'Sync development runtime stopped');
+      };
+      broker.registerConnection(connection);
+      clients.add(dispose);
+      ws.on('message', message);
+      ws.on('close', dispose);
+      ws.on('error', dispose);
+      return { connected: true, dispose };
+    },
+    async publish(event: PublishChange) {
+      alive();
+      await broker.handleExternalChange(event, await platform());
+    },
+    async publishBatch(events: PublishChange[]) {
+      alive();
+      await broker.handleExternalChanges(events, await platform());
+    },
+    async resync(
+      channel: string,
+      reset = false,
+      topics: Iterable<string> | 'all' = 'all',
+    ) {
+      alive();
+      await broker.handleExternalChannelChange(channel, reset, topics);
+    },
+    async dispose() {
+      if (disposed) return;
+      disposed = true;
+      for (const dispose of [...clients]) dispose();
+      // A proxy finishing after teardown is still owned and must be released.
+      try {
+        await runtimePromise;
+      } catch {
+        /* Failed setup has no proxy to dispose. */
+      }
+      await disposeProxy?.();
+    },
+  };
 }
-
-/**
- * Publishes one external row change through the dev broker.
- */
-export async function broadcastExternalChange(
-  channel: string,
-  action: "create" | "update" | "delete",
-  key: string | undefined,
-  data: any,
-) {
-  const broker = getDevBroker();
-  const platform = await resolvePlatform();
-  await broker.handleExternalChange(channel, action, key, data, platform);
-}
-
-/**
- * Publishes multiple external row changes through the dev broker.
- */
-export async function broadcastExternalBatchChange(
-  channel: string,
-  changes: Array<{
-    action: "create" | "update" | "delete";
-    key?: string;
-    data?: any;
-  }>,
-) {
-  const broker = getDevBroker();
-  const platform = await resolvePlatform();
-  await broker.handleExternalBatchChange(channel, changes, platform);
-}
-
-/**
- * Notifies dev clients that a channel should be resynced.
- */
-export async function broadcastChannelChange(channel: string) {
-  const broker = getDevBroker();
-  await broker.handleExternalChannelChange(channel);
-}
-
-/**
- * Notifies dev clients that a channel should be fully replaced.
- */
-export async function broadcastChannelReset(
-  channel: string,
-  topics: string[] | "all" = "all",
-) {
-  const broker = getDevBroker();
-  await broker.handleExternalChannelReset(channel, topics);
-}
-
-/**
- * Notifies dev clients that several channels should be fully resynced.
- */
-export async function broadcastChannelResetBatch(
-  resets: Array<{
-    channel: string;
-    topics?: string[] | "all";
-  }>,
-) {
-  const broker = getDevBroker();
-  await broker.handleExternalChannelResetBatch(resets);
-}
+export type SyncDevEngine = ReturnType<typeof createDevEngine>;

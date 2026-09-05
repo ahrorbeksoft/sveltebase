@@ -1,65 +1,64 @@
 export type SerializedConnectionAuth = {
-  auth: any;
-  identity: string | null;
-  topics?: string[];
+  subject: string;
+  user: unknown;
+  claims?: unknown;
+  topics: string[];
+  expiresAt?: number;
 };
 
-/**
- * Converts an auth object into the identity string used for the default user topic.
- *
- * If an identity resolver is provided, its return value wins. Otherwise the
- * helper falls back to common shapes: `auth.identity`, `auth.user.id`, then
- * `auth.userId`.
- *
- * @example
- * ```ts
- * resolveIdentity({ user: { id: 42 } }); // "42"
- * resolveIdentity(user, (u) => u.orgId); // "acme"
- * ```
- */
-export function resolveIdentity(
-  auth: any,
-  identity?: (auth: any) => string | number | bigint | null | undefined,
-): string | null {
-  const value = identity
-    ? identity(auth)
-    : (auth?.identity ?? auth?.user?.id ?? auth?.userId);
-  return value == null ? null : String(value);
+function encodeUtf8(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
+function decodeUtf8(value: string) {
+  const binary = atob(value);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder(undefined, { fatal: true }).decode(bytes);
+}
+const object = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
 
-/**
- * Encodes websocket auth data into the internal header sent to the Durable Object.
- *
- * This is only used between trusted sync worker code and the sync engine. Client
- * requests cannot set this header because public handlers strip it first.
- */
 export function serializeConnectionAuth(
-  auth: any,
-  identity: string | null,
-  topics: Iterable<string> = [],
+  auth: SerializedConnectionAuth,
 ): string {
-  return btoa(
-    unescape(
-      encodeURIComponent(
-        JSON.stringify({ auth, identity, topics: Array.from(topics) }),
-      ),
-    ),
-  );
+  return encodeUtf8(JSON.stringify(auth));
 }
 
-/**
- * Decodes forwarded auth from the sync worker.
- *
- * Returns `null` for missing or malformed values so the engine can treat the
- * connection as unauthenticated instead of crashing during websocket setup.
- */
 export function deserializeConnectionAuth(
   value: string | null,
 ): SerializedConnectionAuth | null {
-  if (!value) return null;
-
+  if (!value || value.length > 64 * 1024) return null;
   try {
-    return JSON.parse(decodeURIComponent(escape(atob(value))));
+    const parsed: unknown = JSON.parse(decodeUtf8(value));
+    if (
+      !object(parsed) ||
+      typeof parsed.subject !== 'string' ||
+      !parsed.subject ||
+      parsed.subject.length > 256 ||
+      !Array.isArray(parsed.topics) ||
+      !parsed.topics.every(
+        (topic) =>
+          typeof topic === 'string' && topic.length > 0 && topic.length <= 256,
+      )
+    )
+      return null;
+    if (
+      parsed.expiresAt !== undefined &&
+      (typeof parsed.expiresAt !== 'number' ||
+        !Number.isFinite(parsed.expiresAt))
+    )
+      return null;
+    return {
+      subject: parsed.subject,
+      user: parsed.user,
+      ...(parsed.claims === undefined ? {} : { claims: parsed.claims }),
+      topics: [...new Set(parsed.topics)],
+      ...(parsed.expiresAt === undefined
+        ? {}
+        : { expiresAt: parsed.expiresAt }),
+    };
   } catch {
     return null;
   }

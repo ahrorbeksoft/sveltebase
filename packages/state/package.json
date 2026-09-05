@@ -1,6 +1,6 @@
 {
   "name": "@sveltebase/state",
-  "version": "1.7.11",
+  "version": "2.0.1",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -18,10 +18,10 @@
     }
   },
   "dependencies": {
-    "@sveltebase/utils": "1.7.11"
+    "@sveltebase/utils": "workspace:*"
   },
   "peerDependencies": {
-    "svelte": "^5.0.0"
+    "svelte": ">=5.46.4 <6"
   },
   "repository": {
     "type": "git",
@@ -35,7 +35,11 @@
   "scripts": {
     "build": "svelte-package --input ./src --output ./dist --tsconfig ./tsconfig.package.json",
     "check": "tsc --project tsconfig.json --noEmit",
+    "test": "vitest run --config ../../vitest.config.ts packages/state",
     "lint": "bun run build && publint --strict --pack npm",
     "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "svelte": "5.57.0"
   }
 }

@@ -1,156 +1,171 @@
-import type { IncomingMessage } from "node:http";
-import type { Duplex } from "node:stream";
-import type { Plugin } from "vite";
-import type { SyncDevAuthOptions } from "./server/dev-engine.js";
+import type { IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
+import type { TLSSocket } from 'node:tls';
+import type { Plugin } from 'vite';
+import type {
+  DevSocket,
+  SyncDevAuthOptions,
+  SyncDevEngine,
+} from './server/dev-engine.js';
+import type { SyncHandler } from './server/index.js';
 
-const DEFAULT_SYNC_PATH = "/api/sync";
-
-interface WsWebSocketServer {
-  handleUpgrade(
-    request: IncomingMessage,
-    socket: Duplex,
-    head: Buffer,
-    callback: (client: unknown) => void,
-  ): void;
-}
-
-/**
- * Options for the local Vite websocket sync plugin.
- */
+const MAX_PREAUTH_MESSAGES = 64;
+const MAX_PREAUTH_BYTES = 256 * 1024;
 export type SyncDevPluginOptions<TAuth = unknown> =
   SyncDevAuthOptions<TAuth> & {
-    /** Module path loaded by Vite SSR to get `handlers`. */
     handlersPath?: string;
-    /** Local websocket path. Defaults to `"/api/sync"`. */
     path?: string;
+    trustedOrigins?: readonly string[];
   };
+function originAllowed(request: IncomingMessage, trusted?: readonly string[]) {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  if (trusted) return trusted.includes(origin);
+  try {
+    const protocol = (request.socket as TLSSocket | undefined)?.encrypted
+      ? 'https'
+      : 'http';
+    return new URL(origin).origin === `${protocol}://${request.headers.host}`;
+  } catch {
+    return false;
+  }
+}
 
-/**
- * Vite dev plugin that serves sync websockets without Cloudflare Durable Objects.
- *
- * The plugin loads your handlers through Vite SSR on each websocket upgrade, so
- * handler edits are reflected during development.
- */
+/** Vite adapter with one explicitly owned broker per plugin instance. */
 export function syncDevPlugin<TAuth = unknown>(
-  options?: SyncDevPluginOptions<TAuth>,
+  options: SyncDevPluginOptions<TAuth> = {},
 ): Plugin {
   const handlersPath =
-    options?.handlersPath ?? "/src/lib/server/sync-handlers.ts";
-  const syncPath = options?.path ?? DEFAULT_SYNC_PATH;
-
+    options.handlersPath ?? '/src/lib/server/sync-handlers.ts';
+  let reload: (() => Promise<void>) | undefined;
   return {
-    name: "sveltebase-sync-dev-websocket",
-    apply: "serve",
-
+    name: 'sveltebase-sync-dev-websocket',
+    apply: 'serve',
+    async handleHotUpdate(context) {
+      if (context.file.replaceAll('\\', '/').endsWith(handlersPath))
+        await reload?.();
+    },
     async configureServer(server) {
-      const { WebSocketServer } = (await import("ws")) as unknown as {
-        WebSocketServer: new (opts: { noServer: boolean }) => WsWebSocketServer;
+      const { WebSocketServer } = await import('ws');
+      const wss = new WebSocketServer({
+        noServer: true,
+        maxPayload: MAX_PREAUTH_BYTES,
+      });
+      let generation = 0;
+      let closed = false;
+      let engine: Promise<SyncDevEngine> | undefined;
+      const sockets = new Set<DevSocket>();
+      const loadEngine = () => {
+        engine ??= (async () => {
+          const [handlers, module] = await Promise.all([
+            server.ssrLoadModule(handlersPath),
+            server.ssrLoadModule('@sveltebase/sync/server/dev-engine'),
+          ]);
+          if (!Array.isArray(handlers.handlers))
+            throw new Error('Sync handlers module must export handlers');
+          return (
+            module.createDevEngine as (
+              handlers: SyncHandler[],
+              options: SyncDevAuthOptions<TAuth>,
+            ) => SyncDevEngine
+          )(handlers.handlers, options);
+        })();
+        return engine;
       };
-      const wss = new WebSocketServer({ noServer: true });
-
-      // Install the in-memory broker immediately so server-side publish*
-      // works before any client opens a WebSocket (login, remote commands).
-      // Handlers are replaced on the first upgrade once Vite can SSR-load them.
-      try {
-        const devEngine = await import("@sveltebase/sync/server/dev-engine");
-        if (typeof devEngine.setHandlers === "function") {
-          // Empty handlers are fine for broadcast-only fan-out; upgrade path
-          // calls setHandlers again with the real module.
-          (devEngine.setHandlers as (handlers: unknown[]) => void)([]);
+      reload = async () => {
+        ++generation;
+        for (const socket of sockets)
+          socket.close(1012, 'Sync development runtime reloading');
+        sockets.clear();
+        const previous = engine;
+        engine = undefined;
+        try {
+          await (await previous)?.dispose();
+        } catch {
+          /* Failed setup owns no runtime. */
         }
-      } catch (err) {
-        console.warn(
-          "sync dev plugin: could not install publisher broker early",
-          err,
-        );
-      }
-
-      server.httpServer?.on("upgrade", (request, socket, head) => {
-        const url = new URL(
-          request.url ?? "",
-          `http://${request.headers.host ?? "localhost"}`,
-        );
-
-        if (url.pathname !== syncPath) {
+      };
+      const upgrade = (
+        request: IncomingMessage,
+        socket: Duplex,
+        head: Buffer,
+      ) => {
+        let url: URL;
+        try {
+          url = new URL(
+            request.url ?? '',
+            `http://${request.headers.host ?? 'localhost'}`,
+          );
+        } catch {
+          socket.destroy();
           return;
         }
-
+        if (url.pathname !== (options.path ?? '/api/sync')) return;
+        if (!originAllowed(request, options.trustedOrigins)) {
+          socket.destroy();
+          return;
+        }
+        const current = generation;
         wss.handleUpgrade(request, socket, head, (client) => {
-          const messageQueue: unknown[] = [];
-          const onMessage = (data: unknown) => {
-            messageQueue.push(data);
+          const ws: DevSocket = client;
+          sockets.add(ws);
+          client.once('close', () => sockets.delete(ws));
+          const queued: unknown[] = [];
+          let bytes = 0;
+          let overflow = false;
+          const queue = (...args: unknown[]) => {
+            bytes += Buffer.byteLength(String(args[0]));
+            if (
+              queued.length >= MAX_PREAUTH_MESSAGES ||
+              bytes > MAX_PREAUTH_BYTES
+            ) {
+              overflow = true;
+              client.close(1009, 'Authentication queue limit exceeded');
+              return;
+            }
+            queued.push(args[0]);
           };
-
-          (client as any).on("message", onMessage);
-
+          client.on('message', queue);
           void (async () => {
             try {
-              const handlersModule = await server.ssrLoadModule(handlersPath);
-              const devEngine = await server.ssrLoadModule(
-                "@sveltebase/sync/server/dev-engine",
-              );
-
-              (devEngine.setHandlers as (handlers: unknown[]) => void)(
-                handlersModule.handlers,
-              );
-
-              const authMetadata = options?.auth as
-                | {
-                    identity?: (
-                      auth: TAuth,
-                    ) => string | number | bigint | null | undefined;
-                    allowUnauthenticated?: boolean;
-                  }
-                | undefined;
-
-              // Prefer explicit options.topics; otherwise use resolveSyncTopics
-              // exported next to handlers (avoids $lib imports in vite.config).
-              const topics =
-                options?.topics ??
-                (handlersModule.resolveSyncTopics as
-                  | SyncDevAuthOptions<TAuth>["topics"]
-                  | undefined);
-
-              const connected = await (
-                devEngine.addClient as (
-                  ws: unknown,
-                  req: IncomingMessage,
-                  options?: SyncDevAuthOptions<TAuth>,
-                ) => Promise<boolean>
-              )(client, request, {
-                auth: options?.auth,
-                identity: options?.identity ?? authMetadata?.identity,
-                topics,
-                allowUnauthenticated:
-                  options?.allowUnauthenticated ??
-                  authMetadata?.allowUnauthenticated,
-                platform: options?.platform,
-                wranglerConfigPath: options?.wranglerConfigPath,
-              });
-
-              // addClient installs the permanent message listener. Keep the
-              // temporary queue attached until that listener exists so eager
-              // subscriptions sent immediately after `open` cannot disappear
-              // during async auth/topic resolution.
-              (client as any).off("message", onMessage);
-
-              if (!connected) return;
-
-              for (const message of messageQueue) {
-                (client as any).emit("message", message);
+              const runtime = await loadEngine();
+              if (
+                closed ||
+                current !== generation ||
+                overflow ||
+                client.readyState !== 1
+              )
+                return;
+              const handle = await runtime.addClient(ws, request);
+              client.off('message', queue);
+              if (
+                closed ||
+                current !== generation ||
+                overflow ||
+                !handle.connected
+              ) {
+                handle.dispose();
+                return;
               }
-            } catch (err) {
-              console.error("sync dev plugin: websocket upgrade failed", err);
-              try {
-                (client as any).off("message", onMessage);
-                (client as any).close(1011, "Internal server error");
-              } catch {
-                // Ignore close errors.
-              }
+              for (const message of queued) client.emit('message', message);
+            } catch {
+              client.close(1011, 'Sync setup failed');
+              // Permit a later connection to retry a failed module load.
+              engine = undefined;
+            } finally {
+              client.off('message', queue);
             }
           })();
         });
+      };
+      server.httpServer?.on('upgrade', upgrade);
+      server.httpServer?.once('close', () => {
+        closed = true;
+        server.httpServer?.off('upgrade', upgrade);
+        void reload?.();
+        wss.close();
       });
+      // configureServer's returned function is a post-configuration hook, not a disposer.
     },
   };
 }

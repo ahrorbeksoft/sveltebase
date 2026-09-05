@@ -30,3 +30,8 @@ coverage
 .vscode/
 .idea/
 .npmrc
+
+# test output and preserved local baseline
+playwright-report/
+test-results/
+.implementation/
