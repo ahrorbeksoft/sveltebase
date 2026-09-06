@@ -1,12 +1,14 @@
 {
   "name": "@sveltebase/utils",
-  "version": "2.0.1",
+  "version": "1.7.11",
   "type": "module",
   "publishConfig": {
     "access": "public"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills",
+    "!skills/_artifacts"
   ],
   "svelte": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -15,19 +17,6 @@
       "types": "./dist/index.d.ts",
       "svelte": "./dist/index.js",
       "default": "./dist/index.js"
-    },
-    "./cookies": {
-      "types": "./dist/cookies.d.ts",
-      "default": "./dist/cookies.js"
-    },
-    "./notifications": {
-      "types": "./dist/notifications.d.ts",
-      "default": "./dist/notifications.js"
-    },
-    "./async": {
-      "types": "./dist/async.svelte.d.ts",
-      "svelte": "./dist/async.svelte.js",
-      "default": "./dist/async.svelte.js"
     }
   },
   "repository": {
@@ -40,16 +29,25 @@
   },
   "homepage": "https://github.com/ahrorbeksoft/sveltebase/tree/main/packages/utils#readme",
   "peerDependencies": {
-    "svelte": ">=5.46.4 <6"
+    "svelte": "^5.0.0",
+    "svelte-sonner": "^1.1.1"
+  },
+  "dependencies": {
+    "esm-env": "^1.2.2"
+  },
+  "devDependencies": {
+    "svelte-sonner": "^1.2.1",
+    "@tanstack/intent": "^0.4.0"
   },
   "scripts": {
     "build": "svelte-package --input ./src --output ./dist",
     "check": "tsc --project tsconfig.json --noEmit",
-    "test": "vitest run --config ../../vitest.config.ts packages/utils",
     "lint": "bun run build && publint --strict --pack npm",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "vitest run --root ../.. packages/utils/tests",
+    "prepack": "node ../../scripts/sync-skills.mjs --check && intent validate skills --check"
   },
-  "devDependencies": {
-    "svelte": "5.57.0"
-  }
+  "keywords": [
+    "tanstack-intent"
+  ]
 }

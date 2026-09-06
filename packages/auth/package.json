@@ -1,12 +1,14 @@
 {
   "name": "@sveltebase/auth",
-  "version": "2.0.1",
+  "version": "1.7.11",
   "type": "module",
   "publishConfig": {
     "access": "public"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills",
+    "!skills/_artifacts"
   ],
   "svelte": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -29,45 +31,32 @@
       "types": "./dist/sveltekit/index.d.ts",
       "default": "./dist/sveltekit/index.js"
     },
-    "./sync": {
-      "types": "./dist/sync/index.d.ts",
-      "default": "./dist/sync/index.js"
-    },
     "./google": {
       "types": "./dist/google/index.d.ts",
       "svelte": "./dist/google/index.js",
       "default": "./dist/google/index.js"
-    },
-    "./google/server": {
-      "types": "./dist/google/server/index.d.ts",
-      "default": "./dist/google/server/index.js"
-    },
-    "./telegram": {
-      "types": "./dist/telegram/index.d.ts",
-      "default": "./dist/telegram/index.js"
     }
   },
   "peerDependencies": {
-    "svelte": ">=5.46.4 <6",
-    "@sveltejs/kit": ">=2.0.0"
-  },
-  "peerDependenciesMeta": {
-    "@sveltejs/kit": {
-      "optional": true
-    }
-  },
-  "dependencies": {
-    "jose": "6.2.12"
+    "svelte": "^5.0.0",
+    "@sveltejs/kit": "^2.0.0"
   },
   "devDependencies": {
-    "@types/google.accounts": "^0.0.18",
-    "svelte": "5.57.0"
+    "@types/google.accounts": "^0.0.14",
+    "@tanstack/intent": "^0.4.0"
   },
   "scripts": {
     "build": "svelte-package --input ./src --output ./dist --tsconfig ./tsconfig.package.json",
-    "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "vitest run --config ../../vitest.config.ts packages/auth",
+    "check": "tsc --project tsconfig.json --noEmit",
     "clean": "rm -rf dist",
-    "lint": "publint --strict --pack npm"
+    "prepack": "node ../../scripts/sync-skills.mjs --check && intent validate skills --check"
+  },
+  "keywords": [
+    "tanstack-intent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahrorbeksoft/sveltebase.git",
+    "directory": "packages/auth"
   }
 }

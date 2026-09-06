@@ -1,27 +1,82 @@
-# Sveltebase
+# Sveltebase Workspace
 
-Five Svelte 5 packages for applications with explicit session, local state and replication lifecycles.
+Foundational Svelte 5 packages for local-first apps.
 
-| Package                             | Purpose                                                                                                               |
-| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| [auth](./packages/auth/README.md)   | Signed sessions, validated HTTP routes, independent reactive auth and optional integrations                           |
-| [sync](./packages/sync/README.md)   | Explicit optimistic mutations, durable outbox, WebSocket replication and application-owned authorization/transactions |
-| [state](./packages/state/README.md) | Validated immutable state updates and disposable persistence                                                          |
-| [i18n](./packages/i18n/README.md)   | Scoped locale state, translations and deterministic timezone-aware formatting                                         |
-| [utils](./packages/utils/README.md) | Exact cookie parsing and concurrent async operations with injected notifications                                      |
+## Packages
 
-## Development
+| Package | What it does |
+| --- | --- |
+| [`@sveltebase/auth`](./packages/auth/README.md) | Session cookies, SvelteKit auth routes, reactive client auth, Google sign-in |
+| [`@sveltebase/utils`](./packages/utils/README.md) | Cookies, async actions with loading/toasts, ids, delays, pluralize |
+| [`@sveltebase/state`](./packages/state/README.md) | Reactive in-memory and cookie-backed state |
+| [`@sveltebase/i18n`](./packages/i18n/README.md) | Locale, translations, and date formatting |
 
-Use Node 24 and Bun 1.4.2. Install with `bun install --frozen-lockfile`, then `bunx playwright install chromium`. Run `bun run dev:web` for examples.
+Use [TanStack DB](https://tanstack.com/db/latest/docs/overview) for reactive application
+data, with API-backed collections. Auth is independent of the data layer.
+`@sveltebase/sync` has been removed from this workspace. See the
+[auth migration notes](./packages/auth/README.md#tanstack-db-and-migration-from-sync).
 
-`bun run check`, `bun run lint`, `bun run test`, `bun run test:coverage`, `bun run build`, `bun run deadcode` and `bun run package:validate` provide independent quality gates. Each package also has its own `test` command. [Testing notes](./docs/testing.md) describe the separate Node/simulated browser, IndexedDB, real browser, and Workers suites.
+## Agent skills with TanStack Intent
 
-## Integration contracts
+Each package ships a dedicated skill (`auth`, `state`, `i18n`, or `utils`) and the
+shared `sveltebase` overview. The overview explains package selection, composition,
+and how to load the other skills. Skills follow the installed package version;
+they become available to npm consumers when these changes are released.
 
-Auth identity is `{ subject, user, claims }`: claims never overwrite the authenticated subject. Signed-cookie verification needs no source database read by default. Applications choose authoritative revocation checks and their freshness policy.
+In a consumer project with the desired Sveltebase packages installed:
 
-Sync owns replication mechanics. Applications own row visibility, committed cursors, routing information and atomic domain-write/idempotency transactions. Read the [operation ledger](./docs/database-costs.md) before implementing an adapter; callback counts are not provider billing guarantees.
+```sh
+npx @tanstack/intent@latest install
+npx @tanstack/intent@latest list
+npx @tanstack/intent@latest load '@sveltebase/auth#sveltebase'
+npx @tanstack/intent@latest load '@sveltebase/auth#auth'
+```
 
-This redesign intentionally changes public APIs and browser persistence/session formats. See [migration and release notes](./CHANGELOG.md). Keep old pending browser mutations recoverable before rolling out an application migration; the new protocol does not replay an unsafe historical cache under a new account.
+Select the installed packages during Intent's terminal permission review. Substitute
+any installed Sveltebase package for auth when loading the overview. Load only the
+package skills relevant to the task; Intent loads guidance, not missing libraries.
+See [Intent's consumer workflow](https://tanstack.com/intent/latest/docs/cli/intent-install).
 
-Publishing is a separate operation. `bun run release:verify` validates locally; release publication requires explicit invocation and successful quality gates.
+For this repository:
+
+```sh
+bun run skills:list
+bun run skills:sync
+bun run skills:check
+```
+
+The canonical overview lives in `skills/sveltebase/SKILL.md`; `skills:sync` copies it
+into all public packages. Edit dedicated skills in `packages/<name>/skills/<name>/SKILL.md`.
+`skills:check` validates format, detects outdated overview copies, verifies Intent
+resolution, and checks npm tarball contents. It runs as part of `bun run check`.
+Package `prepack` checks also reject outdated copies or invalid skills.
+
+The root Intent allowlist enables these four workspace packages only. Consumer
+permissions use npm package names; workspace permissions use `workspace:` prefixes.
+Runtime packages do not install agent hooks or modify consumer guidance on install.
+
+## Tests
+
+```bash
+bun install
+bun run test
+bun run test:types
+bun run test:coverage
+bun run test:watch
+```
+
+Tests cover `utils`, `state`, `i18n`, and `auth`.
+Coverage includes utils, state, i18n, and auth (including auth Svelte components).
+The overall thresholds are 95% statements/functions/lines and 90% branches. Vitest compiles
+Svelte runes and components, with separate jsdom client and Node SSR projects.
+The toast UI is mocked; cookie storage and Svelte reactivity/context use their
+real implementations. Tests import package source, so no build is needed first.
+
+Run one package with `bun run --filter @sveltebase/state test` (also available for
+utils and i18n). Coverage HTML is written to `coverage/index.html`. Run
+`TZ=America/New_York bun run test` to verify date formatting is independent of the
+host timezone. `bun run check` builds and type-checks the entire workspace.
+
+Dependencies are updated to the current stable releases, except TypeScript is
+kept on 6.0.3: Svelte's package declaration generator does not support TypeScript 7.
+Published peer ranges retain compatibility with supported consumer versions.

@@ -1,50 +1,37 @@
+import { untrack } from "svelte";
 import {
   createAuthErrorCodec,
   type AuthErrorCodec,
   type AuthErrorInput,
   type SerializableErrorConstructor,
-} from '../errors.js';
-import type { AuthSession } from '../index.js';
+} from "../errors.js";
+import type { AuthSession } from "../index.js";
 
 export type MaybeGetter<T> = T | (() => T);
 
-/** Optional bridge. Auth never imports a database or transport implementation. */
-export interface AuthSyncAdapter<
-  User extends { id: string },
-  Claims extends Record<string, unknown>,
-> {
-  start?(session: AuthSession<User, Claims>): void | Promise<void>;
-  stop?(): void | Promise<void>;
-  purgeAccount?(subject: string): void | Promise<void>;
-  getConnectivity?(): string;
-  onSessionInvalidated?(callback: () => void): void | (() => void);
-}
-
+/** Cookie-backed auth, independent of the application's data/cache layer. */
 export interface AuthClientConfig<
   User extends { id: string } = { id: string },
   Claims extends Record<string, unknown> = Record<string, never>,
 > {
   routesBase?: string;
+  /** Refresh the server-provided session on browser initialization. Default: true. */
+  refreshOnInit?: boolean;
   errorClasses?: readonly SerializableErrorConstructor[];
-  sync?: AuthSyncAdapter<User, Claims>;
-  fetch?: typeof fetch;
   onInvalidSession?: () => void | Promise<void>;
+  /** Application-owned cleanup, including private collections and connections. */
   onLogout?: () => void | Promise<void>;
-  onSession?: (
-    session: AuthSession<User, Claims> | null,
-  ) => void | Promise<void>;
-  onIntegrationError?: (error: unknown) => void;
+  onSession?: (session: AuthSession<User, Claims> | null) => void | Promise<void>;
 }
-
-const EMPTY_CLAIMS: Record<string, never> = Object.freeze({});
 
 async function readAuthError(response: Response, codec: AuthErrorCodec) {
   const text = await response.text();
-  if (!text)
+  if (!text) {
     return codec.deserialize({
-      code: 'HttpError',
-      message: `Auth request failed (${response.status})`,
+      code: "HttpError",
+      message: `Auth request failed with status ${response.status}`,
     });
+  }
   try {
     return codec.deserialize(JSON.parse(text) as AuthErrorInput);
   } catch {
@@ -52,357 +39,180 @@ async function readAuthError(response: Response, codec: AuthErrorCodec) {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
+const EMPTY_CLAIMS: Record<string, never> = Object.freeze({});
 
 export class AuthClientState<
   User extends { id: string },
   Claims extends Record<string, unknown> = Record<string, never>,
 > {
-  #initialUser: MaybeGetter<User | null> = null;
-  #initialClaims: MaybeGetter<Claims | null | undefined> = null;
-  #localUser = $state<User | null | undefined>(undefined);
-  #localClaims = $state<Claims | undefined>(undefined);
-  #ready = $state(false);
-  #refreshing = $state(false);
-  #generation = 0;
-  #syncTransition: Promise<void> = Promise.resolve();
-  #refreshPromise?: Promise<AuthSession<User, Claims> | null>;
-  #disposed = false;
+  #user = $state<User | null>(null);
+  #claims = $state<Claims>(EMPTY_CLAIMS as Claims);
+  #isReady = $state(false);
+  #pendingVerifications = $state(0);
+  #revision = 0;
+  #initialization = 0;
   #routesBase: string;
-  #codec: AuthErrorCodec;
-  #sync?: AuthSyncAdapter<User, Claims>;
-  #fetch: typeof fetch;
-  #unsubscribeInvalidation?: () => void;
-  #activeRequest?: AbortController;
-  #onInvalidSession?: () => void | Promise<void>;
-  #onLogout?: () => void | Promise<void>;
-  #onSession?: (
-    session: AuthSession<User, Claims> | null,
-  ) => void | Promise<void>;
-  #onIntegrationError?: (error: unknown) => void;
+  #config: AuthClientConfig<User, Claims>;
+  #errorCodec: AuthErrorCodec;
 
   constructor(config: AuthClientConfig<User, Claims> = {}) {
-    this.#routesBase = config.routesBase ?? '/api/auth';
-    this.#codec = createAuthErrorCodec(config.errorClasses);
-    this.#sync = config.sync;
-    this.#fetch = config.fetch ?? globalThis.fetch;
-    this.#onInvalidSession = config.onInvalidSession;
-    this.#onLogout = config.onLogout;
-    this.#onSession = config.onSession;
-    this.#onIntegrationError = config.onIntegrationError;
-    const unsubscribe = this.#sync?.onSessionInvalidated?.(
-      () => void this.invalidate(),
-    );
-    if (typeof unsubscribe === 'function')
-      this.#unsubscribeInvalidation = unsubscribe;
+    this.#config = config;
+    this.#routesBase = (config.routesBase ?? "/api/auth").replace(/\/+$/, "");
+    this.#errorCodec = createAuthErrorCodec(config.errorClasses);
   }
 
-  get user(): User | null {
-    if (this.#localUser !== undefined) return this.#localUser;
-    const source = this.#initialUser;
-    return typeof source === 'function' ? source() : source;
-  }
-
-  get claims(): Claims {
-    if (this.#localClaims !== undefined) return this.#localClaims;
-    const source = this.#initialClaims;
-    const value = typeof source === 'function' ? source() : source;
-    return value ?? (EMPTY_CLAIMS as Claims);
-  }
-
+  get user(): User | null { return this.#user; }
+  set user(value: User | null) { this.#revision++; this.#user = value; }
+  get claims(): Claims { return this.#claims; }
+  set claims(value: Claims) { this.#revision++; this.#claims = value ?? EMPTY_CLAIMS as Claims; }
   get session(): AuthSession<User, Claims> | null {
-    const user = this.user;
-    return user ? { subject: user.id, user, claims: this.claims } : null;
+    return this.#user ? { user: this.#user, claims: this.#claims } : null;
   }
+  get sessionUser(): (User & Claims) | null {
+    return this.#user ? { ...this.#user, ...this.#claims } : null;
+  }
+  get isReady(): boolean { return this.#isReady; }
+  get isVerifying(): boolean { return this.#pendingVerifications > 0; }
+  get isAuthenticated(): boolean { return this.#isReady && this.#user !== null; }
 
-  get isReady() {
-    return this.#ready;
-  }
-  get isAuthenticated() {
-    return this.#ready && this.user !== null;
-  }
-  get isRefreshing() {
-    return this.#refreshing;
-  }
-  get connectivity() {
-    return this.#sync?.getConnectivity?.() ?? 'unavailable';
-  }
-
-  /** Initializes from request/component-owned SSR data without I/O. */
-  init(
-    user: MaybeGetter<User | null>,
-    claims?: MaybeGetter<Claims | null | undefined>,
-  ): void {
-    if (this.#disposed) throw new Error('Auth client is disposed');
-    this.#initialUser = user;
-    this.#initialClaims = claims ?? null;
-    this.#localUser = undefined;
-    this.#localClaims = undefined;
-    this.#ready = true;
-    const session = this.session;
-    const generation = ++this.#generation;
-    if (session && typeof window !== 'undefined')
-      this.#transitionSync(generation, null, session);
-  }
-
-  #parseSession(value: unknown): AuthSession<User, Claims> {
-    if (
-      !isRecord(value) ||
-      typeof value.subject !== 'string' ||
-      !isRecord(value.user) ||
-      typeof value.user.id !== 'string' ||
-      value.user.id !== value.subject ||
-      !isRecord(value.claims)
-    ) {
-      throw new Error('Invalid auth session response');
-    }
-    return {
-      subject: value.subject,
-      user: value.user as User,
-      claims: value.claims as Claims,
+  /** Call during component initialization; getters follow SvelteKit load data. */
+  init(user: MaybeGetter<User | null>, claims?: MaybeGetter<Claims | null | undefined>) {
+    const initialization = ++this.#initialization;
+    const read = () => ({
+      user: typeof user === "function" ? (user as () => User | null)() : user,
+      claims: (typeof claims === "function" ? claims() : claims) ?? EMPTY_CLAIMS as Claims,
+    });
+    let previous = read();
+    const apply = (next: typeof previous) => {
+      this.#revision++;
+      this.#user = next.user;
+      this.#claims = next.claims;
+      this.#isReady = true;
     };
-  }
-
-  #apply(session: AuthSession<User, Claims> | null): void {
-    this.#localUser = session?.user ?? null;
-    this.#localClaims = session?.claims ?? (EMPTY_CLAIMS as Claims);
-    this.#ready = true;
-    void this.#onSession?.(session);
-  }
-
-  #transitionSync(
-    generation: number,
-    previous: AuthSession<User, Claims> | null,
-    next: AuthSession<User, Claims> | null,
-    purge = false,
-  ): void {
-    this.#syncTransition = this.#syncTransition
-      .then(async () => {
-        if (this.#disposed || generation !== this.#generation) return;
-        await this.#sync?.stop?.();
-        if (this.#disposed || generation !== this.#generation) return;
-        if (purge && previous)
-          await this.#sync?.purgeAccount?.(previous.subject);
-        if (this.#disposed || generation !== this.#generation) return;
-        if (next) await this.#sync?.start?.(next);
-      })
-      .catch((error) => this.#onIntegrationError?.(error));
-  }
-
-  #beginRequest(): { generation: number; controller: AbortController } {
-    this.#activeRequest?.abort();
-    const controller = new AbortController();
-    this.#activeRequest = controller;
-    return { generation: ++this.#generation, controller };
-  }
-
-  #finishRequest(controller: AbortController): void {
-    if (this.#activeRequest === controller) this.#activeRequest = undefined;
-  }
-
-  async #post(
-    path: string,
-    body?: unknown,
-    signal?: AbortSignal,
-  ): Promise<Response> {
-    const fetcher = this.#fetch;
-    return fetcher(`${this.#routesBase}/${path}`, {
-      method: 'POST',
-      signal,
-      ...(body !== undefined
-        ? {
-            body: JSON.stringify(body),
-            headers: { 'Content-Type': 'application/json' },
+    apply(previous);
+    let first = true;
+    $effect(() => {
+      const next = read();
+      untrack(() => {
+        if (initialization !== this.#initialization) return;
+        if (next.user !== previous.user || next.claims !== previous.claims) {
+          apply(next);
+          previous = next;
+        }
+        if (first) {
+          first = false;
+          if (this.#user && this.#config.refreshOnInit !== false) {
+            this.#isReady = false;
+            const revision = this.#revision;
+            void this.refresh().catch((error) => {
+              console.warn("Initial auth refresh failed.", error);
+            }).finally(() => {
+              if (revision === this.#revision) this.#isReady = true;
+            });
           }
-        : {}),
+        }
+      });
     });
   }
 
-  async #login(
-    path: string,
-    body: unknown,
-  ): Promise<AuthSession<User, Claims>> {
-    const { generation, controller } = this.#beginRequest();
-    const previous = this.session;
-    try {
-      const response = await this.#post(path, body, controller.signal);
-      if (!response.ok) throw await readAuthError(response, this.#codec);
-      const session = this.#parseSession(await response.json());
-      if (this.#disposed || generation !== this.#generation)
-        throw new Error('Authentication request was superseded');
-      this.#apply(session);
-      this.#transitionSync(
-        generation,
-        previous,
-        session,
-        previous?.subject !== session.subject,
-      );
-      return session;
-    } finally {
-      this.#finishRequest(controller);
+  private parseSessionResponse(data: unknown): AuthSession<User, Claims> {
+    const value = data as any;
+    const user = value?.user;
+    const claims = value?.claims ?? {};
+    if (!user || typeof user.id !== "string" || !claims || typeof claims !== "object" || Array.isArray(claims)) {
+      throw new Error("Invalid auth session response");
     }
+    return { user, claims };
   }
 
-  login<Body = unknown>(body: Body) {
-    return this.#login('login', body);
-  }
-  loginWithGoogle(credential: string) {
-    return this.#login('google', { credential });
-  }
-  loginWithTma(body: { initData: string } & Record<string, unknown>) {
-    return this.#login('tma', body);
+  private async applySession(session: AuthSession<User, Claims> | null) {
+    this.#user = session?.user ?? null;
+    this.#claims = session?.claims ?? EMPTY_CLAIMS as Claims;
+    this.#isReady = true;
+    await this.#config.onSession?.(session);
   }
 
-  async setClaims(claims: Claims): Promise<AuthSession<User, Claims> | null> {
-    const { generation, controller } = this.#beginRequest();
-    const previous = this.session;
+  private async invalidate() {
+    const hadUser = this.#user !== null;
+    this.#revision++;
     try {
-      const response = await this.#post('claims', claims, controller.signal);
-      if (response.status === 401) {
-        if (generation === this.#generation) await this.invalidate();
-        return null;
+      await this.applySession(null);
+    } finally {
+      if (hadUser) {
+        try { await this.#config.onInvalidSession?.(); }
+        finally { await this.#config.onLogout?.(); }
       }
-      if (!response.ok) throw await readAuthError(response, this.#codec);
-      const session = this.#parseSession(await response.json());
-      if (this.#disposed || generation !== this.#generation)
-        return this.session;
-      this.#apply(session);
-      this.#transitionSync(generation, previous, session);
-      return session;
+    }
+  }
+
+  private async requestSession(action: string, body: unknown, revision: number, invalidateOn401 = false) {
+    const response = await fetch(`${this.#routesBase}/${action}`, {
+      method: "POST",
+      ...(body !== undefined ? {
+        body: JSON.stringify(body),
+        headers: { "Content-Type": "application/json" },
+      } : {}),
+    });
+    if (revision !== this.#revision) return this.session;
+    if (response.status === 401 && invalidateOn401) {
+      await this.invalidate();
+      return null;
+    }
+    if (!response.ok) throw await readAuthError(response, this.#errorCodec);
+    const session = this.parseSessionResponse(await response.json());
+    if (revision !== this.#revision) return this.session;
+    await this.applySession(session);
+    return session;
+  }
+
+  private async authenticate(action: string, body: unknown): Promise<AuthSession<User, Claims>> {
+    const revision = ++this.#revision;
+    const session = await this.requestSession(action, body, revision);
+    if (revision !== this.#revision) throw new Error("Auth request superseded");
+    return session!;
+  }
+
+  login<Body = unknown>(body: Body): Promise<AuthSession<User, Claims>> {
+    return this.authenticate("login", body);
+  }
+  loginWithGoogle(credential: string): Promise<AuthSession<User, Claims>> {
+    return this.authenticate("google", { credential });
+  }
+  loginWithTma(body: { initData: string } & Record<string, unknown>): Promise<AuthSession<User, Claims>> {
+    return this.authenticate("tma", body);
+  }
+  setClaims(claims: Claims): Promise<AuthSession<User, Claims> | null> {
+    return this.requestSession("claims", claims, ++this.#revision, true);
+  }
+  async refresh(): Promise<AuthSession<User, Claims> | null> {
+    const revision = this.#revision;
+    this.#pendingVerifications++;
+    try {
+      return await this.requestSession("refresh", undefined, revision, true);
     } finally {
-      this.#finishRequest(controller);
+      this.#pendingVerifications--;
     }
   }
 
-  refresh(): Promise<AuthSession<User, Claims> | null> {
-    if (this.#refreshPromise) return this.#refreshPromise;
-    this.#refreshing = true;
-    const operation = this.#doRefresh();
-    this.#refreshPromise = operation;
-    void operation
-      .finally(() => {
-        if (this.#refreshPromise === operation) {
-          this.#refreshPromise = undefined;
-          this.#refreshing = false;
-        }
-      })
-      .catch(() => undefined);
-    return operation;
-  }
-
-  async #doRefresh(): Promise<AuthSession<User, Claims> | null> {
-    const { generation, controller } = this.#beginRequest();
+  /** Clears local state immediately; rejects if the server cannot clear its cookie. */
+  async logout(): Promise<void> {
+    this.#revision++;
+    this.#user = null;
+    this.#claims = EMPTY_CLAIMS as Claims;
+    this.#isReady = true;
     try {
-      const response = await this.#post(
-        'refresh',
-        undefined,
-        controller.signal,
-      );
-      if (response.status === 401) {
-        if (generation === this.#generation) await this.invalidate();
-        return null;
-      }
-      if (!response.ok) throw await readAuthError(response, this.#codec);
-      const session = this.#parseSession(await response.json());
-      if (this.#disposed || generation !== this.#generation)
-        return this.session;
-      const previous = this.session;
-      this.#apply(session);
-      this.#transitionSync(
-        generation,
-        previous,
-        session,
-        previous?.subject !== session.subject,
-      );
-      return session;
+      const response = await fetch(`${this.#routesBase}/logout`, { method: "POST" });
+      if (!response.ok) throw await readAuthError(response, this.#errorCodec);
     } finally {
-      this.#finishRequest(controller);
+      try { await this.#config.onSession?.(null); }
+      finally { await this.#config.onLogout?.(); }
     }
-  }
-
-  async invalidate(): Promise<void> {
-    this.#activeRequest?.abort();
-    this.#activeRequest = undefined;
-    ++this.#generation;
-    const previous = this.session;
-    try {
-      await this.#sync?.stop?.();
-    } catch (error) {
-      this.#onIntegrationError?.(error);
-    }
-    this.#apply(null);
-    await this.#onInvalidSession?.();
-    if (previous) await this.#sync?.purgeAccount?.(previous.subject);
-    await this.#onLogout?.();
-  }
-
-  /** Server logout failure is surfaced and the prior local session is restored. */
-  async logout(options: { purge?: boolean } = {}): Promise<void> {
-    const { generation, controller } = this.#beginRequest();
-    const previous = this.session;
-    await this.#sync?.stop?.();
-    let response: Response;
-    try {
-      response = await this.#post('logout', undefined, controller.signal);
-    } catch (error) {
-      if (generation === this.#generation && previous)
-        void Promise.resolve(this.#sync?.start?.(previous)).catch((cause) =>
-          this.#onIntegrationError?.(cause),
-        );
-      this.#finishRequest(controller);
-      throw error;
-    }
-    if (!response.ok) {
-      if (generation === this.#generation && previous)
-        void Promise.resolve(this.#sync?.start?.(previous)).catch((cause) =>
-          this.#onIntegrationError?.(cause),
-        );
-      this.#finishRequest(controller);
-      throw await readAuthError(response, this.#codec);
-    }
-    if (this.#disposed || generation !== this.#generation) {
-      this.#finishRequest(controller);
-      return;
-    }
-    if (options.purge && previous)
-      await this.#sync?.purgeAccount?.(previous.subject);
-    this.#apply(null);
-    await this.#onLogout?.();
-    this.#finishRequest(controller);
-  }
-
-  /** Explicit offline/local logout. The cookie remains until the server can be reached. */
-  async logoutLocal(options: { purge?: boolean } = {}): Promise<void> {
-    this.#activeRequest?.abort();
-    this.#activeRequest = undefined;
-    ++this.#generation;
-    const previous = this.session;
-    await this.#sync?.stop?.();
-    if (options.purge && previous)
-      await this.#sync?.purgeAccount?.(previous.subject);
-    this.#apply(null);
-    await this.#onLogout?.();
-  }
-
-  dispose(): void {
-    if (this.#disposed) return;
-    this.#disposed = true;
-    this.#activeRequest?.abort();
-    this.#activeRequest = undefined;
-    ++this.#generation;
-    this.#unsubscribeInvalidation?.();
-    this.#unsubscribeInvalidation = undefined;
-    void Promise.resolve(this.#sync?.stop?.()).catch((error) =>
-      this.#onIntegrationError?.(error),
-    );
   }
 }
 
 export function createAuth<
   User extends { id: string },
   Claims extends Record<string, unknown> = Record<string, never>,
->(config?: AuthClientConfig<User, Claims>) {
+>(config?: AuthClientConfig<User, Claims>): AuthClientState<User, Claims> {
   return new AuthClientState<User, Claims>(config);
 }

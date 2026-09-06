@@ -1,29 +1,24 @@
 export {
   parseInitData,
   verifyInitData,
+  verifyTelegramWebAppData,
   TelegramInitDataError,
-} from './verifier.js';
+} from "./verifier.js";
 export type {
   TelegramInitData,
   TelegramWebAppUser,
   VerifyInitDataOptions,
-} from './verifier.js';
+} from "./verifier.js";
 
 /**
  * Safe browser accessor for `window.Telegram.WebApp`.
  * Returns `null` outside the browser or when the script is not loaded.
  */
-export type TelegramWebApp = {
-  initData: string;
-  initDataUnsafe?: unknown;
-};
-
-export function getTelegramWebApp(): TelegramWebApp | null {
-  if (typeof window === 'undefined') return null;
-  const telegram = (
-    window as Window & { Telegram?: { WebApp?: TelegramWebApp } }
-  ).Telegram;
-  return telegram?.WebApp ?? null;
+export function getTelegramWebApp():
+  | (typeof window extends never ? never : any)
+  | null {
+  if (typeof window === "undefined") return null;
+  return (window as any).Telegram?.WebApp ?? null;
 }
 
 /** True when running inside a Telegram Mini App with initData present. */
@@ -34,10 +29,10 @@ export function isTelegramWebApp(): boolean {
 
 /** Raw signed initData string, or empty string when unavailable. */
 export function getTelegramInitData(): string {
-  return getTelegramWebApp()?.initData ?? '';
+  return getTelegramWebApp()?.initData ?? "";
 }
 
 /** Unsafe parsed initData from Telegram (not cryptographically verified). */
-export function getTelegramInitDataUnsafe(): unknown {
+export function getTelegramInitDataUnsafe(): any {
   return getTelegramWebApp()?.initDataUnsafe ?? null;
 }

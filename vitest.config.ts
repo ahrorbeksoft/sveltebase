@@ -1,75 +1,44 @@
-import { defineConfig } from 'vitest/config';
-import { svelte } from '@sveltejs/vite-plugin-svelte';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath } from "node:url";
+import { svelte } from "@sveltejs/vite-plugin-svelte";
+import { defineConfig } from "vitest/config";
 
-const root = fileURLToPath(new URL('.', import.meta.url));
-const exclude = [
-  '**/node_modules/**',
-  '**/dist/**',
-  '**/*.browser.test.ts',
-  '**/*.workers.test.ts',
-  '**/*.node.test.ts',
-  'tests/e2e/**',
-];
+const alias = Object.fromEntries(["utils", "state", "i18n"].map((name) => [
+  `@sveltebase/${name}`, fileURLToPath(new URL(`./packages/${name}/src/index.ts`, import.meta.url))
+]));
+
 export default defineConfig({
-  root,
-  plugins: [svelte({ configFile: false })],
-  resolve: { conditions: ['browser'] },
   test: {
-    projects: [
-      './vitest.browser.config.ts',
-      {
-        extends: true,
-        resolve: { conditions: ['node'] },
-        test: {
-          name: 'node',
-          environment: 'node',
-          include: ['packages/**/*.node.test.ts'],
-        },
-      },
-      {
-        extends: true,
-        test: {
-          name: 'unit',
-          environment: 'happy-dom',
-          include: ['packages/**/*.test.ts', 'scripts/**/*.test.{ts,mjs}'],
-          exclude: [...exclude, '**/*.integration.test.ts'],
-        },
-      },
-      {
-        extends: true,
-        test: {
-          name: 'integration',
-          environment: 'happy-dom',
-          include: ['packages/**/*.integration.test.ts'],
-          exclude,
-          setupFiles: [
-            fileURLToPath(
-              new URL('./tests/support/storage.ts', import.meta.url),
-            ),
-          ],
-        },
-      },
-    ],
     coverage: {
-      provider: 'v8',
-      reportOnFailure: true,
-      include: ['packages/*/src/**/*.{ts,svelte}'],
-      exclude: ['**/*.test.ts', '**/types.ts'],
-      reporter: ['text', 'json-summary', 'html'],
-      thresholds: {
-        lines: 85,
-        branches: 80,
-        functions: 85,
-        statements: 85,
-        perFile: false,
-        ...Object.fromEntries(
-          ['auth', 'sync', 'state', 'i18n', 'utils'].map((name) => [
-            `packages/${name}/src/**`,
-            { lines: 85, branches: 80 },
-          ]),
-        ),
-      },
+      provider: "v8",
+      include: ["packages/{utils,state,i18n,auth}/src/**/*.ts", "packages/auth/src/**/*.svelte"],
+      reporter: ["text", "html", "json-summary"],
+      thresholds: { statements: 95, branches: 90, functions: 95, lines: 95 }
     },
-  },
+    projects: [
+      {
+        plugins: [svelte({ configFile: false })],
+        resolve: { alias, conditions: ["browser"] },
+        test: {
+          name: "client",
+          environment: "jsdom",
+          environmentOptions: { jsdom: { url: "https://example.test/" } },
+          include: ["packages/{utils,state,i18n,auth}/tests/**/*.client.test.ts", "packages/{utils,state,i18n,auth}/tests/**/*.client.test.svelte.ts"],
+          setupFiles: ["./tests/setup-client.ts"],
+          restoreMocks: true,
+          unstubGlobals: true
+        }
+      },
+      {
+        plugins: [svelte({ configFile: false })],
+        resolve: { alias, conditions: ["node"] },
+        test: {
+          name: "server",
+          environment: "node",
+          include: ["packages/{utils,state,i18n,auth}/tests/**/*.server.test.ts"],
+          restoreMocks: true,
+          unstubGlobals: true
+        }
+      }
+    ]
+  }
 });

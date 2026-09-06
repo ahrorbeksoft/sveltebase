@@ -1,6 +1,6 @@
 {
   "name": "@sveltebase/web",
-  "version": "2.0.1",
+  "version": "1.7.11",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,20 +11,16 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
   },
   "dependencies": {
-    "@sveltebase/auth": "workspace:*",
-    "@sveltebase/i18n": "workspace:*",
-    "@sveltebase/sync": "workspace:*",
-    "@sveltebase/state": "workspace:*",
-    "@sveltebase/utils": "workspace:*",
-    "svelte": "5.57.0"
+    "@sveltebase/i18n": "1.7.11",
+    "svelte": "^5.57.0"
   },
   "devDependencies": {
-    "@sveltejs/adapter-auto": "7.0.1",
-    "@sveltejs/kit": "2.70.3",
-    "@sveltejs/vite-plugin-svelte": "7.3.0",
-    "svelte-check": "4.7.6",
-    "typescript": "6.0.3",
-    "vite": "8.2.2"
+    "@sveltejs/adapter-auto": "^7.0.1",
+    "@sveltejs/kit": "^2.70.3",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "svelte-check": "^4.7.6",
+    "typescript": "^6.0.3",
+    "vite": "^8.2.2"
   },
   "repository": {
     "type": "git",

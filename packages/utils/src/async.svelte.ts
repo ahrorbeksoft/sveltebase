@@ -1,105 +1,147 @@
-import { SvelteMap } from 'svelte/reactivity';
-import type {
-  NotificationAdapter,
-  NotificationMessage,
-} from './notifications.js';
-import { notify } from './notifications.js';
+import { BROWSER, DEV } from "esm-env";
+import { SvelteMap } from "svelte/reactivity";
 
-/** An optional user-facing result returned by an async action. */
-export type AsyncResult =
+/**
+ * Return shape consumed by `createAsync` and `tryCatch`.
+ *
+ * Returning `{ success }` shows a success toast. Returning `{ error }` shows an
+ * error toast. `null` and `void` complete silently.
+ */
+export type TryCatchReturn =
   | { success: string; error?: never }
   | { error: string; success?: never }
   | null
   | void;
 
-/** @deprecated Use `AsyncResult`. */
-export type TryCatchReturn = AsyncResult;
+const GLOBAL_KEY = "__global__";
 
-export interface AsyncOptions {
-  /** Adapter used for this helper; defaults to the shared notification adapter. */
-  notifications?: NotificationAdapter | null;
-  /** Turns a thrown value into an exposed Error. */
-  toError?: (error: unknown) => Error;
-}
+type ToastModule = typeof import("svelte-sonner");
+let toastModulePromise: Promise<ToastModule | null> | null = null;
 
-const GLOBAL_KEY = '__global__';
+/**
+ * Lazily imports `svelte-sonner` in the browser.
+ */
+async function getToastModule(): Promise<ToastModule | null> {
+  if (!BROWSER) {
+    return null;
+  }
 
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
+  if (!toastModulePromise) {
+    toastModulePromise = import("svelte-sonner")
+      .then((module) => ({ toast: module.toast }) as ToastModule)
+      .catch((error) => {
+        if (DEV) {
+          console.error("[createAsync] Failed to load svelte-sonner:", error);
+        }
+
+        return null;
+      });
+  }
+
+  return toastModulePromise;
 }
 
 /**
- * Wraps an async function with reactive loading counts and a last-started error.
- *
- * Calls using the same key increment its count independently. The latest call
- * started by this helper owns `error`, so an older rejection cannot overwrite a
- * newer call's result. Completed keys are removed from the reactive map.
+ * Shows a success toast for async action results.
  */
-export function createAsync<
-  T extends (...args: never[]) => Promise<AsyncResult> | AsyncResult,
->(operation: T, options: AsyncOptions = {}) {
-  const counts = new SvelteMap<string, number>();
+async function toastSuccess(message: string) {
+  const toastModule = await getToastModule();
+  toastModule?.toast.success(message);
+}
+
+/**
+ * Shows an error toast for async action results.
+ */
+async function toastError(message: string, description?: string) {
+  const toastModule = await getToastModule();
+  toastModule?.toast.error(message, description ? { description } : undefined);
+}
+
+/**
+ * Wraps an async function with reactive loading and error state.
+ *
+ * Use `run` for one global loading flag, or `runWithKey` when one wrapped
+ * function has multiple independent buttons/actions.
+ *
+ * @example
+ * ```ts
+ * const save = createAsync(async (id: string) => {
+ *   await api.save(id);
+ *   return { success: "Saved" };
+ * });
+ *
+ * await save.runWithKey(id, id);
+ * ```
+ */
+export function createAsync<T extends (...args: any[]) => Promise<TryCatchReturn> | Promise<void>>(
+  asyncFn: T
+) {
+  const loadingStates = new SvelteMap<string, number>();
   let error = $state<Error | null>(null);
-  let lastStarted = 0;
 
-  async function execute(
-    key: string,
-    args: Parameters<T>,
-  ): Promise<Awaited<ReturnType<T>>> {
-    const invocation = ++lastStarted;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-    error = null;
-
+  /**
+   * Runs the wrapped function and tracks loading under one key.
+   */
+  async function execute(id: string, args: Parameters<T>) {
     try {
-      const result = await operation(...args);
-      if (result?.success)
-        await notify(
-          'success',
-          { message: result.success },
-          options.notifications,
-        );
-      if (result?.error)
-        await notify('error', { message: result.error }, options.notifications);
-      return result as Awaited<ReturnType<T>>;
-    } catch (reason) {
-      const failure = options.toError?.(reason) ?? asError(reason);
-      if (invocation === lastStarted) error = failure;
-      await notify(
-        'error',
-        { message: failure.message },
-        options.notifications,
-      );
-      throw failure;
+      loadingStates.set(id, (loadingStates.get(id) ?? 0) + 1);
+      error = null;
+
+      const response = await asyncFn(...args);
+
+      if (response?.success) {
+        await toastSuccess(response.success);
+      } else if (response?.error) {
+        await toastError(response.error);
+      }
+
+      return response;
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err));
+      error = e;
+
+      if (DEV) {
+        await toastError(e.name, e.message);
+        console.error("[Dev Error]:", e);
+      } else {
+        await toastError("Something went wrong");
+      }
+
+      throw e;
     } finally {
-      const remaining = (counts.get(key) ?? 1) - 1;
-      if (remaining > 0) counts.set(key, remaining);
-      else counts.delete(key);
+      const remaining = (loadingStates.get(id) ?? 1) - 1;
+      if (remaining > 0) loadingStates.set(id, remaining);
+      else loadingStates.delete(id);
     }
   }
 
+  /**
+   * Executes using the global loading key.
+   */
+  async function run(...args: Parameters<T>) {
+    return execute(GLOBAL_KEY, args);
+  }
+
+  /**
+   * Executes using an explicit loading key.
+   */
+  async function runWithKey(key: string, ...args: Parameters<T>) {
+    return execute(key || GLOBAL_KEY, args);
+  }
+
   return {
-    /** True while one or more calls using this key are in progress. */
-    isLoading(key = GLOBAL_KEY): boolean {
-      return (counts.get(key || GLOBAL_KEY) ?? 0) > 0;
+    /**
+     * Checks loading state.
+     *
+     * Pass a key for specific actions, or call without args for global actions.
+     */
+    isLoading(key?: string) {
+      return (loadingStates.get(key || GLOBAL_KEY) ?? 0) > 0;
     },
-    /** Number of calls in progress for a key. */
-    pendingCount(key = GLOBAL_KEY): number {
-      return counts.get(key || GLOBAL_KEY) ?? 0;
-    },
-    /** Error from the latest invocation started by this helper, if it failed. */
-    get error(): Error | null {
+    get error() {
       return error;
     },
-    run(...args: Parameters<T>): Promise<Awaited<ReturnType<T>>> {
-      return execute(GLOBAL_KEY, args);
-    },
-    runWithKey(
-      key: string,
-      ...args: Parameters<T>
-    ): Promise<Awaited<ReturnType<T>>> {
-      return execute(key || GLOBAL_KEY, args);
-    },
+    run,
+    runWithKey
   };
 }
-
-export type { NotificationAdapter, NotificationMessage };

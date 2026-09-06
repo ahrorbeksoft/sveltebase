@@ -1,9 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "types": ["svelte"],
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true
+    "types": ["svelte"]
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte.ts", "type-tests/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.svelte.ts"]
 }

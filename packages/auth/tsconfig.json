@@ -1,7 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "types": ["svelte", "google.accounts"]
+    "types": ["svelte", "@cloudflare/workers-types", "google.accounts", "node"]
   },
   "include": ["src/**/*.ts", "src/**/*.svelte", "src/**/*.svelte.ts"]
 }

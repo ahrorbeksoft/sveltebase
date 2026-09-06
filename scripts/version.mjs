@@ -1,78 +1,81 @@
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from "node:path";
 import {
   getRootDir,
   getWorkspacePackages,
   readJson,
   sortWorkspacePackages,
-  writeJson,
-} from './workspace-tools.mjs';
-import { resolveNextVersion } from './release-tools.mjs';
+  writeJson
+} from "./workspace-tools.mjs";
 
-export { resolveNextVersion } from './release-tools.mjs';
+const [target] = process.argv.slice(2);
 
-export function versionWorkspace(target) {
-  if (!target) {
-    throw new Error(
-      'Usage: bun run ./scripts/version.mjs <patch|minor|major|x.y.z>',
-    );
-  }
-
-  const rootDir = getRootDir();
-  const rootManifestPath = join(rootDir, 'package.json');
-  const rootManifest = readJson(rootManifestPath);
-  const workspacePackages = sortWorkspacePackages(getWorkspacePackages());
-  const nextVersion = resolveNextVersion(rootManifest.version, target);
-  const workspaceNames = new Set(
-    workspacePackages.map((pkg) => pkg.manifest.name),
-  );
-
-  rootManifest.version = nextVersion;
-  writeJson(rootManifestPath, rootManifest);
-
-  for (const pkg of workspacePackages) {
-    const manifest = pkg.manifest;
-    manifest.version = nextVersion;
-
-    for (const fieldName of [
-      'dependencies',
-      'devDependencies',
-      'peerDependencies',
-      'optionalDependencies',
-    ]) {
-      const deps = manifest[fieldName];
-
-      if (!deps) {
-        continue;
-      }
-
-      for (const depName of Object.keys(deps)) {
-        if (
-          workspaceNames.has(depName) &&
-          !String(deps[depName]).startsWith('workspace:')
-        ) {
-          deps[depName] = nextVersion;
-        }
-      }
-    }
-    writeJson(pkg.manifestPath, manifest);
-  }
-
-  console.log(`Updated root and workspace packages to ${nextVersion}`);
-  console.log(
-    'The lockfile must now be regenerated with bun install; release verification requires bun install --frozen-lockfile.',
-  );
-  return nextVersion;
+if (!target) {
+  console.error("Usage: bun run ./scripts/version.mjs <patch|minor|major|x.y.z>");
+  process.exit(1);
 }
 
-if (
-  process.argv[1] &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
-  try {
-    versionWorkspace(process.argv[2]);
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
+const rootDir = getRootDir();
+const rootManifestPath = join(rootDir, "package.json");
+const rootManifest = readJson(rootManifestPath);
+const workspacePackages = sortWorkspacePackages(getWorkspacePackages());
+const nextVersion = resolveNextVersion(rootManifest.version, target);
+const workspaceNames = new Set(workspacePackages.map((pkg) => pkg.manifest.name));
+
+rootManifest.version = nextVersion;
+writeJson(rootManifestPath, rootManifest);
+
+for (const pkg of workspacePackages) {
+  const manifest = pkg.manifest;
+  manifest.version = nextVersion;
+
+  for (const fieldName of [
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies"
+  ]) {
+    const deps = manifest[fieldName];
+
+    if (!deps) {
+      continue;
+    }
+
+    for (const depName of Object.keys(deps)) {
+      if (workspaceNames.has(depName)) {
+        deps[depName] = nextVersion;
+      }
+    }
+  }
+
+  writeJson(pkg.manifestPath, manifest);
+}
+
+console.log(`Updated root and workspace packages to ${nextVersion}`);
+
+function resolveNextVersion(currentVersion, input) {
+  if (/^\d+\.\d+\.\d+$/.test(input)) {
+    return input;
+  }
+
+  const match = currentVersion.match(/^(\d+)\.(\d+)\.(\d+)$/);
+
+  if (!match) {
+    throw new Error(`Invalid current version: ${currentVersion}`);
+  }
+
+  const [, majorText, minorText, patchText] = match;
+  const major = Number(majorText);
+  const minor = Number(minorText);
+  const patch = Number(patchText);
+
+  switch (input) {
+    case "patch":
+      return `${major}.${minor}.${patch + 1}`;
+    case "minor":
+      return `${major}.${minor + 1}.0`;
+    case "major":
+      return `${major + 1}.0.0`;
+    default:
+      throw new Error(`Unsupported version target: ${input}`);
   }
 }

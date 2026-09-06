@@ -1,88 +1,71 @@
 {
   "name": "sveltebase-workspace",
-  "version": "2.0.1",
+  "version": "1.7.11",
   "private": true,
   "type": "module",
-  "packageManager": "bun@1.4.2",
+  "packageManager": "bun@1.1.26",
   "workspaces": [
     "packages/*",
     "apps/*"
   ],
-  "overrides": {
-    "cookie": "0.7.0",
-    "esbuild": "0.28.1",
-    "nanoid": "3.3.18",
-    "picomatch": "4.0.4",
-    "postcss": "8.5.28"
-  },
   "scripts": {
     "build": "bun run ./scripts/run-workspace-script.mjs build",
-    "check": "bun run build && bun run ./scripts/run-workspace-script.mjs check && bun run check:tests",
-    "lint": "eslint . && bun run format:check",
+    "check": "bun run skills:check && bun run build && bun run ./scripts/run-workspace-script.mjs check",
+    "lint": "bun run build && bun run ./scripts/run-workspace-script.mjs lint",
     "clean": "bun run ./scripts/run-workspace-script.mjs clean",
     "dev:web": "bun run --filter @sveltebase/web dev",
     "build:web": "bun run --filter @sveltebase/web build",
     "check:web": "bun run --filter @sveltebase/web check",
     "release:version": "bun run ./scripts/version.mjs",
-    "release:publish": "bun run ./scripts/publish.mjs",
-    "release": "bun run release:publish",
-    "test": "bun run test:unit && bun run test:workers && bun run test:browser && bun run test:e2e",
-    "test:unit": "vitest run --config vitest.config.ts --project unit --project integration --project node",
-    "test:integration": "vitest run --config vitest.config.ts --project integration --project node",
-    "test:browser": "vitest run --config vitest.browser.config.ts",
-    "test:workers": "vitest run --config vitest.workers.config.ts",
-    "test:e2e": "playwright test",
-    "test:coverage": "vitest run --config vitest.config.ts --coverage",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "deadcode": "knip",
-    "package:validate": "bun run ./scripts/validate-packed-packages.mjs",
-    "release:verify": "bun run ./scripts/release-verify.mjs",
-    "check:tests": "tsc -p tsconfig.tests.json --noEmit"
+    "release:publish": "bun run build && bun run ./scripts/publish.mjs",
+    "release": "bun run ./scripts/publish-all.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:types": "tsc --project tests/tsconfig.json --noEmit && tsc --project tests/registered/tsconfig.json --noEmit",
+    "skills:sync": "node scripts/sync-skills.mjs",
+    "skills:check": "node scripts/check-skills.mjs",
+    "skills:list": "intent list"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20260905.1",
-    "@sveltejs/package": "2.5.8",
-    "@sveltejs/vite-plugin-svelte": "7.3.0",
-    "@types/node": "24.13.3",
-    "@types/ws": "8.18.1",
-    "publint": "0.3.24",
-    "svelte": "5.57.0",
-    "svelte-check": "4.7.6",
-    "tsup": "8.5.1",
-    "typescript": "6.0.3",
-    "vite": "8.2.2",
-    "eslint": "10.10.0",
-    "@eslint/js": "10.0.1",
-    "typescript-eslint": "8.69.0",
-    "eslint-plugin-svelte": "3.23.0",
-    "prettier": "3.9.6",
-    "prettier-plugin-svelte": "4.1.1",
-    "knip": "6.34.0",
-    "@playwright/test": "1.63.0",
-    "fake-indexeddb": "6.2.5",
-    "happy-dom": "20.14.0",
-    "@sveltejs/kit": "2.70.3",
-    "vitest": "4.1.11",
-    "@vitest/coverage-v8": "4.1.11",
-    "@vitest/browser-playwright": "4.1.11",
-    "@cloudflare/vitest-plugin": "1.1.4",
-    "ws": "8.21.3"
+    "@cloudflare/workers-types": "^5.20260905.1",
+    "@sveltejs/package": "^2.5.8",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "@tanstack/intent": "^0.4.0",
+    "@types/node": "^26.4.1",
+    "@vitest/coverage-v8": "^5.0.0",
+    "jsdom": "^30.0.1",
+    "publint": "^0.3.24",
+    "svelte": "^5.57.0",
+    "svelte-check": "^4.7.6",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.2.2",
+    "vitest": "^5.0.0",
+    "wrangler": "^4.129.0",
+    "zod": "^4.5.4"
   },
   "description": "A Bun workspace for Svelte packages.",
+  "main": "index.js",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ahrorbeksoft/sveltebase.git"
   },
-  "keywords": [],
+  "keywords": [
+    "tanstack-intent"
+  ],
   "author": "",
   "license": "ISC",
   "bugs": {
     "url": "https://github.com/ahrorbeksoft/sveltebase/issues"
   },
   "homepage": "https://github.com/ahrorbeksoft/sveltebase#readme",
-  "engines": {
-    "node": ">=24 <25",
-    "bun": "1.4.2"
+  "intent": {
+    "skills": [
+      "workspace:@sveltebase/auth",
+      "workspace:@sveltebase/state",
+      "workspace:@sveltebase/i18n",
+      "workspace:@sveltebase/utils"
+    ]
   }
 }

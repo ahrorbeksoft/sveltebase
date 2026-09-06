@@ -1,4 +1,4 @@
-import { SerializableError } from '../errors.js';
+import { SerializableError } from "../errors.js";
 
 /**
  * Telegram Mini App user embedded in `initData`.
@@ -43,7 +43,7 @@ export type TelegramInitData = {
 };
 
 export class TelegramInitDataError extends SerializableError {
-  static readonly code = 'TelegramInitDataError';
+  static readonly code = "TelegramInitDataError";
   constructor(message: string) {
     super(message);
   }
@@ -71,19 +71,19 @@ async function hmacSha256(
   data: string,
 ): Promise<ArrayBuffer> {
   const cryptoKey = await crypto.subtle.importKey(
-    'raw',
+    "raw",
     key as BufferSource,
-    { name: 'HMAC', hash: 'SHA-256' },
+    { name: "HMAC", hash: "SHA-256" },
     false,
-    ['sign'],
+    ["sign"],
   );
-  return crypto.subtle.sign('HMAC', cryptoKey, new TextEncoder().encode(data));
+  return crypto.subtle.sign("HMAC", cryptoKey, new TextEncoder().encode(data));
 }
 
 function bufferToHex(buffer: ArrayBuffer): string {
   return [...new Uint8Array(buffer)]
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 /**
@@ -93,106 +93,51 @@ function bufferToHex(buffer: ArrayBuffer): string {
  */
 export function parseInitData(initData: string): TelegramInitData {
   const params = new URLSearchParams(initData);
-  const raw: Record<string, string> = Object.create(null) as Record<
-    string,
-    string
-  >;
+  const raw: Record<string, string> = {};
   for (const [key, value] of params.entries()) {
-    if (Object.prototype.hasOwnProperty.call(raw, key)) {
-      throw new TelegramInitDataError(`Duplicate ${key} in Telegram initData`);
-    }
     raw[key] = value;
   }
 
   const hash = raw.hash;
   if (!hash) {
-    throw new TelegramInitDataError('Missing hash in Telegram initData');
-  }
-  if (!/^[a-fA-F0-9]{64}$/.test(hash)) {
-    throw new TelegramInitDataError('Invalid hash in Telegram initData');
+    throw new TelegramInitDataError("Missing hash in Telegram initData");
   }
 
   const authDateRaw = raw.auth_date;
   if (!authDateRaw) {
-    throw new TelegramInitDataError('Missing auth_date in Telegram initData');
+    throw new TelegramInitDataError("Missing auth_date in Telegram initData");
   }
 
   const auth_date = Number(authDateRaw);
-  if (
-    !Number.isFinite(auth_date) ||
-    !Number.isInteger(auth_date) ||
-    auth_date < 0
-  ) {
-    throw new TelegramInitDataError('Invalid auth_date in Telegram initData');
+  if (!Number.isFinite(auth_date)) {
+    throw new TelegramInitDataError("Invalid auth_date in Telegram initData");
   }
 
   let user: TelegramWebAppUser | undefined;
   if (raw.user) {
     try {
-      const parsedUser: unknown = JSON.parse(raw.user);
-      if (
-        !parsedUser ||
-        typeof parsedUser !== 'object' ||
-        Array.isArray(parsedUser) ||
-        !Number.isSafeInteger((parsedUser as { id?: unknown }).id) ||
-        typeof (parsedUser as { first_name?: unknown }).first_name !== 'string'
-      ) {
-        throw new Error('invalid user');
-      }
-      user = parsedUser as TelegramWebAppUser;
+      user = JSON.parse(raw.user) as TelegramWebAppUser;
     } catch {
-      throw new TelegramInitDataError('Invalid user JSON in Telegram initData');
+      throw new TelegramInitDataError("Invalid user JSON in Telegram initData");
     }
   }
 
   let receiver: TelegramWebAppUser | undefined;
   if (raw.receiver) {
     try {
-      const parsedReceiver: unknown = JSON.parse(raw.receiver);
-      if (
-        !parsedReceiver ||
-        typeof parsedReceiver !== 'object' ||
-        Array.isArray(parsedReceiver) ||
-        !Number.isSafeInteger((parsedReceiver as { id?: unknown }).id) ||
-        typeof (parsedReceiver as { first_name?: unknown }).first_name !==
-          'string'
-      )
-        throw new Error('invalid receiver');
-      receiver = parsedReceiver as TelegramWebAppUser;
+      receiver = JSON.parse(raw.receiver) as TelegramWebAppUser;
     } catch {
-      throw new TelegramInitDataError(
-        'Invalid receiver JSON in Telegram initData',
-      );
+      throw new TelegramInitDataError("Invalid receiver JSON in Telegram initData");
     }
   }
 
-  let chat: TelegramInitData['chat'];
+  let chat: TelegramInitData["chat"];
   if (raw.chat) {
     try {
-      const parsedChat: unknown = JSON.parse(raw.chat);
-      if (
-        !parsedChat ||
-        typeof parsedChat !== 'object' ||
-        Array.isArray(parsedChat) ||
-        !Number.isSafeInteger((parsedChat as { id?: unknown }).id) ||
-        typeof (parsedChat as { type?: unknown }).type !== 'string'
-      )
-        throw new Error('invalid chat');
-      chat = parsedChat as TelegramInitData['chat'];
+      chat = JSON.parse(raw.chat) as TelegramInitData["chat"];
     } catch {
-      throw new TelegramInitDataError('Invalid chat JSON in Telegram initData');
+      throw new TelegramInitDataError("Invalid chat JSON in Telegram initData");
     }
-  }
-
-  const canSendAfter =
-    raw.can_send_after === undefined ? undefined : Number(raw.can_send_after);
-  if (
-    canSendAfter !== undefined &&
-    (!Number.isFinite(canSendAfter) || canSendAfter < 0)
-  ) {
-    throw new TelegramInitDataError(
-      'Invalid can_send_after in Telegram initData',
-    );
   }
 
   return {
@@ -203,7 +148,9 @@ export function parseInitData(initData: string): TelegramInitData {
     chat_type: raw.chat_type,
     chat_instance: raw.chat_instance,
     start_param: raw.start_param,
-    can_send_after: canSendAfter,
+    can_send_after: raw.can_send_after
+      ? Number(raw.can_send_after)
+      : undefined,
     auth_date,
     hash,
     signature: raw.signature,
@@ -227,61 +174,46 @@ export async function verifyInitData(
   } = options;
 
   if (!initData) {
-    throw new TelegramInitDataError('Missing Telegram initData');
+    throw new TelegramInitDataError("Missing Telegram initData");
   }
   if (!botToken) {
-    throw new TelegramInitDataError('Missing Telegram bot token');
-  }
-  if (
-    !Number.isFinite(maxAgeSeconds) ||
-    maxAgeSeconds < 0 ||
-    !Number.isFinite(clockSkewSeconds) ||
-    clockSkewSeconds < 0
-  ) {
-    throw new TelegramInitDataError(
-      'Invalid Telegram verification time window',
-    );
+    throw new TelegramInitDataError("Missing Telegram bot token");
   }
 
   const parsed = parseInitData(initData);
   const now = Math.floor(Date.now() / 1000);
 
   if (parsed.auth_date > now + clockSkewSeconds) {
-    throw new TelegramInitDataError('Telegram auth_date is in the future');
+    throw new TelegramInitDataError("Telegram auth_date is in the future");
   }
   if (now - parsed.auth_date > maxAgeSeconds) {
-    throw new TelegramInitDataError('Telegram initData has expired');
+    throw new TelegramInitDataError("Telegram initData has expired");
   }
 
   const keys = Object.keys(parsed.raw)
-    .filter((key) => key !== 'hash')
+    .filter((key) => key !== "hash")
     .sort();
   const dataCheckString = keys
     .map((key) => `${key}=${parsed.raw[key]}`)
-    .join('\n');
+    .join("\n");
 
   // secret_key = HMAC_SHA256(bot_token, key="WebAppData")
   const secretKey = await hmacSha256(
-    new TextEncoder().encode('WebAppData'),
+    new TextEncoder().encode("WebAppData"),
     botToken,
   );
 
   // hash = hex(HMAC_SHA256(data_check_string, secret_key))
   const computed = bufferToHex(await hmacSha256(secretKey, dataCheckString));
 
-  const expected = new TextEncoder().encode(computed);
-  const actual = new TextEncoder().encode(parsed.hash.toLowerCase());
-  let difference = expected.length ^ actual.length;
-  for (
-    let index = 0;
-    index < Math.max(expected.length, actual.length);
-    index++
-  ) {
-    difference |= (expected[index] ?? 0) ^ (actual[index] ?? 0);
-  }
-  if (difference !== 0) {
-    throw new TelegramInitDataError('Telegram initData integrity check failed');
+  if (computed !== parsed.hash) {
+    throw new TelegramInitDataError("Telegram initData integrity check failed");
   }
 
   return parsed;
 }
+
+/**
+ * Alias kept for readability at app call sites.
+ */
+export const verifyTelegramWebAppData = verifyInitData;
