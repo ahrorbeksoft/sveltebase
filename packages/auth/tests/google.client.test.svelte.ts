@@ -5,7 +5,6 @@ import GoogleLogin from '../src/google/GoogleLogin.svelte';
 import GoogleOneTapLogin from '../src/google/GoogleOneTapLogin.svelte';
 import { googleLogout } from '../src/google/google.svelte.js';
 import GoogleHarness from './fixtures/GoogleHarness.svelte';
-import { getTelegramWebApp, isTelegramWebApp, getTelegramInitData, getTelegramInitDataUnsafe } from '../src/telegram/index.js';
 
 let instances: ReturnType<typeof mount>[] = [];
 let id: any, oauth2: any, tokenConfig: any, codeConfig: any;
@@ -120,12 +119,4 @@ describe('OAuth token and code clients', () => {
     googleLogout(); expect(id.disableAutoSelect).toHaveBeenCalledOnce();
     vi.stubGlobal('google', undefined); expect(() => googleLogout()).not.toThrow();
   });
-});
-
-it('reads Telegram browser data and handles missing SDK data', () => {
-  vi.stubGlobal('Telegram', undefined); expect(getTelegramWebApp()).toBeNull(); expect(isTelegramWebApp()).toBe(false);
-  const webApp = { initData: 'signed-data', initDataUnsafe: { user: { id: 42 } } };
-  vi.stubGlobal('Telegram', { WebApp: webApp });
-  expect(getTelegramWebApp()).toBe(webApp); expect(getTelegramInitData()).toBe('signed-data');
-  expect(getTelegramInitDataUnsafe()).toBe(webApp.initDataUnsafe); expect(isTelegramWebApp()).toBe(true);
 });

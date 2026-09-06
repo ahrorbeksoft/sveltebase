@@ -90,7 +90,7 @@ export function load({ cookies }) {
 <script lang="ts">
   import { i18n } from "$lib/i18n";
 
-  let { data } = $props();
+  let { data, children } = $props();
   i18n.init(() => data.locale);
 </script>
 
@@ -101,9 +101,20 @@ Call `i18n.init()` (with or without a locale cookie value) before any child uses
 
 `init` accepts the serialized value returned by `cookies.get("locale")` (for example, `'"uz"'`), or a getter for that value. For a custom storage key, read that key in your server load.
 
+The shared instance reads the current component tree's locale during SSR, so
+requests cannot overwrite each other's initialized locale. Call `init` directly
+in the parent layout; children can immediately read `i18n.locale`, `i18n.t`, and
+`i18n.format`. The supplied load value also sets the initial browser locale so
+hydration matches SSR. Browser locale assignments update translations and persist
+the cookie.
+
+Outside SSR components, the instance uses its own locale rather than a request's
+initialized locale. For request-specific translations in server load functions or
+endpoints, create a separate instance and assign its locale explicitly.
+
 ## Translating text
 
-Prefer the instance methods — they work anywhere (components, `<script module>`, utils):
+Use the instance methods in components or utilities:
 
 ```ts
 import { i18n } from "$lib/i18n";

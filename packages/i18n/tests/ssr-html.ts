@@ -1,0 +1,1 @@
+export const ssrHtml = '<!--[--><p>Salom, Ada</p> <time>2020-yil, 15-Yanvar</time><!----> <span data-locale="">uz</span> <span data-language="">O\'zbek</span> <span data-direct="">Salom, Ada</span><!--]-->';

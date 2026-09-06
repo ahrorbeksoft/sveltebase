@@ -11,11 +11,6 @@ Foundational Svelte 5 packages for local-first apps.
 | [`@sveltebase/state`](./packages/state/README.md) | Reactive in-memory and cookie-backed state |
 | [`@sveltebase/i18n`](./packages/i18n/README.md) | Locale, translations, and date formatting |
 
-Use [TanStack DB](https://tanstack.com/db/latest/docs/overview) for reactive application
-data, with API-backed collections. Auth is independent of the data layer.
-`@sveltebase/sync` has been removed from this workspace. See the
-[auth migration notes](./packages/auth/README.md#tanstack-db-and-migration-from-sync).
-
 ## Agent skills with TanStack Intent
 
 Each package ships a dedicated skill (`auth`, `state`, `i18n`, or `utils`) and the

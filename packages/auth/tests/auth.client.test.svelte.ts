@@ -12,15 +12,19 @@ function deferred<T>() {
 }
 
 describe("API-based auth", () => {
-  it.each(["login", "google", "tma"])("authenticates through %s without a data client", async (action) => {
+  it.each(["login", "google"])("authenticates through %s without a data client", async (action) => {
     const fetcher = vi.fn().mockResolvedValue(Response.json(session));
     vi.stubGlobal("fetch", fetcher);
     const onSession = vi.fn();
     const auth = createAuth({ routesBase: "/auth/", onSession });
     if (action === "login") await auth.login({ password: "secret" });
     if (action === "google") await auth.loginWithGoogle("credential");
-    if (action === "tma") await auth.loginWithTma({ initData: "signed" });
     expect(fetcher.mock.calls[0][0]).toBe(`/auth/${action}`);
+    expect(fetcher.mock.calls[0][1]).toEqual({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(action === "login" ? { password: "secret" } : { credential: "credential" }),
+    });
     expect(auth.session).toEqual(session);
     expect(auth.isAuthenticated).toBe(true);
     expect(onSession).toHaveBeenCalledWith(session);
@@ -135,7 +139,8 @@ describe("API-based auth", () => {
     const stop = $effect.root(() => auth.init(session.user));
     try {
       flushSync();
-      await vi.waitFor(() => expect(auth.isReady).toBe(true));
+      await vi.waitFor(() => expect(auth.session).toEqual(session));
+      expect(auth.isReady).toBe(true);
       expect(fetch).toHaveBeenCalledTimes(1);
       expect(auth.session).toEqual(session);
     } finally { stop(); }

@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { flushSync, mount, unmount } from "svelte";
+import { flushSync, hydrate, mount, unmount } from "svelte";
 import { Cookies } from "@sveltebase/utils";
 import { createI18n, getFormat, getTranslations } from "../src/index.js";
 import { languages } from "./catalog.js";
@@ -66,4 +66,29 @@ it("falls back when assigned an unknown locale at runtime", () => {
   i18n.locale = "invalid" as "en";
   expect(i18n.locale).toBe("en");
   expect(i18n.t("greeting", { name: "Ada" })).toBe("Hello, Ada");
+});
+
+it("hydrates the server locale even when the browser cookie differs", async () => {
+  const { ssrHtml } = await import('./ssr-html.js');
+  Cookies.set("locale", '"en"');
+  const i18n = createI18n(languages);
+  const warn = vi.spyOn(console, "warn");
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  document.body.innerHTML = ssrHtml;
+  const original = document.querySelector("p");
+  const component = hydrate(Root, { target: document.body, props: { i18n, locale: '"uz"' }, recover: false });
+  try {
+    expect(i18n.locale).toBe("uz");
+    flushSync();
+    expect(document.querySelector("p")).toBe(original);
+    expect(original?.textContent).toBe("Salom, Ada");
+    expect(document.querySelector("[data-direct]")?.textContent).toBe("Salom, Ada");
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    i18n.locale = "en";
+    flushSync();
+    expect(original?.textContent).toBe("Hello, Ada");
+    expect(document.querySelector("[data-locale]")?.textContent).toBe("en");
+    expect(Cookies.get("locale")).toBe('"en"');
+  } finally { await unmount(component); }
 });

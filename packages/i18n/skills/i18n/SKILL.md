@@ -27,14 +27,16 @@ i18n.locale = 'uz';
 
 Provide a non-empty language array. The first language is the fallback; unknown
 locale assignments fall back to it. Keep message keys consistent between catalogs.
-Share immutable language definitions, but scope the mutable i18n instance to the
-request/component tree when SSR can serve different users concurrently.
+A shared instance isolates initialized SSR locale state per component tree.
+Outside SSR components, create a request-local instance and assign its locale
+for request-specific translations in server loads or endpoints.
 
 `createI18n(languages, storageKey?)` defaults to cookie key `locale`. Read that exact
 key in `+layout.server.ts` and return its serialized `cookies.get(key)` value.
 Call `i18n.init(() => data.localeCookie)` during parent component initialization.
-The input is JSON text (e.g. `'"uz"'`), not a bare locale code. In the browser the
-underlying state hydrates from the cookie; on the server `init` applies the load value.
+The input is JSON text (e.g. `'"uz"'`), not a bare locale code. Passing a load value initializes both SSR and browser rendering with that locale;
+`init()` without an argument uses the browser cookie or the fallback. No mount hook
+is needed. Browser locale assignments update translations and persist the cookie.
 
 ## Context and reactivity
 

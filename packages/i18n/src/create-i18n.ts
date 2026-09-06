@@ -1,4 +1,4 @@
-import { createContext } from "svelte";
+import { createContext, getContext, setContext } from "svelte";
 import { PersistentState, type StandardSchemaV1 } from "@sveltebase/state";
 import type { AppConfig } from "use-intl/core";
 import {
@@ -301,9 +301,33 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
     localeSchema
   ) as LocaleState<LocaleCode<TLanguages>>;
 
+  const serverLocaleKey = Symbol("i18n-locale");
+  const activeLocaleState = (): { current: LocaleCode<TLanguages> } => {
+    if (typeof window === "undefined") {
+      try {
+        return getContext<{ current: LocaleCode<TLanguages> }>(serverLocaleKey) ?? localeState;
+      } catch {
+        // Outside a component, this instance's own locale is used.
+      }
+    }
+    return localeState;
+  };
+  const readLocaleCookie = (raw: string | null | undefined): LocaleCode<TLanguages> => {
+    if (raw == null) return fallbackLocale;
+    try {
+      let value: unknown;
+      try { value = JSON.parse(raw); }
+      catch { value = JSON.parse(decodeURIComponent(raw)); }
+      return typeof value === "string" && localeCodes.includes(value as LocaleCode<TLanguages>)
+        ? value as LocaleCode<TLanguages> : fallbackLocale;
+    } catch {
+      return fallbackLocale;
+    }
+  };
+
   const { t, format } = createInstanceHelpers(
     languages,
-    () => localeState.current,
+    () => activeLocaleState().current,
     fallbackLocale
   );
 
@@ -313,17 +337,17 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
     },
 
     get locale() {
-      return localeState.current;
+      return activeLocaleState().current;
     },
 
     set locale(nextLocale: LocaleCode<TLanguages>) {
-      localeState.current = localeCodes.includes(nextLocale) ? nextLocale : fallbackLocale;
+      activeLocaleState().current = localeCodes.includes(nextLocale) ? nextLocale : fallbackLocale;
     },
 
     get currentLanguage() {
       return getLanguage(
         languages,
-        localeState.current,
+        activeLocaleState().current,
         fallbackLocale
       ) as CurrentLanguage<TLanguages>;
     },
@@ -332,7 +356,12 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
     format,
 
     init(localeCookie?: MaybeGetter<string | null | undefined>) {
-      localeState.init(localeCookie);
+      const raw = typeof localeCookie === "function" ? localeCookie() : localeCookie;
+      if (typeof window === "undefined") {
+        setContext(serverLocaleKey, { current: readLocaleCookie(raw) });
+      } else if (localeCookie !== undefined) {
+        localeState.current = readLocaleCookie(raw);
+      }
 
       const { set } = ensureContext();
       set(i18n as I18nInstance<readonly LanguageDefinition[]>);

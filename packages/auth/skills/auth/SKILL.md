@@ -1,6 +1,6 @@
 ---
 name: auth
-description: Use @sveltebase/auth for signed cookie sessions, SvelteKit auth routes, reactive client auth, claims, and Google or Telegram login.
+description: Use @sveltebase/auth for signed cookie sessions, SvelteKit auth routes, reactive client auth, claims, and Google login.
 license: ISC
 metadata:
   library: "@sveltebase/auth"
@@ -37,6 +37,12 @@ Expose routes using `createAuthRoutes({ auth, login, getUser, setClaims, ... })`
 latest profile for refresh. Successful session responses are `{ user, claims }`.
 Missing action callbacks return 404; malformed JSON returns 400.
 
+Optionally pass `loginSchema` to `createAuthRoutes` using a Standard Schema v1
+validator. The login callback's credentials type is inferred from its output.
+Validation may be async; invalid input returns 400 before login or cookie creation.
+The callback receives parsed/transformed values. Share the schema's input type with
+`auth.login<LoginBody>(body)` on the client. Without a schema, validate in the callback.
+
 The `/claims` route is disabled without a `setClaims(body, event, current)` callback.
 Validate and authorize role/tenant changes there and return only permitted claims.
 Refresh preserves existing claims; it does not reauthorize them automatically.
@@ -44,17 +50,77 @@ Authorize protected operations using the verified session.
 
 ## Reactive auth
 
-Create one auth client per layout/component tree. Call `init` during component
-initialization and pass getters for changing server load data:
+Create and export the client once, initialize it in a root layout or parent, then
+import the same instance wherever you need it.
+
+**`src/lib/auth.ts`**
+
+```ts
+import { createAuth } from "@sveltebase/auth/client";
+import type { User, Claims } from "$lib/types";
+
+export const auth = createAuth<User, Claims>();
+```
+
+`User` and `Claims` are your application's types.
+
+**`src/routes/+layout.server.ts`**
+
+```ts
+import { auth } from "$lib/server/auth";
+
+export async function load({ cookies }) {
+  const session = await auth.getSession(cookies);
+  return {
+    user: session?.user ?? null,
+    claims: session?.claims ?? {}
+  };
+}
+```
+
+The server auth instance verifies the signed session cookie before returning the
+user and claims to the layout.
+
+**`src/routes/+layout.svelte`**
 
 ```svelte
 <script lang="ts">
-  import { createAuth } from '@sveltebase/auth/client';
-  let { data } = $props();
-  const auth = createAuth({ refreshOnInit: true });
+  import { auth } from "$lib/auth";
+
+  let { data, children } = $props();
+
   auth.init(() => data.user, () => data.claims);
 </script>
+
+{@render children()}
 ```
+
+**A child component**
+
+```svelte
+<script lang="ts">
+  import { auth } from "$lib/auth";
+</script>
+
+{#if auth.isReady}
+  {#if auth.user}
+    <p>Signed in as {auth.user.id}</p>
+    <button onclick={() => auth.logout()}>Sign out</button>
+  {:else}
+    <a href="/login">Sign in</a>
+  {/if}
+{/if}
+```
+
+Children read `auth.user`, `auth.claims`, and other reactive properties directly;
+only the parent calls `init`, directly during component initialization. The verified
+user is available immediately during SSR and browser hydration. Server state is
+isolated to the current component tree even though every component imports the same
+`auth` object. Browser refresh runs in the background without hiding that session.
+
+On the server, read this shared instance in components; use server auth helpers in
+load functions, endpoints, or other server code. Browser auth actions and direct
+user/claims assignments are unavailable on the server.
 
 `user`, `claims`, `session`, `sessionUser`, `isReady`, `isVerifying`, and
 `isAuthenticated` are reactive getters. Read them through the instance rather than
@@ -63,7 +129,7 @@ use `refreshOnInit: false` when server load already provides sufficient verifica
 SSR initialization does not fetch. A transient refresh error preserves local state;
 401 invalidates it. Same-user profile/claims replacements from load are followed.
 
-Actions: `login(body)`, `loginWithGoogle(credential)`, `loginWithTma({ initData, ... })`,
+Actions: `login(body)`, `loginWithGoogle(credential)`,
 `setClaims(claims)`, `refresh()`, and `logout()`.
 
 - `onSession(sessionOrNull)` is awaited after session changes.
@@ -78,10 +144,8 @@ Use Google Identity Services **ID-token credentials** for `loginWithGoogle`.
 `createGoogleLogin` uses OAuth token/code flows; access tokens and authorization
 codes are not ID-token credentials. `decodeCredentials` only decodes; it does not
 verify authenticity. `googleLogout` disables Google auto-selection, not app logout.
-For Telegram, send raw initData to `/tma`; configure server bot-token resolution and
-user mapping. Never trust a browser-decoded provider profile as authenticated input.
+Never trust a browser-decoded provider profile as authenticated input.
 
 Import `SerializableError` from auth, define a stable static `code`, and register
 subclasses in client `errorClasses`. The wire format contains only code/message.
 SvelteKit HTTP errors retain status; SerializableError returns 400; other errors 500.
-

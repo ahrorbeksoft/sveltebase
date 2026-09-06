@@ -7,15 +7,13 @@ import {
   type RequestEvent,
   type RequestHandler,
 } from "@sveltejs/kit";
+import type { StandardSchemaV1 } from "./schema.js";
+export type { StandardSchemaV1 } from "./schema.js";
+
 import type { GoogleData } from "../google/types.js";
 import { verifyIdToken } from "../google/verifier.js";
 import { serializeAuthError, SerializableError } from "../errors.js";
 import type { AuthSession } from "../index.js";
-import {
-  verifyInitData,
-  type TelegramInitData,
-} from "../telegram/verifier.js";
-
 /**
  * Server session helper shape expected by `createAuthRoutes`.
  */
@@ -67,9 +65,10 @@ export type CreateAuthRoutesOptions<
   User extends { id: string },
   LoginBody = unknown,
   Claims extends Record<string, unknown> = Record<string, never>,
-  TmaBody extends { initData?: string } = { initData: string },
 > = {
   auth: ServerAuth<User, Claims>;
+  /** Validates login JSON before the callback; its parsed output becomes credentials. */
+  loginSchema?: StandardSchemaV1<unknown, LoginBody>;
   /**
    * Credential login for `POST /login`.
    * Return a user profile, or `{ user, claims }` for session claims.
@@ -102,23 +101,7 @@ export type CreateAuthRoutesOptions<
       event: RequestEvent,
     ) => Promise<LoginResult<User, Claims>> | LoginResult<User, Claims>;
   };
-  /**
-   * Telegram Mini App login for `POST /tma`.
-   * Package verifies initData; app maps verified data to a user/session.
-   */
-  tma?: {
-    getBotToken: (
-      event: RequestEvent,
-      body: TmaBody,
-    ) => Promise<string | null | undefined> | string | null | undefined;
-    getUser: (
-      initData: TelegramInitData,
-      event: RequestEvent,
-      body: TmaBody,
-    ) => Promise<LoginResult<User, Claims>> | LoginResult<User, Claims>;
-    maxAgeSeconds?: number;
-    clockSkewSeconds?: number;
-  };
+
 };
 
 async function parseJsonBody<T>(event: RequestEvent): Promise<T> {
@@ -162,15 +145,14 @@ function routeSegment(event: RequestEvent) {
 /**
  * Creates SvelteKit auth route handlers.
  *
- * Supported POST actions: `login`, `logout`, `refresh`, `claims`, `google`, `tma`.
+ * Supported POST actions: `login`, `logout`, `refresh`, `claims`, `google`.
  * All successful auth responses return `{ user, claims }`.
  */
 export function createAuthRoutes<
   User extends { id: string },
   LoginBody = unknown,
   Claims extends Record<string, unknown> = Record<string, never>,
-  TmaBody extends { initData?: string } = { initData: string },
->(options: CreateAuthRoutesOptions<User, LoginBody, Claims, TmaBody>): {
+>(options: CreateAuthRoutesOptions<User, LoginBody, Claims>): {
   GET: RequestHandler;
   POST: RequestHandler;
 } {
@@ -194,7 +176,12 @@ export function createAuthRoutes<
         return new Response("Login route is not configured", { status: 404 });
       }
 
-      const credentials = await parseJsonBody<LoginBody>(event);
+      let credentials: LoginBody = await parseJsonBody<LoginBody>(event);
+      if (options.loginSchema) {
+        const result = await options.loginSchema["~standard"].validate(credentials);
+        if (result.issues) error(400, "Invalid login credentials");
+        credentials = result.value;
+      }
       const result = normalizeLoginResult(
         await options.login(credentials, event),
       );
@@ -270,43 +257,6 @@ export function createAuthRoutes<
       });
       const result = normalizeLoginResult(
         await options.google.getUser(profile, event),
-      );
-      const session = await options.auth.login(event.cookies, result.user, {
-        claims: result.claims,
-      });
-      return json(session);
-    }
-
-    if (route === "tma") {
-      if (!options.tma) {
-        return new Response("TMA route is not configured", { status: 404 });
-      }
-
-      const body = await parseJsonBody<TmaBody>(event);
-      const initDataRaw =
-        typeof (body as any)?.initData === "string"
-          ? (body as any).initData
-          : typeof (body as any)?.telegramData === "string"
-            ? (body as any).telegramData
-            : "";
-      if (!initDataRaw) {
-        return new Response("Missing Telegram initData", { status: 400 });
-      }
-
-      const botToken = await options.tma.getBotToken(event, body);
-      if (!botToken) {
-        return new Response("Telegram bot is not configured", { status: 400 });
-      }
-
-      const initData = await verifyInitData({
-        initData: initDataRaw,
-        botToken,
-        maxAgeSeconds: options.tma.maxAgeSeconds,
-        clockSkewSeconds: options.tma.clockSkewSeconds,
-      });
-
-      const result = normalizeLoginResult(
-        await options.tma.getUser(initData, event, body),
       );
       const session = await options.auth.login(event.cookies, result.user, {
         claims: result.claims,

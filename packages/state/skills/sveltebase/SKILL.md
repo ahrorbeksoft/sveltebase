@@ -8,7 +8,7 @@ license: ISC
 
 | Task | Package | Intent skill |
 | --- | --- | --- |
-| Signed cookie sessions, auth routes, reactive auth, Google/Telegram login | `@sveltebase/auth` | `@sveltebase/auth#auth` |
+| Signed cookie sessions, auth routes, reactive auth, Google login | `@sveltebase/auth` | `@sveltebase/auth#auth` |
 | In-memory reactive values or small cookie-backed preferences | `@sveltebase/state` | `@sveltebase/state#state` |
 | Locale persistence, ICU messages, localized date labels | `@sveltebase/i18n` | `@sveltebase/i18n#i18n` |
 | Browser cookies, async loading/toasts, IDs, timestamps, plural labels | `@sveltebase/utils` | `@sveltebase/utils#utils` |

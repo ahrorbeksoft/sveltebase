@@ -25,7 +25,7 @@ it("isolates independently created SSR instances", () => {
   const first = createI18n(languages), second = createI18n(languages);
   expect(render(Root, { props: { i18n: first, locale: '"uz"' } }).body).toContain("Salom, Ada");
   expect(render(Root, { props: { i18n: second } }).body).toContain("Hello, Ada");
-  expect(first.locale).toBe("uz");
+  expect(first.locale).toBe("en");
 });
 it("defaults invalid SSR locale cookies", () => {
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -36,4 +36,21 @@ it("resets a previously initialized instance when the next locale value is missi
   const i18n = createI18n(languages);
   expect(render(Root, { props: { i18n, locale: '"uz"' } }).body).toContain("Salom, Ada");
   expect(render(Root, { props: { i18n } }).body).toContain("Hello, Ada");
+});
+
+it("isolates interleaved SSR renders using one shared instance", () => {
+  const i18n = createI18n(languages);
+  let inner = "";
+  const outer = render(Root, { props: { i18n, locale: '"uz"', interleave: () => {
+    inner = render(Root, { props: { i18n, locale: '"en"' } }).body;
+  } } }).body;
+  expect(inner).toContain("Hello, Ada");
+  expect(outer).toContain("Salom, Ada");
+  expect(outer).toContain("2020-yil, 15-Yanvar");
+  expect(i18n.locale).toBe("en");
+});
+
+it("produces the locale markup used by the hydration test", async () => {
+  const { ssrHtml } = await import('./ssr-html.js');
+  expect(render(Root, { props: { i18n: createI18n(languages), locale: '"uz"' } }).body).toBe(ssrHtml);
 });

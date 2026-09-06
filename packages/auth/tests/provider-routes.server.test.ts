@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { error, redirect, type Cookies, type RequestEvent } from '@sveltejs/kit';
 import { createAuthRoutes } from '../src/sveltekit/index.js';
 import { createServerAuth } from '../src/index.js';
-import { BOT_TOKEN, CLIENT_ID, NOW, googleKey, googleToken, telegramData } from './fixtures/providers.js';
+import { CLIENT_ID, NOW, googleKey, googleToken } from './fixtures/providers.js';
 
 beforeEach(() => {
   vi.spyOn(Date, 'now').mockReturnValue(NOW * 1000);
@@ -15,35 +16,34 @@ function setup() {
     delete: vi.fn((key: string) => jar.delete(key)) } as unknown as Cookies;
   const auth = createServerAuth<{ id: string }, { role: string }>({ secret: 'test-session-secret' });
   const getUser = vi.fn(() => ({ user: { id: 'app-user' }, claims: { role: 'reader' } }));
-  const getBotToken = vi.fn(() => BOT_TOKEN);
-  const config = { auth, google: { clientId: CLIENT_ID, getUser }, tma: { getBotToken, getUser } };
+  const config = { auth, google: { clientId: CLIENT_ID, getUser } };
   const request = (action: string, body: unknown, raw = false) => ({
     cookies, params: { auth: action }, request: new Request(`https://app.test/auth/${action}`, {
       method: 'POST', body: raw ? body as string : JSON.stringify(body), headers: { 'Content-Type': 'application/json' },
     }),
   }) as unknown as RequestEvent;
-  return { cookies, auth, getUser, getBotToken, config, request };
+  return { cookies, auth, getUser, config, request };
 }
 
 describe('provider routes with real signature verification', () => {
-  it.each(['google', 'tma'])('%s creates a verified app session and signed cookie', async (provider) => {
+  it.each(['google'])('%s creates a verified app session and signed cookie', async (provider) => {
     const { config, request, getUser, cookies, auth } = setup();
-    const event = request(provider, provider === 'google' ? { credential: googleToken() } : { initData: telegramData() });
+    const event = request(provider, { credential: googleToken() });
     const response = await createAuthRoutes(config).POST(event);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ user: { id: 'app-user' }, claims: { role: 'reader' } });
-    expect(getUser).toHaveBeenCalledWith(expect.objectContaining(provider === 'google' ? { sub: 'google-user' } : { user: { id: 42, first_name: 'Zoë 李' } }), event, ...(provider === 'tma' ? [expect.any(Object)] : []));
+    expect(getUser).toHaveBeenCalledWith(expect.objectContaining({ sub: 'google-user' }), event);
     expect(cookies.set).toHaveBeenCalledWith('sf_session', expect.any(String), expect.objectContaining({ httpOnly: true, secure: true }));
     expect((await auth.getSession(cookies))?.claims).toEqual({ role: 'reader' });
   });
-  it.each(['google', 'tma'])('%s rejects invalid credentials before mapping users', async (provider) => {
+  it.each(['google'])('%s rejects invalid credentials before mapping users', async (provider) => {
     const { config, request, getUser, cookies } = setup();
     const response = await createAuthRoutes(config).POST(request(provider,
-      provider === 'google' ? { credential: googleToken({ aud: 'other-client' }) } : { initData: telegramData({}, 'wrong-bot') }));
+      { credential: googleToken({ aud: 'other-client' }) }));
     expect(response.status).toBe(400);
     expect(getUser).not.toHaveBeenCalled(); expect(cookies.set).not.toHaveBeenCalled();
   });
-  it.each(['google', 'tma'])('%s is disabled without configuration', async (provider) => {
+  it.each(['google'])('%s is disabled without configuration', async (provider) => {
     const { auth, request, getUser } = setup();
     expect((await createAuthRoutes({ auth }).POST(request(provider, {}))).status).toBe(404);
     expect(getUser).not.toHaveBeenCalled();
@@ -57,7 +57,7 @@ describe('provider routes with real signature verification', () => {
     const { config, request } = setup();
     expect((await createAuthRoutes(config).POST(request('google', googleToken()))).status).toBe(200);
   });
-  it.each(['google', 'tma'])('%s rejects malformed JSON', async (provider) => {
+  it.each(['google'])('%s rejects malformed JSON', async (provider) => {
     const { config, request, getUser } = setup();
     expect((await createAuthRoutes(config).POST(request(provider, '{broken', true))).status).toBe(400);
     expect(getUser).not.toHaveBeenCalled();
@@ -67,27 +67,6 @@ describe('provider routes with real signature verification', () => {
     vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 503 }));
     expect((await createAuthRoutes(config).POST(request('google', { credential: googleToken() }))).status).toBe(500);
     expect(getUser).not.toHaveBeenCalled(); expect(cookies.set).not.toHaveBeenCalled();
-  });
-  it.each([{}, null, { initData: 123 }])('rejects missing Telegram initData %j before bot lookup', async (body) => {
-    const { config, request, getBotToken } = setup();
-    expect((await createAuthRoutes(config).POST(request('tma', body))).status).toBe(400);
-    expect(getBotToken).not.toHaveBeenCalled();
-  });
-  it('rejects unavailable bot configuration before user mapping', async () => {
-    const { config, request, getUser, getBotToken } = setup(); getBotToken.mockReturnValue('');
-    expect((await createAuthRoutes(config).POST(request('tma', { initData: telegramData() }))).status).toBe(400);
-    expect(getUser).not.toHaveBeenCalled();
-  });
-  it('passes request body to bot lookup and honors the configured age', async () => {
-    const { config, request, getBotToken, getUser } = setup();
-    const body = { initData: telegramData({ auth_date: String(NOW - 11) }), domain: 'tenant.test' };
-    const event = request('tma', body);
-    expect((await createAuthRoutes({ ...config, tma: { ...config.tma, maxAgeSeconds: 10 } }).POST(event)).status).toBe(400);
-    expect(getBotToken).toHaveBeenCalledWith(event, body); expect(getUser).not.toHaveBeenCalled();
-  });
-  it('supports the telegramData input alias', async () => {
-    const { config, request } = setup();
-    expect((await createAuthRoutes(config).POST(request('tma', { telegramData: telegramData() }))).status).toBe(200);
   });
   it('preserves application HTTP errors and redirects', async () => {
     const { config, request, getUser, cookies } = setup();
@@ -101,6 +80,29 @@ describe('provider routes with real signature verification', () => {
 });
 
 describe('auth route rejection and logout paths', () => {
+  it.each([false, true])('validates and transforms login credentials (async: %s)', async (asyncValidation) => {
+    const { auth, request } = setup();
+    const schema = z.object({ email: z.string().trim().toLowerCase(), password: z.string().min(8) });
+    const loginSchema = asyncValidation ? schema.transform(async (value) => value) : schema;
+    const login = vi.fn();
+    const routes = createAuthRoutes({ auth, loginSchema, login: (credentials, event) => {
+      const email: string = credentials.email;
+      login(email, credentials.password, event);
+      return { id: 'u1' };
+    } });
+    const event = request('login', { email: ' USER@EXAMPLE.TEST ', password: 'password' });
+    expect((await routes.POST(event)).status).toBe(200);
+    expect(login).toHaveBeenCalledWith('user@example.test', 'password', event);
+  });
+  it.each([{}, null, { email: 'user', password: 'short' }])('rejects invalid login input %j before the callback', async (body) => {
+    const { auth, request, cookies } = setup();
+    const login = vi.fn(() => ({ id: 'u1' }));
+    const loginSchema = z.object({ email: z.string(), password: z.string().min(8) });
+    const response = await createAuthRoutes({ auth, loginSchema, login }).POST(request('login', body));
+    expect(response.status).toBe(400);
+    expect(login).not.toHaveBeenCalled();
+    expect(cookies.set).not.toHaveBeenCalled();
+  });
   it('returns 404 for unknown actions, unsupported GET, and missing callbacks', async () => {
     const { auth, request } = setup(); const routes = createAuthRoutes({ auth });
     for (const action of ['unknown', 'login', 'refresh']) expect((await routes.POST(request(action, {}))).status).toBe(404);
@@ -129,8 +131,12 @@ describe('auth route rejection and logout paths', () => {
     expect((await routes.POST(request('claims', {}))).status).toBe(401);
   });
   it('normalizes a profile-only login result and supports catchall parameter names', async () => {
-    const { auth, request } = setup(); const event = request('login', {}); event.params = { '...auth': 'login' };
-    const response = await createAuthRoutes({ auth, login: () => ({ id: 'u1' }) }).POST(event);
+    type LoginBody = { email: string; password: string };
+    const credentials: LoginBody = { email: 'user@example.test', password: 'secret' };
+    const { auth, request } = setup(); const event = request('login', credentials); event.params = { '...auth': 'login' };
+    const login = vi.fn((_credentials: LoginBody, _event: RequestEvent) => ({ id: 'u1' }));
+    const response = await createAuthRoutes({ auth, login }).POST(event);
+    expect(login).toHaveBeenCalledWith(credentials, event);
     expect(await response.json()).toEqual({ user: { id: 'u1' }, claims: {} });
   });
 });

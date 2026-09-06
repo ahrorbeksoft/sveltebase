@@ -1,6 +1,6 @@
 # @sveltebase/auth
 
-Session cookies, SvelteKit auth routes, reactive client state, and Google sign-in for Svelte 5 apps. Independent of your data layer; use TanStack DB for application data.
+Session cookies, SvelteKit auth routes, reactive client state, and Google sign-in for Svelte 5 apps.
 
 ## Install
 
@@ -30,10 +30,9 @@ Claims are for things that are not columns on the user row (active role, tenant,
 | --- | --- |
 | `@sveltebase/auth` | JWT helpers, cookie parsing, shared errors |
 | `@sveltebase/auth/server` | `createServerAuth` |
-| `@sveltebase/auth/sveltekit` | Auth API routes (`login`, `refresh`, `claims`, `google`, `tma`) |
+| `@sveltebase/auth/sveltekit` | Auth API routes (`login`, `refresh`, `claims`, `google`) |
 | `@sveltebase/auth/client` | Reactive client auth (`user` + `claims`) |
 | `@sveltebase/auth/google` | Google Identity Services UI + server verify |
-| `@sveltebase/auth/telegram` | Telegram Mini App `verifyInitData` + helpers |
 
 ## Server setup
 
@@ -56,7 +55,7 @@ Defaults: cookie `sf_session`, `path: "/"`, `httpOnly: true`, `secure: true`, `s
 ### Methods
 
 ```ts
-await auth.login(cookies, user, { claims: { activeRoleId }, maxAge: 60 * 60 * 24 * 30 });
+await auth.login(cookies, user, { claims: { activeRoleId } });
 const session = await auth.getSession(cookies); // { user, claims } | null
 const user = await auth.getUser(cookies);       // profile only
 await auth.setClaims(cookies, { activeRoleId: "…" });
@@ -72,17 +71,28 @@ auth.logout(cookies);
 
 ## SvelteKit routes
 
-Mount auth actions at a dynamic route:
+Define the credentials your client sends:
+
+```ts
+// src/lib/types.ts
+export type LoginBody = {
+  email: string;
+  password: string;
+};
+```
+
+Use the same type in the auth route callback:
 
 ```ts
 // src/routes/api/auth/[auth]/+server.ts
 import { createAuthRoutes } from "@sveltebase/auth/sveltekit";
 import { auth } from "$lib/server/auth";
+import type { LoginBody } from "$lib/types";
 
 export const { GET, POST } = createAuthRoutes({
   auth,
 
-  login: async (credentials, event) => {
+  login: async (credentials: LoginBody, event) => {
     const user = await verifyCredentials(credentials, event);
     if (!user) throw new Error("Invalid credentials");
     return user;
@@ -98,6 +108,55 @@ export const { GET, POST } = createAuthRoutes({
 });
 ```
 
+Send those credentials from the client:
+
+```ts
+import { auth } from "$lib/auth";
+import type { LoginBody } from "$lib/types";
+
+await auth.login<LoginBody>({ email, password });
+```
+
+`auth.login(body)` posts JSON to `/api/auth/login`. The route passes the parsed
+body to `login(credentials, event)`, then signs the returned user and writes the
+session cookie. The shared type checks your application code; validate incoming
+credentials in the callback as well. Server `auth.login(cookies, user)` takes the
+authenticated user returned by your credential check.
+
+For runtime validation, optionally provide `loginSchema` using a Standard Schema
+validator. For example, with Zod:
+
+```ts
+// src/lib/auth-schema.ts
+import { z } from "zod";
+
+export const loginSchema = z.object({
+  email: z.email(),
+  password: z.string().min(8)
+});
+export type LoginBody = z.input<typeof loginSchema>;
+```
+
+```ts
+// In your auth route
+import { loginSchema } from "$lib/auth-schema";
+
+export const { GET, POST } = createAuthRoutes({
+  auth,
+  loginSchema,
+  login: async (credentials, event) => {
+    // credentials is inferred from the schema's output.
+    return verifyCredentials(credentials, event);
+  }
+});
+```
+
+The client can import `LoginBody` from `$lib/auth-schema` and call
+`auth.login<LoginBody>({ email, password })`. Validation runs on the server before
+the login callback. Invalid input returns 400 without creating a session. Async
+schemas are supported, and transforms are applied before the callback receives
+credentials. Without `loginSchema`, validate the body in your callback.
+
 | Action | Method | What it does |
 | --- | --- | --- |
 | `/login` | POST | Runs `login`, sets cookie, returns `{ user, claims }` |
@@ -105,7 +164,6 @@ export const { GET, POST } = createAuthRoutes({
 | `/refresh` | POST | Reloads **profile** via `getUser`; preserves claims |
 | `/claims` | POST | Updates claims (`setClaims` authorization callback required) |
 | `/google` | POST | Verifies Google ID token, runs `google.getUser` |
-| `/tma` | POST | Verifies Telegram initData, runs `tma.getUser` |
 
 Login callbacks may return a plain profile or `{ user, claims }`.
 
@@ -117,29 +175,88 @@ The claims route requires a `setClaims` callback. Validate requested role/tenant
 
 ## Client auth
 
-Create auth state per layout/component tree (never a shared mutable server singleton):
+Create and export the client once, initialize it in a root layout or parent, then
+import the same instance wherever you need it.
+
+**`src/lib/auth.ts`**
+
+```ts
+import { createAuth } from "@sveltebase/auth/client";
+import type { User, Claims } from "$lib/types";
+
+export const auth = createAuth<User, Claims>();
+```
+
+`User` and `Claims` are your application's types.
+
+**`src/routes/+layout.server.ts`**
+
+```ts
+import { auth } from "$lib/server/auth";
+
+export async function load({ cookies }) {
+  const session = await auth.getSession(cookies);
+  return {
+    user: session?.user ?? null,
+    claims: session?.claims ?? {}
+  };
+}
+```
+
+The server auth instance verifies the signed session cookie before returning the
+user and claims to the layout.
+
+**`src/routes/+layout.svelte`**
 
 ```svelte
 <script lang="ts">
-  import { createAuth } from "@sveltebase/auth/client";
+  import { auth } from "$lib/auth";
 
-  let { data } = $props();
-  const auth = createAuth<User, Claims>({
-    routesBase: "/api/auth",
-    refreshOnInit: true,
-    onLogout: async () => {
-      // Clear application-owned private collections, persistent data, and sockets.
-    }
-  });
+  let { data, children } = $props();
+
   auth.init(() => data.user, () => data.claims);
 </script>
+
+{@render children()}
 ```
+
+**A child component**
+
+```svelte
+<script lang="ts">
+  import { auth } from "$lib/auth";
+</script>
+
+{#if auth.isReady}
+  {#if auth.user}
+    <p>Signed in as {auth.user.id}</p>
+    <button onclick={() => auth.logout()}>Sign out</button>
+  {:else}
+    <a href="/login">Sign in</a>
+  {/if}
+{/if}
+```
+
+Children read `auth.user`, `auth.claims`, and other reactive properties directly;
+only the parent calls `init`, directly during component initialization. The verified
+user is available immediately during SSR and browser hydration. Server state is
+isolated to the current component tree even though every component imports the same
+`auth` object. Browser refresh runs in the background without hiding that session.
+
+On the server, read this shared instance in components; use server auth helpers in
+load functions, endpoints, or other server code. Browser auth actions and direct
+user/claims assignments are unavailable on the server.
 
 `init` follows server load data, including profile/claims replacements for the same user.
 In the browser it refreshes an existing session once. Set `refreshOnInit: false` when
 server load already performs the required verification or no refresh route is configured.
-SSR performs no client fetch. Transient refresh failures preserve the current session;
-a 401 clears it and invokes `onInvalidSession` and `onLogout`.
+SSR performs no refresh request. Background verification in the browser updates the
+same reactive `auth.user` and `auth.claims`, so components importing `auth` update
+automatically:
+
+- Success replaces the user and claims with the returned session.
+- A 401 sets `auth.user` to `null`, clears claims, and invokes `onInvalidSession` and `onLogout`.
+- Network or server errors preserve the current user and claims.
 
 ### State and actions
 
@@ -154,7 +271,6 @@ auth.isAuthenticated; // ready && user != null
 
 await auth.login({ email, password });
 await auth.loginWithGoogle(credential);
-await auth.loginWithTma({ initData, domain });
 await auth.setClaims({ activeRoleId });
 await auth.refresh();
 await auth.logout();
@@ -165,21 +281,6 @@ session changes, including null on logout/invalidation. `onLogout` owns applicat
 cleanup and runs even if the logout request fails. Logout clears local state immediately
 but rejects on HTTP/network failure: handle that failure because the server cookie may
 still exist. Older requests cannot restore local state after logout or overwrite a newer login.
-
-### TanStack DB and migration from sync
-
-Use [TanStack DB](https://tanstack.com/db/latest/docs/overview) for application data and
-[Query Collections](https://tanstack.com/db/latest/docs/collections/query-collection)
-for API-backed reads and mutations. Auth does not create collections or manage caches.
-Scope data clients to the user/tenant; dispose of them and clear private persisted data
-when that scope ends. Use `onSession` for application-specific session changes and
-`onLogout` for cleanup. If an application event indicates session changes, call `auth.refresh()`.
-
-Removed APIs: `syncClient`, `setClient`, `verifySync`, `verifyTable`, `verifyUser`,
-`refreshWhenChanged`, all `reconnect` options, `AuthReconnectPolicy`, and
-`@sveltebase/auth/sync`. There are no compatibility shims. Replace websocket cookie
-verification with `getSessionFromRequest` from `@sveltebase/auth`; authorize access in
-your API or websocket handler. Import `SerializableError` from auth for auth failures.
 
 ## Custom errors
 
@@ -205,31 +306,6 @@ createAuth({ errorClasses: [TranslatedError] });
 ```
 
 Only `code` and `message` travel over the wire.
-
-## Telegram Mini App
-
-```ts
-import { verifyInitData } from "@sveltebase/auth/telegram";
-// or mount a first-class route:
-createAuthRoutes({
-  auth,
-  tma: {
-    getBotToken: async (event, body) => findBotToken(body.domain),
-    getUser: async (initData, event, body) => {
-      // map verified initData.user → your profile + claims
-      return { user, claims: { activeRoleId } };
-    },
-    maxAgeSeconds: 86_400
-  }
-});
-```
-
-```ts
-// client
-await auth.loginWithTma({ initData: Telegram.WebApp.initData, domain });
-```
-
-`verifyInitData` uses Web Crypto HMAC (works on Cloudflare Workers). It checks signature, `auth_date` age, and returns a typed payload.
 
 ## Google sign-in
 
@@ -312,7 +388,7 @@ from your installed package version; older releases may not include them.
 ## Provider tests
 
 Run `bun run test packages/auth` from the workspace root. Tests use locally generated
-RSA-signed Google tokens, HMAC-signed Telegram initData, a fixed clock, and mocked
+RSA-signed Google tokens, a fixed clock, and mocked
 provider APIs. No real provider credentials or network calls are needed. Browser
 tests mount the Google components and exercise script loading, popup errors,
 callbacks, and unmount cleanup.

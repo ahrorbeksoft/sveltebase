@@ -1,4 +1,4 @@
-import { untrack } from "svelte";
+import { getContext, setContext, untrack } from "svelte";
 import {
   createAuthErrorCodec,
   type AuthErrorCodec,
@@ -45,6 +45,7 @@ export class AuthClientState<
   User extends { id: string },
   Claims extends Record<string, unknown> = Record<string, never>,
 > {
+  #serverContextKey = Symbol("auth-session");
   #user = $state<User | null>(null);
   #claims = $state<Claims>(EMPTY_CLAIMS as Claims);
   #isReady = $state(false);
@@ -61,27 +62,57 @@ export class AuthClientState<
     this.#errorCodec = createAuthErrorCodec(config.errorClasses);
   }
 
-  get user(): User | null { return this.#user; }
-  set user(value: User | null) { this.#revision++; this.#user = value; }
-  get claims(): Claims { return this.#claims; }
-  set claims(value: Claims) { this.#revision++; this.#claims = value ?? EMPTY_CLAIMS as Claims; }
+  // Only the component tree holds server data. The exported instance holds a key.
+  private serverSession(): { user: User | null; claims: Claims } | undefined {
+    try { return getContext(this.#serverContextKey); }
+    catch { return undefined; } // No active SSR component outside rendering.
+  }
+
+  private requireBrowser() {
+    if (typeof window === "undefined") {
+      throw new Error("Auth actions are browser-only. Use @sveltebase/auth/server for server actions.");
+    }
+  }
+
+  get user(): User | null {
+    return typeof window === "undefined" ? this.serverSession()?.user ?? null : this.#user;
+  }
+  set user(value: User | null) {
+    this.requireBrowser();
+    this.#revision++; this.#user = value;
+  }
+  get claims(): Claims {
+    return typeof window === "undefined" ? this.serverSession()?.claims ?? EMPTY_CLAIMS as Claims : this.#claims;
+  }
+  set claims(value: Claims) {
+    this.requireBrowser();
+    this.#revision++; this.#claims = value ?? EMPTY_CLAIMS as Claims;
+  }
   get session(): AuthSession<User, Claims> | null {
-    return this.#user ? { user: this.#user, claims: this.#claims } : null;
+    const user = this.user;
+    return user ? { user, claims: this.claims } : null;
   }
   get sessionUser(): (User & Claims) | null {
-    return this.#user ? { ...this.#user, ...this.#claims } : null;
+    const user = this.user;
+    return user ? { ...user, ...this.claims } : null;
   }
-  get isReady(): boolean { return this.#isReady; }
-  get isVerifying(): boolean { return this.#pendingVerifications > 0; }
-  get isAuthenticated(): boolean { return this.#isReady && this.#user !== null; }
+  get isReady(): boolean {
+    return typeof window === "undefined" ? this.serverSession() !== undefined : this.#isReady;
+  }
+  get isVerifying(): boolean { return typeof window !== "undefined" && this.#pendingVerifications > 0; }
+  get isAuthenticated(): boolean { return this.isReady && this.user !== null; }
 
   /** Call during component initialization; getters follow SvelteKit load data. */
   init(user: MaybeGetter<User | null>, claims?: MaybeGetter<Claims | null | undefined>) {
-    const initialization = ++this.#initialization;
     const read = () => ({
       user: typeof user === "function" ? (user as () => User | null)() : user,
       claims: (typeof claims === "function" ? claims() : claims) ?? EMPTY_CLAIMS as Claims,
     });
+    if (typeof window === "undefined") {
+      setContext(this.#serverContextKey, read());
+      return;
+    }
+    const initialization = ++this.#initialization;
     let previous = read();
     const apply = (next: typeof previous) => {
       this.#revision++;
@@ -102,7 +133,6 @@ export class AuthClientState<
         if (first) {
           first = false;
           if (this.#user && this.#config.refreshOnInit !== false) {
-            this.#isReady = false;
             const revision = this.#revision;
             void this.refresh().catch((error) => {
               console.warn("Initial auth refresh failed.", error);
@@ -166,6 +196,7 @@ export class AuthClientState<
   }
 
   private async authenticate(action: string, body: unknown): Promise<AuthSession<User, Claims>> {
+    this.requireBrowser();
     const revision = ++this.#revision;
     const session = await this.requestSession(action, body, revision);
     if (revision !== this.#revision) throw new Error("Auth request superseded");
@@ -178,13 +209,12 @@ export class AuthClientState<
   loginWithGoogle(credential: string): Promise<AuthSession<User, Claims>> {
     return this.authenticate("google", { credential });
   }
-  loginWithTma(body: { initData: string } & Record<string, unknown>): Promise<AuthSession<User, Claims>> {
-    return this.authenticate("tma", body);
-  }
   setClaims(claims: Claims): Promise<AuthSession<User, Claims> | null> {
+    this.requireBrowser();
     return this.requestSession("claims", claims, ++this.#revision, true);
   }
   async refresh(): Promise<AuthSession<User, Claims> | null> {
+    this.requireBrowser();
     const revision = this.#revision;
     this.#pendingVerifications++;
     try {
@@ -196,6 +226,7 @@ export class AuthClientState<
 
   /** Clears local state immediately; rejects if the server cannot clear its cookie. */
   async logout(): Promise<void> {
+    this.requireBrowser();
     this.#revision++;
     this.#user = null;
     this.#claims = EMPTY_CLAIMS as Claims;
