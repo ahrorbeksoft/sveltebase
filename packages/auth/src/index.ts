@@ -10,7 +10,7 @@ export type {
 /**
  * Data stored inside the signed session cookie.
  *
- * `user` is the profile snapshot (usually mirrors a DB row / verify table).
+ * `user` is the profile snapshot (a snapshot of a database row).
  * `claims` is session-only state (active role, tenant, etc.) that is not part
  * of the profile table.
  */
@@ -121,7 +121,7 @@ export async function signJWT(
   const header = { alg: "HS256", typ: "JWT" };
   const fullPayload = {
     ...payload,
-    ...(expiresAt ? { exp: Math.floor(expiresAt / 1000) } : {}),
+    ...(expiresAt !== undefined ? { exp: Math.floor(expiresAt / 1000) } : {}),
   };
 
   const headerStr = stringToBase64url(JSON.stringify(header));
@@ -163,7 +163,11 @@ export async function verifyJWT(
   }
 
   const payload = JSON.parse(base64urlToString(payloadStr));
-  if (payload.exp && Date.now() >= payload.exp * 1000) {
+  if (payload.exp !== undefined &&
+      (typeof payload.exp !== "number" || !Number.isFinite(payload.exp))) {
+    throw new Error("Invalid token expiry");
+  }
+  if (payload.exp !== undefined && Date.now() >= payload.exp * 1000) {
     throw new Error("Token expired");
   }
 
@@ -250,12 +254,16 @@ export async function getUserFromCookie<User extends { id: string }>(
  * Parses a raw Cookie header string into key-value pairs.
  */
 export function parseCookies(cookieHeader: string): Record<string, string> {
-  const cookies: Record<string, string> = {};
+  const cookies: Record<string, string> = Object.create(null);
   cookieHeader.split(";").forEach((cookie) => {
     const parts = cookie.split("=");
     const name = parts.shift()?.trim();
     if (name) {
-      cookies[name] = decodeURIComponent(parts.join("="));
+      try {
+        cookies[name] = decodeURIComponent(parts.join("="));
+      } catch {
+        // Ignore malformed cookies without breaking an otherwise valid session.
+      }
     }
   });
   return cookies;
@@ -328,7 +336,7 @@ export async function getVerifiedSessionFromRequest<
 
 /**
  * Merges profile + claims into a single object for places that still expect a
- * flat session identity (e.g. sync auth `ctx.auth.user`).
+ * flat session identity.
  */
 export function mergeSessionUser<
   User extends { id: string },
@@ -347,7 +355,7 @@ type CookieWriteOptions = {
  * Creates SvelteKit server-side session management helpers.
  *
  * Profile (`user`) and session claims are stored separately in the cookie so
- * role/tenant state does not thrash profile refresh against the verify table.
+ * profile refresh can preserve role/tenant state.
  */
 export function createServerAuth<
   User extends { id: string },
@@ -363,16 +371,16 @@ export function createServerAuth<
   };
 
   function resolveExpiresAt(options?: CookieWriteOptions): number | undefined {
-    if (options?.maxAge) {
+    if (options?.maxAge !== undefined) {
       return Date.now() + options.maxAge * 1000;
     }
     if (options?.expires) {
       return options.expires.getTime();
     }
-    if (defaultCookieOptions.maxAge) {
+    if (defaultCookieOptions.maxAge !== undefined) {
       return Date.now() + defaultCookieOptions.maxAge * 1000;
     }
-    return undefined;
+    return defaultCookieOptions.expires?.getTime();
   }
 
   async function writeSession(
@@ -386,7 +394,7 @@ export function createServerAuth<
       {
         user,
         claims,
-        ...(expiresAt ? { exp: Math.floor(expiresAt / 1000) } : {}),
+        ...(expiresAt !== undefined ? { exp: Math.floor(expiresAt / 1000) } : {}),
       },
       config.secret,
     );
@@ -470,7 +478,8 @@ export function createServerAuth<
      */
     logout(cookies: Cookies, options?: { path?: string; domain?: string }): void {
       cookies.delete(cookieName, {
-        path: "/",
+        path: defaultCookieOptions.path,
+        ...(defaultCookieOptions.domain ? { domain: defaultCookieOptions.domain } : {}),
         ...options,
       });
     },

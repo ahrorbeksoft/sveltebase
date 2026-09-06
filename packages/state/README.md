@@ -48,19 +48,20 @@ theme.set((t) => (t === "dark" ? "light" : "dark"));
 
 - The first argument is the cookie name.
 - The schema defines the shape and the default (via `.default(...)`).
-- Invalid values are rejected; the previous value stays put.
+- Invalid replacements through `current` or `set` are rejected; the previous value stays put.
+- Nested mutations are reactive and persist, but bypass schema validation. Use `state.set((value) => ({ ...value, count: nextCount }))` when validation is required; avoid mutating the callback argument before returning.
 
 In the browser the cookie is read on construction and written on every change. Cookies use `path: "/"`, `sameSite: "Lax"`, a one-year lifetime, and `secure` on HTTPS.
 
 ## SvelteKit setup
 
-So SSR and the browser start with the same value, pass request cookies into `init`.
+So SSR and the browser start with the same value, pass only the state’s serialized cookie value into `init`.
 
 **`src/routes/+layout.server.ts`**
 
 ```ts
 export function load({ cookies }) {
-  return { cookies: cookies.getAll() };
+  return { locale: cookies.get("locale") };
 }
 ```
 
@@ -83,15 +84,15 @@ export const locale = new PersistentState(
   import { locale } from "$lib/state";
 
   let { data } = $props();
-  locale.init(() => data.cookies);
+  locale.init(() => data.locale);
 </script>
 
 {@render children()}
 ```
 
-You can pass the cookie list directly or as a function — use a function when the data comes from reactive load props.
+You can pass the serialized cookie value directly or as a function — use a function when the data comes from reactive load props.
 
-`init` does nothing in the browser. On the server it finds the matching cookie, parses the JSON, validates it, and sets the value. Missing or invalid cookies fall back to the schema default.
+`init` does nothing in the browser. On the server it parses the supplied JSON cookie value, validates it, and sets the value. Missing or invalid cookies fall back to the schema default.
 
 ## How cookies behave
 
@@ -103,8 +104,28 @@ You can pass the cookie list directly or as a function — use a function when t
 | Server, after `init` | Uses the request cookie (or default if missing) |
 | Invalid write via `current` | Throws; old value is kept |
 
+Pass the value returned by `cookies.get(key)`, not the full cookie collection or an already parsed value. `init()` or `init(undefined)` uses the schema default on the server.
+
 Values are stored as JSON. Older URI-encoded cookies are still accepted.
+
+## Lifetime
+
+Create persistent state once for a long-lived browser state value. Each instance owns a persistence effect and currently has no disposal method.
 
 ## License
 
 ISC
+
+## Agent skills (TanStack Intent)
+
+This package ships its own skill and a shared Sveltebase overview. From your app:
+
+```sh
+npx @tanstack/intent@latest install
+npx @tanstack/intent@latest list
+npx @tanstack/intent@latest load '@sveltebase/state#sveltebase'
+npx @tanstack/intent@latest load '@sveltebase/state#state'
+```
+
+Select this package during Intent's first-time permission review. The skills come
+from your installed package version; older releases may not include them.

@@ -74,13 +74,13 @@ export const i18n = createI18n(languages);
 
 ## SvelteKit setup
 
-Pass request cookies so SSR uses the user’s saved locale:
+Pass only the locale cookie value so SSR uses the user’s saved locale:
 
 **`src/routes/+layout.server.ts`**
 
 ```ts
 export function load({ cookies }) {
-  return { cookies: cookies.getAll() };
+  return { locale: cookies.get("locale") };
 }
 ```
 
@@ -91,13 +91,15 @@ export function load({ cookies }) {
   import { i18n } from "$lib/i18n";
 
   let { data } = $props();
-  i18n.init(() => data.cookies);
+  i18n.init(() => data.locale);
 </script>
 
 {@render children()}
 ```
 
-Call `i18n.init()` (with or without cookies) before any child uses `getTranslations` or `getFormat`. Without cookies, it still sets up context and uses the browser cookie or the fallback language.
+Call `i18n.init()` (with or without a locale cookie value) before any child uses `getTranslations` or `getFormat`. Without a cookie value, it still sets up context and uses the browser cookie or the fallback language.
+
+`init` accepts the serialized value returned by `cookies.get("locale")` (for example, `'"uz"'`), or a getter for that value. For a custom storage key, read that key in your server load.
 
 ## Translating text
 
@@ -166,7 +168,7 @@ i18n.locale;           // get/set active locale (persisted to cookie)
 i18n.currentLanguage;  // full definition of the active language
 i18n.t(key, values?);  // translate (no context needed)
 i18n.format(value, options?); // format dates (no context needed)
-i18n.init(cookies?);   // set up context (+ optional SSR cookies)
+i18n.init(localeCookie?); // set up context (+ optional serialized locale cookie)
 ```
 
 Setting `locale` to an unknown code falls back to the first language.
@@ -181,12 +183,14 @@ i18n.format(createdAt, { preset: "relative" });
 
 Pass a `Date`, a millisecond timestamp, or a date string. Falsy values (`undefined`, `""`, `0`) return `undefined`.
 
+Date and time labels use `Asia/Tashkent`, consistently across the browser and server. Time-only strings keep their given hour and minute.
+
 ### Presets
 
 | Preset | What you get |
 | --- | --- |
 | `default` (default) | Short date; year omitted if it’s this year. `withTime: true` adds hour and minute. |
-| `custom` | Timeline-style: “just now”, “today at …”, weekday, then full date. |
+| `custom` | Timeline-style: “just now”, “today at …”, weekday, then full date; future dates use relative labels. |
 | `relative` | Always relative (“5 minutes ago”, “in 2 hours”). |
 | `birthday` | Full date, no time. |
 | `month` | Month only (or month + year if not this year). |
@@ -209,3 +213,17 @@ Relative and custom labels use message keys like `just-now`, `minutes-ago`, `tod
 ## License
 
 ISC
+
+## Agent skills (TanStack Intent)
+
+This package ships its own skill and a shared Sveltebase overview. From your app:
+
+```sh
+npx @tanstack/intent@latest install
+npx @tanstack/intent@latest list
+npx @tanstack/intent@latest load '@sveltebase/i18n#sveltebase'
+npx @tanstack/intent@latest load '@sveltebase/i18n#i18n'
+```
+
+Select this package during Intent's first-time permission review. The skills come
+from your installed package version; older releases may not include them.

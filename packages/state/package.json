@@ -6,7 +6,9 @@
     "access": "public"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills",
+    "!skills/_artifacts"
   ],
   "svelte": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -36,6 +38,14 @@
     "build": "svelte-package --input ./src --output ./dist --tsconfig ./tsconfig.package.json",
     "check": "tsc --project tsconfig.json --noEmit",
     "lint": "bun run build && publint --strict --pack npm",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "vitest run --root ../.. packages/state/tests",
+    "prepack": "node ../../scripts/sync-skills.mjs --check && intent validate skills --check"
+  },
+  "keywords": [
+    "tanstack-intent"
+  ],
+  "devDependencies": {
+    "@tanstack/intent": "^0.4.0"
   }
 }

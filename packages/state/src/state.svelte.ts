@@ -47,7 +47,7 @@ export type InferOutput<TSchema extends StandardSchemaV1> =
  * Svelte-reactive state that persists to a browser cookie.
  *
  * On the server it initializes from `undefined` until `init` is called with
- * request cookies. In the browser it hydrates from `document.cookie` and writes
+ * the request cookie value. In the browser it hydrates from `document.cookie` and writes
  * every valid state change back to the cookie.
  *
  * @example
@@ -101,22 +101,21 @@ export class PersistentState<TSchema extends StandardSchemaV1> {
   }
 
   /**
-   * Initializes server-side state from request cookies.
+   * Initializes server-side state from its serialized cookie value.
    *
-   * Call this during SSR with cookies from your framework so the first rendered
-   * value matches the browser cookie.
+   * Pass `cookies.get(key)` during SSR so the first rendered value matches the
+   * browser cookie. Missing or invalid values use the schema default.
    */
-  public init(cookies: MaybeGetter<{ name: string; value: string }[]>) {
+  public init(cookieValue?: MaybeGetter<string | null | undefined>) {
     if (hasWindow()) {
       return;
     }
 
-    const resolvedCookies = unwrap(cookies);
-    const rawCookie = resolvedCookies.find((cookie) => cookie.name === this.storageKey);
+    const rawCookie = unwrap(cookieValue);
 
     try {
-      const parsed = rawCookie
-        ? parseSchema(this.schema, parseStoredCookieValue(rawCookie.value))
+      const parsed = rawCookie != null
+        ? parseSchema(this.schema, parseStoredCookieValue(rawCookie))
         : parseSchema(this.schema, undefined);
 
       if (JSON.stringify(parsed) !== JSON.stringify(this.#value)) {
@@ -124,6 +123,7 @@ export class PersistentState<TSchema extends StandardSchemaV1> {
       }
     } catch {
       console.warn(`[PersistentState] Init failed for "${this.storageKey}"`);
+      this.#value = parseSchema(this.schema, undefined);
     }
   }
 
@@ -133,7 +133,7 @@ export class PersistentState<TSchema extends StandardSchemaV1> {
    * Use this when the next value depends on the previous value.
    */
   public set(fn: (value: InferOutput<TSchema>) => InferOutput<TSchema>) {
-    this.#value = fn(this.#value as InferOutput<TSchema>);
+    this.current = fn(this.#value as InferOutput<TSchema>);
   }
 
   /**

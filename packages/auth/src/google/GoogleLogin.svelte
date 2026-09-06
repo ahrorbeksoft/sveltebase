@@ -72,6 +72,7 @@
 
       if (useOneTap) {
         window.google.accounts.id.prompt(promptMomentNotification);
+        return () => window.google.accounts.id.cancel();
       }
     } catch (err) {
       console.error('Error initializing Google Login button:', err);

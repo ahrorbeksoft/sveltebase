@@ -3,10 +3,32 @@ import { createFormatter, createTranslator, type AppConfig } from "use-intl/core
 
 import { SvelteDate } from "svelte/reactivity";
 /**
+ * Calendar fields in a chosen timezone, stored in UTC to avoid host DST rules.
+ * These dates are only used for labels/comparisons, never as actual instants.
+ */
+class CalendarDate extends SvelteDate {
+  getFullYear() { return this.getUTCFullYear(); }
+  getMonth() { return this.getUTCMonth(); }
+  getDate() { return this.getUTCDate(); }
+  getDay() { return this.getUTCDay(); }
+  getHours() { return this.getUTCHours(); }
+  getMinutes() { return this.getUTCMinutes(); }
+  setDate(day: number) { return this.setUTCDate(day); }
+}
+
+function calendarDate(value: Date, formatter: Intl.DateTimeFormat): Date {
+  const parts = Object.fromEntries(formatter.formatToParts(value).map(({ type, value }) => [type, value]));
+  return new CalendarDate(Date.UTC(
+    Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+    Number(parts.hour), Number(parts.minute), Number(parts.second)
+  ));
+}
+
+/**
  * Returns a date set to local midnight.
  */
 function startOfDay(value: Date): Date {
-  return new SvelteDate(value.getFullYear(), value.getMonth(), value.getDate());
+  return new CalendarDate(Date.UTC(value.getFullYear(), value.getMonth(), value.getDate()));
 }
 
 /**
@@ -30,15 +52,15 @@ function isSameDay(left: Date, right: Date): boolean {
 /**
  * Checks whether a date is today in the local timezone.
  */
-function isToday(value: Date): boolean {
-  return isSameDay(value, new SvelteDate());
+function isToday(value: Date, now: Date): boolean {
+  return isSameDay(value, now);
 }
 
 /**
  * Checks whether a date is yesterday in the local timezone.
  */
-function isYesterday(value: Date): boolean {
-  const yesterday = startOfDay(new SvelteDate());
+function isYesterday(value: Date, now: Date): boolean {
+  const yesterday = startOfDay(now);
   yesterday.setDate(yesterday.getDate() - 1);
 
   return isSameDay(value, yesterday);
@@ -47,8 +69,8 @@ function isYesterday(value: Date): boolean {
 /**
  * Checks whether a date is in the current local year.
  */
-function isThisYear(value: Date): boolean {
-  return value.getFullYear() === new SvelteDate().getFullYear();
+function isThisYear(value: Date, now: Date): boolean {
+  return value.getFullYear() === now.getFullYear();
 }
 
 /**
@@ -57,9 +79,8 @@ function isThisYear(value: Date): boolean {
  * `weekStartsOn` follows `Date#getDay` numbering, where 0 is Sunday and 1 is
  * Monday.
  */
-function isThisWeek(value: Date, options?: { weekStartsOn?: number }): boolean {
+function isThisWeek(value: Date, now: Date, options?: { weekStartsOn?: number }): boolean {
   const weekStartsOn = options?.weekStartsOn ?? 0;
-  const now = new SvelteDate();
   const currentDay = now.getDay();
   const diffToWeekStart = (currentDay - weekStartsOn + 7) % 7;
   const weekStart = startOfDay(now);
@@ -103,8 +124,8 @@ function formatRelativeDate(
   value: Date,
   t: (key: string, values?: Record<string, string | number | Date>) => string
 ): string {
-  const now = new SvelteDate();
-  const diffMinutes = Math.floor((value.getTime() - now.getTime()) / 60_000);
+  const now = new SvelteDate(Date.now());
+  const diffMinutes = Math.trunc((value.getTime() - now.getTime()) / 60_000);
   const absMinutes = Math.abs(diffMinutes);
 
   if (absMinutes < 1) {
@@ -263,7 +284,7 @@ export function createLocaleFormatter<TLocale extends string>(locale: TLocale, t
   return createFormatter({
     locale,
     timeZone,
-    now: new SvelteDate()
+    now: new SvelteDate(Date.now())
   });
 }
 
@@ -324,7 +345,12 @@ export function createFormatForLocale<const TLanguages extends readonly Language
   fallbackLocale?: TLanguages[number]["code"],
   timeZone = "Asia/Tashkent"
 ) {
+  locale = getLanguage(languages, locale, fallbackLocale).code;
   const formatter = createLocaleFormatter(locale, timeZone);
+  const calendarFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone, year: "numeric", month: "numeric", day: "numeric",
+    hour: "numeric", minute: "numeric", second: "numeric", hourCycle: "h23"
+  });
   const t = createLocaleTranslator(languages, locale, fallbackLocale) as (
     key: string,
     values?: Record<string, string | number | Date>
@@ -340,25 +366,27 @@ export function createFormatForLocale<const TLanguages extends readonly Language
 
     if (typeof value === "string" && preset === "timestring") {
       const [hours = "0", minutes = "0", seconds = "0"] = value.split(":");
-      const timeDate = new SvelteDate();
-      timeDate.setHours(Number(hours), Number(minutes), Number(seconds), 0);
-
+      // A time-only string is a wall-clock value, not an instant to convert.
+      const timeDate = new SvelteDate(Date.UTC(2000, 0, 1, Number(hours), Number(minutes), Number(seconds)));
       return formatter.dateTime(timeDate, {
-        hour: "numeric",
-        minute: "numeric"
+        timeZone: "UTC", hour: "numeric", minute: "numeric"
       });
     }
 
-    const date = toDate(value);
+    const instant = toDate(value);
 
     if (preset === "relative") {
-      return formatRelativeDate(date, t);
+      return formatRelativeDate(instant, t);
     }
+
+    const date = calendarDate(instant, calendarFormatter);
+    const nowInstant = new SvelteDate(Date.now());
+    const now = calendarDate(nowInstant, calendarFormatter);
 
     if (preset === "full") {
       return locale === "uz"
         ? formatUzDate(date, true, withTime)
-        : formatter.dateTime(date, {
+        : formatter.dateTime(instant, {
             year: "numeric",
             month: "long",
             day: "numeric",
@@ -367,28 +395,28 @@ export function createFormatForLocale<const TLanguages extends readonly Language
     }
 
     if (preset === "custom") {
-      const now = new SvelteDate();
-      const diffMinutes = differenceInMinutes(now, date);
+      if (instant > nowInstant) return formatRelativeDate(instant, t);
+      const diffMinutes = differenceInMinutes(nowInstant, instant);
 
       if (diffMinutes < 1) return t("just-now");
       if (diffMinutes < 60) return t("minutes-ago", { minutes: diffMinutes });
-      if (isToday(date)) return t("today-at", { time: formatTime(date) });
-      if (isYesterday(date)) return t("yesterday-at", { time: formatTime(date) });
+      if (isToday(date, now)) return t("today-at", { time: formatTime(date) });
+      if (isYesterday(date, now)) return t("yesterday-at", { time: formatTime(date) });
 
-      if (isThisWeek(date, { weekStartsOn: 1 })) {
+      if (isThisWeek(date, now, { weekStartsOn: 1 })) {
         return locale === "uz"
           ? `${UZ_WEEKDAYS[date.getDay()]}, ${formatTime(date)} da`
-          : formatter.dateTime(date, {
+          : formatter.dateTime(instant, {
               weekday: "long",
               hour: "numeric",
               minute: "numeric"
             });
       }
 
-      if (isThisYear(date)) {
+      if (isThisYear(date, now)) {
         return locale === "uz"
           ? formatUzDate(date, false, withTime, " da")
-          : formatter.dateTime(date, {
+          : formatter.dateTime(instant, {
               month: "long",
               day: "numeric",
               ...(withTime ? { hour: "numeric", minute: "numeric" } : {})
@@ -397,7 +425,7 @@ export function createFormatForLocale<const TLanguages extends readonly Language
 
       return locale === "uz"
         ? formatUzDate(date, true, withTime, " da")
-        : formatter.dateTime(date, {
+        : formatter.dateTime(instant, {
             year: "numeric",
             month: "long",
             day: "numeric",
@@ -406,31 +434,31 @@ export function createFormatForLocale<const TLanguages extends readonly Language
     }
 
     if (preset === "month") {
-      if (isThisYear(date)) {
+      if (isThisYear(date, now)) {
         return locale === "uz"
           ? formatUzMonth(date, false)
-          : formatter.dateTime(date, { month: "long" });
+          : formatter.dateTime(instant, { month: "long" });
       }
 
       return locale === "uz"
         ? formatUzMonth(date, true)
-        : formatter.dateTime(date, { month: "long", year: "numeric" });
+        : formatter.dateTime(instant, { month: "long", year: "numeric" });
     }
 
     if (preset === "birthday") {
       return locale === "uz"
         ? `${date.getFullYear()}-yil, ${date.getDate()}-${UZ_MONTHS[date.getMonth()]}`
-        : formatter.dateTime(date, {
+        : formatter.dateTime(instant, {
             year: "numeric",
             month: "long",
             day: "numeric"
           });
     }
 
-    if (isThisYear(date)) {
+    if (isThisYear(date, now)) {
       return locale === "uz"
         ? formatUzDate(date, false, withTime, " da")
-        : formatter.dateTime(date, {
+        : formatter.dateTime(instant, {
             month: "long",
             day: "numeric",
             ...(withTime ? { hour: "numeric", minute: "numeric" } : {})
@@ -439,7 +467,7 @@ export function createFormatForLocale<const TLanguages extends readonly Language
 
     return locale === "uz"
       ? formatUzDate(date, true, withTime, " da")
-      : formatter.dateTime(date, {
+      : formatter.dateTime(instant, {
           year: "numeric",
           month: "long",
           day: "numeric",

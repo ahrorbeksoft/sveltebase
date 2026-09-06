@@ -14,18 +14,6 @@
       "@sveltebase/i18n": [
         "packages/i18n/src/index.ts"
       ],
-      "@sveltebase/sync": [
-        "packages/sync/src/index.ts"
-      ],
-      "@sveltebase/sync/server": [
-        "packages/sync/src/server/index.ts"
-      ],
-      "@sveltebase/sync/sveltekit": [
-        "packages/sync/src/sveltekit/index.ts"
-      ],
-      "@sveltebase/sync/cloudflare": [
-        "packages/sync/src/cloudflare/index.ts"
-      ],
       "@sveltebase/instant": [
         "packages/instant/src/index.ts"
       ]

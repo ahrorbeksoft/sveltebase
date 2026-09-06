@@ -1,5 +1,11 @@
+import { SerializableError } from "../errors.js";
 import { decodeCredentials } from "./google.svelte.js";
 import type { GoogleData } from "./types.js";
+
+/** A rejected Google credential, distinct from provider/network failures. */
+export class GoogleIdTokenError extends SerializableError {
+  static readonly code = "GoogleIdTokenError";
+}
 
 /**
  * Inputs for server-side Google ID-token verification.
@@ -31,29 +37,38 @@ export async function verifyIdToken(options: VerifyIdTokenOptions): Promise<Goog
   const { credential, clientId } = options;
   const parts = credential.split(".");
   if (parts.length !== 3) {
-    throw new Error("Invalid token: JWT must have 3 parts");
+    throw new GoogleIdTokenError("Invalid token: JWT must have 3 parts");
   }
 
   const [headerB64, payloadB64, signatureB64] = parts;
 
   // 1. Decode and parse Header
-  const headerStr = atob(headerB64.replace(/-/g, "+").replace(/_/g, "/"));
-  const header = JSON.parse(headerStr);
+  let header: { alg?: string; kid?: string };
+  let payload: GoogleData;
+  try {
+    header = JSON.parse(atob(headerB64.replace(/-/g, "+").replace(/_/g, "/")));
+    payload = decodeCredentials<GoogleData>(credential);
+    if (!header || !payload || typeof payload !== "object") throw new Error();
+  } catch {
+    throw new GoogleIdTokenError("Invalid token encoding");
+  }
   if (header.alg !== "RS256" || !header.kid) {
-    throw new Error("Unsupported algorithm or missing key ID (kid)");
+    throw new GoogleIdTokenError("Unsupported algorithm or missing key ID (kid)");
   }
 
   // 2. Decode Payload and validate claims
-  const payload = decodeCredentials<GoogleData>(credential);
   const now = Math.floor(Date.now() / 1000);
-  if (payload.exp < now) {
-    throw new Error("Token has expired");
+  if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) {
+    throw new GoogleIdTokenError("Invalid token expiration");
+  }
+  if (payload.exp <= now) {
+    throw new GoogleIdTokenError("Token has expired");
   }
   if (payload.iss !== "https://accounts.google.com" && payload.iss !== "accounts.google.com") {
-    throw new Error("Invalid issuer");
+    throw new GoogleIdTokenError("Invalid issuer");
   }
   if (payload.aud !== clientId) {
-    throw new Error("Invalid audience (Client ID mismatch)");
+    throw new GoogleIdTokenError("Invalid audience (Client ID mismatch)");
   }
 
   // 3. Fetch Google public JWKS keys
@@ -64,7 +79,7 @@ export async function verifyIdToken(options: VerifyIdTokenOptions): Promise<Goog
   const jwks = (await res.json()) as { keys: any[] };
   const jwk = jwks.keys.find((key: any) => key.kid === header.kid);
   if (!jwk) {
-    throw new Error("Matching public key not found in Google certs");
+    throw new GoogleIdTokenError("Matching public key not found in Google certs");
   }
 
   // 4. Import public key into Web Crypto format
@@ -85,7 +100,9 @@ export async function verifyIdToken(options: VerifyIdTokenOptions): Promise<Goog
   const sigBase64 = signatureB64.replace(/-/g, "+").replace(/_/g, "/");
   const pad = sigBase64.length % 4;
   const paddedSig = pad ? sigBase64 + "=".repeat(4 - pad) : sigBase64;
-  const sigStr = atob(paddedSig);
+  let sigStr: string;
+  try { sigStr = atob(paddedSig); }
+  catch { throw new GoogleIdTokenError("Invalid signature encoding"); }
   const sigBytes = new Uint8Array(sigStr.length);
   for (let i = 0; i < sigStr.length; i++) {
     sigBytes[i] = sigStr.charCodeAt(i);
@@ -103,7 +120,7 @@ export async function verifyIdToken(options: VerifyIdTokenOptions): Promise<Goog
   );
 
   if (!isValid) {
-    throw new Error("Invalid signature");
+    throw new GoogleIdTokenError("Invalid signature");
   }
 
   return payload;

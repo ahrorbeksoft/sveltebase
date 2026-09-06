@@ -1,4 +1,5 @@
 import {
+  error,
   isHttpError,
   isRedirect,
   json,
@@ -87,7 +88,7 @@ export type CreateAuthRoutesOptions<
   ) => Promise<User | null | undefined> | User | null | undefined;
   /**
    * Optional claims update for `POST /claims`.
-   * When omitted, the route applies the body as claims (full replace).
+   * Required to enable the route. Validate and authorize all requested claims.
    */
   setClaims?: (
     claims: Claims,
@@ -124,7 +125,7 @@ async function parseJsonBody<T>(event: RequestEvent): Promise<T> {
   try {
     return (await event.request.json()) as T;
   } catch {
-    return {} as T;
+    error(400, "Invalid JSON body");
   }
 }
 
@@ -233,6 +234,9 @@ export function createAuthRoutes<
     }
 
     if (route === "claims") {
+      if (!options.setClaims) {
+        return new Response("Claims route is not configured", { status: 404 });
+      }
       const current = await options.auth.getSession(event.cookies);
       if (!current) {
         options.auth.logout(event.cookies);
@@ -240,9 +244,7 @@ export function createAuthRoutes<
       }
 
       const body = await parseJsonBody<Claims>(event);
-      const nextClaims = options.setClaims
-        ? await options.setClaims(body, event, current)
-        : body;
+      const nextClaims = await options.setClaims(body, event, current);
 
       const session = await options.auth.setClaims(event.cookies, nextClaims);
       if (!session) {
@@ -257,8 +259,8 @@ export function createAuthRoutes<
       }
 
       const body = await parseJsonBody<{ credential?: string } | string>(event);
-      const credential = typeof body === "string" ? body : body.credential;
-      if (!credential) {
+      const credential = typeof body === "string" ? body : body?.credential;
+      if (typeof credential !== "string" || !credential) {
         return new Response("Missing Google credential", { status: 400 });
       }
 

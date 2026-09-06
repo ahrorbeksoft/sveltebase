@@ -76,7 +76,7 @@ async function toastError(message: string, description?: string) {
 export function createAsync<T extends (...args: any[]) => Promise<TryCatchReturn> | Promise<void>>(
   asyncFn: T
 ) {
-  const loadingStates = $state(new SvelteMap<string, boolean>());
+  const loadingStates = new SvelteMap<string, number>();
   let error = $state<Error | null>(null);
 
   /**
@@ -84,7 +84,7 @@ export function createAsync<T extends (...args: any[]) => Promise<TryCatchReturn
    */
   async function execute(id: string, args: Parameters<T>) {
     try {
-      loadingStates.set(id, true);
+      loadingStates.set(id, (loadingStates.get(id) ?? 0) + 1);
       error = null;
 
       const response = await asyncFn(...args);
@@ -109,7 +109,9 @@ export function createAsync<T extends (...args: any[]) => Promise<TryCatchReturn
 
       throw e;
     } finally {
-      loadingStates.set(id, false);
+      const remaining = (loadingStates.get(id) ?? 1) - 1;
+      if (remaining > 0) loadingStates.set(id, remaining);
+      else loadingStates.delete(id);
     }
   }
 
@@ -134,7 +136,7 @@ export function createAsync<T extends (...args: any[]) => Promise<TryCatchReturn
      * Pass a key for specific actions, or call without args for global actions.
      */
     isLoading(key?: string) {
-      return loadingStates.get(key ?? GLOBAL_KEY) ?? false;
+      return (loadingStates.get(key || GLOBAL_KEY) ?? 0) > 0;
     },
     get error() {
       return error;

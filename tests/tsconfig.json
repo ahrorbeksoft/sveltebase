@@ -1,0 +1,19 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": [
+      "node",
+      "svelte",
+      "vitest/globals",
+      "google.accounts"
+    ]
+  },
+  "include": [
+    "../packages/utils/tests/**/*.ts",
+    "../packages/state/tests/**/*.ts",
+    "../packages/i18n/tests/**/*.ts",
+    "./*.ts",
+    "../vitest.config.ts",
+    "../packages/auth/tests/**/*.ts"
+  ]
+}

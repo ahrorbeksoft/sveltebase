@@ -6,7 +6,9 @@
     "access": "public"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills",
+    "!skills/_artifacts"
   ],
   "svelte": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -29,10 +31,6 @@
       "types": "./dist/sveltekit/index.d.ts",
       "default": "./dist/sveltekit/index.js"
     },
-    "./sync": {
-      "types": "./dist/sync/index.d.ts",
-      "default": "./dist/sync/index.js"
-    },
     "./google": {
       "types": "./dist/google/index.d.ts",
       "svelte": "./dist/google/index.js",
@@ -41,15 +39,24 @@
   },
   "peerDependencies": {
     "svelte": "^5.0.0",
-    "@sveltejs/kit": "^2.0.0",
-    "@sveltebase/sync": "1.7.11"
+    "@sveltejs/kit": "^2.0.0"
   },
   "devDependencies": {
-    "@types/google.accounts": "^0.0.14"
+    "@types/google.accounts": "^0.0.14",
+    "@tanstack/intent": "^0.4.0"
   },
   "scripts": {
     "build": "svelte-package --input ./src --output ./dist --tsconfig ./tsconfig.package.json",
     "check": "tsc --project tsconfig.json --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepack": "node ../../scripts/sync-skills.mjs --check && intent validate skills --check"
+  },
+  "keywords": [
+    "tanstack-intent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahrorbeksoft/sveltebase.git",
+    "directory": "packages/auth"
   }
 }

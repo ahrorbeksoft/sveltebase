@@ -94,7 +94,7 @@ export const Cookies = {
 
     let cookieString = `${encodeURIComponent(name)}=${encodeURIComponent(value)}`;
 
-    if (settings.expires) {
+    if (settings.expires !== undefined) {
       const maxAge = settings.expires * 24 * 60 * 60;
       cookieString += `; max-age=${maxAge}`;
     }
@@ -134,11 +134,17 @@ export const Cookies = {
       return null;
     }
 
-    const match = document.cookie.match(
-      new RegExp("(^| )" + encodeURIComponent(name) + "=([^;]+)")
-    );
+    const prefix = `${encodeURIComponent(name)}=`;
+    const cookie = document.cookie.split(";").map((part) => part.trim())
+      .find((part) => part.startsWith(prefix));
 
-    return match ? decodeURIComponent(match[2]) : null;
+    if (cookie === undefined) return null;
+
+    try {
+      return decodeURIComponent(cookie.slice(prefix.length));
+    } catch {
+      return null;
+    }
   },
 
   /**

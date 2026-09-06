@@ -22,15 +22,19 @@
 
   // Load the Google script on the client side
   $effect(() => {
+    let active = true;
     loadGoogleScript()
       .then(() => {
+        if (!active) return;
         state.isLoaded = true;
         onScriptLoadSuccess?.();
       })
       .catch((err) => {
+        if (!active) return;
         state.error = err;
         onScriptLoadError?.(err);
       });
+    return () => { active = false; };
   });
 </script>
 

@@ -1,10 +1,23 @@
-import {
-  SerializableError,
-  type SerializableErrorConstructor,
-} from "@sveltebase/sync";
+export class SerializableError extends Error {
+  static readonly code: string = "SerializableError";
+  public readonly code: string;
 
-export { SerializableError } from "@sveltebase/sync";
-export type { SerializableErrorConstructor } from "@sveltebase/sync";
+  constructor(message: string, code?: string) {
+    super(message);
+    this.code = code ?? (new.target as typeof SerializableError).code;
+    this.name = this.code;
+  }
+}
+
+/**
+ * Constructor contract used to restore a known error class in the client.
+ */
+export type SerializableErrorConstructor<
+  TError extends SerializableError = SerializableError,
+> = {
+  new (message: string): TError;
+  readonly code: string;
+};
 
 export type AuthErrorPayload = {
   code: string;

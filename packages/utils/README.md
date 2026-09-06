@@ -31,6 +31,8 @@ Cookies.get("theme");  // "dark" | null
 Cookies.remove("theme");
 ```
 
+Malformed encoded cookie values return `null`; empty cookie values return `""`. `expires: 0` expires the cookie immediately.
+
 Defaults when options are omitted: `path: "/"`, `sameSite: "Lax"`, and `secure` when the page is HTTPS. `sameSite: "None"` always sets `secure`.
 
 `remove` accepts optional `path` and `domain` — use the same ones you used when setting the cookie.
@@ -76,6 +78,8 @@ await save.runWithKey(rowId, "New name");
 save.isLoading(rowId); // only that row
 save.isLoading();      // the shared “global” key
 ```
+
+Overlapping calls using the same key keep loading active until every call finishes. An empty key uses the shared global key.
 
 ### One-off try/catch with toasts
 
@@ -154,3 +158,17 @@ pluralize(3, { other: (n) => `${n} matches found` });
 ## License
 
 ISC
+
+## Agent skills (TanStack Intent)
+
+This package ships its own skill and a shared Sveltebase overview. From your app:
+
+```sh
+npx @tanstack/intent@latest install
+npx @tanstack/intent@latest list
+npx @tanstack/intent@latest load '@sveltebase/utils#sveltebase'
+npx @tanstack/intent@latest load '@sveltebase/utils#utils'
+```
+
+Select this package during Intent's first-time permission review. The skills come
+from your installed package version; older releases may not include them.

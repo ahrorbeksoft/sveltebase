@@ -10,7 +10,7 @@
   ],
   "scripts": {
     "build": "bun run ./scripts/run-workspace-script.mjs build",
-    "check": "bun run build && bun run ./scripts/run-workspace-script.mjs check",
+    "check": "bun run skills:check && bun run build && bun run ./scripts/run-workspace-script.mjs check",
     "lint": "bun run build && bun run ./scripts/run-workspace-script.mjs lint",
     "clean": "bun run ./scripts/run-workspace-script.mjs clean",
     "dev:web": "bun run --filter @sveltebase/web dev",
@@ -18,22 +18,32 @@
     "check:web": "bun run --filter @sveltebase/web check",
     "release:version": "bun run ./scripts/version.mjs",
     "release:publish": "bun run build && bun run ./scripts/publish.mjs",
-    "release": "bun run ./scripts/publish-all.mjs"
+    "release": "bun run ./scripts/publish-all.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:types": "tsc --project tests/tsconfig.json --noEmit && tsc --project tests/registered/tsconfig.json --noEmit",
+    "skills:sync": "node scripts/sync-skills.mjs",
+    "skills:check": "node scripts/check-skills.mjs",
+    "skills:list": "intent list"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260617.1",
-    "@sveltejs/package": "^2.5.7",
-    "@sveltejs/vite-plugin-svelte": "^7.1.2",
-    "@types/node": "^25.9.3",
-    "@types/ws": "^8.18.1",
-    "publint": "^0.3.18",
-    "svelte": "^5.55.9",
-    "svelte-check": "^4.4.8",
+    "@cloudflare/workers-types": "^5.20260905.1",
+    "@sveltejs/package": "^2.5.8",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "@tanstack/intent": "^0.4.0",
+    "@types/node": "^26.4.1",
+    "@vitest/coverage-v8": "^5.0.0",
+    "jsdom": "^30.0.1",
+    "publint": "^0.3.24",
+    "svelte": "^5.57.0",
+    "svelte-check": "^4.7.6",
     "tsup": "^8.5.1",
-    "typescript": "^6.0.2",
-    "vite": "^8.0.8",
-    "wrangler": "^4.101.0",
-    "zod": "^4.4.3"
+    "typescript": "^6.0.3",
+    "vite": "^8.2.2",
+    "vitest": "^5.0.0",
+    "wrangler": "^4.129.0",
+    "zod": "^4.5.4"
   },
   "description": "A Bun workspace for Svelte packages.",
   "main": "index.js",
@@ -41,11 +51,21 @@
     "type": "git",
     "url": "git+https://github.com/ahrorbeksoft/sveltebase.git"
   },
-  "keywords": [],
+  "keywords": [
+    "tanstack-intent"
+  ],
   "author": "",
   "license": "ISC",
   "bugs": {
     "url": "https://github.com/ahrorbeksoft/sveltebase/issues"
   },
-  "homepage": "https://github.com/ahrorbeksoft/sveltebase#readme"
+  "homepage": "https://github.com/ahrorbeksoft/sveltebase#readme",
+  "intent": {
+    "skills": [
+      "workspace:@sveltebase/auth",
+      "workspace:@sveltebase/state",
+      "workspace:@sveltebase/i18n",
+      "workspace:@sveltebase/utils"
+    ]
+  }
 }

@@ -11,7 +11,6 @@ import {
 
 const DEFAULT_LOCALE_STORAGE_KEY = "locale";
 
-type Cookie = { name: string; value: string };
 type MaybeGetter<T> = T | (() => T);
 type LocaleSchema<TLocale extends string> = StandardSchemaV1<unknown, TLocale>;
 type LocaleState<TLocale extends string> = PersistentState<LocaleSchema<TLocale>>;
@@ -107,13 +106,13 @@ export interface I18nInstance<TLanguages extends readonly LanguageDefinition[]> 
    */
   format: Format;
   /**
-   * Initializes locale state from cookies and installs this instance in Svelte context.
+   * Initializes locale state from its serialized cookie value and installs Svelte context.
    *
    * Call from a root layout/component before child components call
    * `getTranslations` or `getFormat`. Prefer `i18n.t` / `i18n.format` when you
    * already hold the instance (e.g. module scripts).
    */
-  init(cookies?: MaybeGetter<Cookie[] | undefined>): void;
+  init(localeCookie?: MaybeGetter<string | null | undefined>): void;
 }
 
 type I18nInternal = {
@@ -318,7 +317,7 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
     },
 
     set locale(nextLocale: LocaleCode<TLanguages>) {
-      localeState.current = nextLocale;
+      localeState.current = localeCodes.includes(nextLocale) ? nextLocale : fallbackLocale;
     },
 
     get currentLanguage() {
@@ -332,15 +331,8 @@ export function createI18n<const TLanguages extends readonly LanguageDefinition[
     t,
     format,
 
-    init(cookies?: MaybeGetter<Cookie[] | undefined>) {
-      const resolvedCookies =
-        typeof cookies === "function"
-          ? (cookies as () => Cookie[] | undefined)()
-          : cookies;
-
-      if (resolvedCookies) {
-        localeState.init(resolvedCookies);
-      }
+    init(localeCookie?: MaybeGetter<string | null | undefined>) {
+      localeState.init(localeCookie);
 
       const { set } = ensureContext();
       set(i18n as I18nInstance<readonly LanguageDefinition[]>);

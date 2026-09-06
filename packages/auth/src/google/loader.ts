@@ -27,7 +27,8 @@ export function loadGoogleScript(): Promise<void> {
     script.onload = () => {
       resolve();
     };
-    script.onerror = (err) => {
+    script.onerror = () => {
+      script.remove();
       scriptLoadingPromise = null;
       reject(new Error('Failed to load Google Identity Services script'));
     };
