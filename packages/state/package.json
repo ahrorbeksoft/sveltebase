@@ -1,6 +1,6 @@
 {
   "name": "@sveltebase/state",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -20,7 +20,7 @@
     }
   },
   "dependencies": {
-    "@sveltebase/utils": "4.0.0"
+    "@sveltebase/utils": "4.0.1"
   },
   "peerDependencies": {
     "svelte": "^5.0.0"

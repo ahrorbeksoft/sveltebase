@@ -1,6 +1,6 @@
 {
   "name": "@sveltebase/auth",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -42,7 +42,7 @@
     "@sveltejs/kit": "^2.0.0"
   },
   "devDependencies": {
-    "@types/google.accounts": "^0.0.14",
+    "@types/google.accounts": "^0.0.18",
     "@tanstack/intent": "^0.4.0"
   },
   "scripts": {
